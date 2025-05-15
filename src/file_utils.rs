@@ -19,7 +19,7 @@ use crate::tui_app::ScanMessage;
 use std::sync::mpsc::Sender as StdMpscSender;
 
 // Represents information about a single file, including its hash if calculated.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct FileInfo {
     pub path: PathBuf,
     pub size: u64,
@@ -263,9 +263,14 @@ pub fn find_duplicate_files_with_progress(
     for i in 0..total_groups_to_hash {
         match local_rx.recv() { // This will block until a message is received
             Ok(Ok(hashed_group)) => {
-                for (hash, file_infos) in hashed_group {
-                    if file_infos.len() > 1 {
-                        duplicate_sets.push(DuplicateSet { files: file_infos, size: file_infos[0].size, hash });
+                for (hash, file_infos_vec) in hashed_group {
+                    if file_infos_vec.len() > 1 {
+                        let first_file_size = file_infos_vec[0].size; // Get size before move
+                        duplicate_sets.push(DuplicateSet { 
+                            files: file_infos_vec, // file_infos_vec is moved here
+                            size: first_file_size, 
+                            hash 
+                        });
                     }
                 }
             }
@@ -396,9 +401,14 @@ pub fn find_duplicate_files(
     for i in 0..total_groups_to_hash {
         match local_rx.recv() {
             Ok(Ok(hashed_group)) => {
-                for (hash, file_infos) in hashed_group {
-                    if file_infos.len() > 1 {
-                        duplicate_sets.push(DuplicateSet { files: file_infos, size: file_infos[0].size, hash });
+                for (hash, file_infos_vec) in hashed_group {
+                    if file_infos_vec.len() > 1 {
+                        let first_file_size = file_infos_vec[0].size; // Get size before move
+                        duplicate_sets.push(DuplicateSet { 
+                            files: file_infos_vec, // file_infos_vec is moved here
+                            size: first_file_size, 
+                            hash 
+                        });
                     }
                 }
             }

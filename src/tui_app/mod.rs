@@ -389,35 +389,45 @@ impl App {
     }
 
     fn set_selected_file_as_kept(&mut self) {
-        if let Some(selected_set) = self.current_selected_set() {
-            if let Some(file_to_keep) = selected_set.files.get(self.state.selected_file_index_in_set).cloned() {
+        let mut new_status_message = None;
+        if let Some(selected_set_path) = self.current_selected_set().map(|s| s.files[self.state.selected_file_index_in_set].path.clone()) {
+            // We need to operate on a clone or indices to avoid prolonged borrow issues
+            let set_index = self.state.selected_set_index;
+            let file_index_in_set = self.state.selected_file_index_in_set;
+
+            if let Some(file_to_keep) = self.state.duplicate_sets.get(set_index)
+                                        .and_then(|s| s.files.get(file_index_in_set).cloned()) {
+                
                 log::info!("User designated {:?} as to be KEPT.", file_to_keep.path);
-                self.state.status_message = Some(format!("Marked {} to be KEPT.", file_to_keep.path.file_name().unwrap_or_default().to_string_lossy()));
+                new_status_message = Some(format!("Marked {} to be KEPT.", file_to_keep.path.file_name().unwrap_or_default().to_string_lossy()));
 
                 // Set selected file to Keep
-                self.state.jobs.retain(|job| job.file_info.path != file_to_keep.path); // Remove other jobs for this file
+                self.state.jobs.retain(|job| job.file_info.path != file_to_keep.path); 
                 self.state.jobs.push(Job { action: ActionType::Keep, file_info: file_to_keep.clone() });
 
-                // Set other files in the same set to Delete (unless they are already Ignore)
-                for file_in_set in &selected_set.files {
+                // Set other files in the same set to Delete (unless they are already Ignore or the kept one)
+                // Need to iterate carefully to avoid borrow issues if modifying jobs list for current set.
+                let current_set_files_clone = self.state.duplicate_sets.get(set_index).map_or(Vec::new(), |s| s.files.clone());
+
+                for file_in_set in current_set_files_clone {
                     if file_in_set.path != file_to_keep.path {
-                        // Check if already ignored
                         let is_ignored = self.state.jobs.iter().any(|job| 
                             job.file_info.path == file_in_set.path && job.action == ActionType::Ignore
                         );
                         if !is_ignored {
-                            self.state.jobs.retain(|job| job.file_info.path != file_in_set.path); // Remove other jobs
+                            self.state.jobs.retain(|job| job.file_info.path != file_in_set.path); 
                             self.state.jobs.push(Job { action: ActionType::Delete, file_info: file_in_set.clone() });
                             log::debug!("Auto-marking {:?} for DELETE as another file in set is kept.", file_in_set.path);
                         }
                     }
                 }
             } else {
-                 self.state.status_message = Some("No file selected to keep.".to_string());
+                 new_status_message = Some("No file selected to keep.".to_string());
             }
         } else {
-            self.state.status_message = Some("No duplicate set selected.".to_string());
+            new_status_message = Some("No duplicate set selected or file missing.".to_string());
         }
+        self.state.status_message = new_status_message; // Assign status message at the end
     }
     
     fn validate_selection_indices(&mut self) {
@@ -741,7 +751,7 @@ fn ui(frame: &mut Frame, app: &mut App) {
                     if let Some(job) = app.state.jobs.iter().find(|j| j.file_info.path == file_info.path) {
                         match job.action {
                             ActionType::Keep => { style = style.fg(Color::Green).add_modifier(Modifier::BOLD); prefix = "[K]"; }
-                            ActionType::Delete => { style = style.fg(Color::Red).add_modifier(Modifier::STRIKETHROUGH); prefix = "[D]"; }
+                            ActionType::Delete => { style = style.fg(Color::Red).add_modifier(Modifier::CROSSED_OUT); prefix = "[D]"; }
                             ActionType::Copy(_) => { style = style.fg(Color::Cyan); prefix = "[C]"; }
                             ActionType::Move(_) => { style = style.fg(Color::Magenta); prefix = "[M]"; }
                             ActionType::Ignore => { style = style.fg(Color::DarkGray); prefix = "[I]"; }
@@ -789,7 +799,7 @@ fn ui(frame: &mut Frame, app: &mut App) {
         }).collect();
         let jobs_list_widget = List::new(job_items)
             .block(jobs_block)
-            .highlight_style(Style::default().add_modifier(Modifier::BOLD).bg(Color::Purple))
+            .highlight_style(Style::default().add_modifier(Modifier::BOLD).bg(Color::Magenta))
             .highlight_symbol(">> ");
         let mut jobs_list_state = ListState::default();
         if !app.state.jobs.is_empty() {
