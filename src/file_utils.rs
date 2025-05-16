@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use glob::{Pattern, PatternError};
 use num_cpus;
 use rayon::prelude::*;
@@ -1849,15 +1849,63 @@ pub fn handle_directory(cli: &crate::Cli, dir_path: &Path) -> Result<Vec<FileInf
     if is_remote_path(dir_path) {
         #[cfg(feature = "ssh")]
         {
-            return handle_remote_directory(cli, dir_path);
+            log::info!("Attempting to access remote directory: {}", dir_path.display());
+            
+            // First verify the path format is correct
+            let path_str = dir_path.to_str()
+                .ok_or_else(|| anyhow::anyhow!(
+                    "Invalid characters in remote path: {}. Path must be UTF-8 encoded.",
+                    dir_path.display()
+                ))?;
+            
+            if !path_str.starts_with("ssh:") {
+                return Err(anyhow::anyhow!(
+                    "Invalid remote path format: {}. Remote paths must start with 'ssh:' (example: ssh:hostname:/path)",
+                    path_str
+                ));
+            }
+            
+            // Parse the remote location
+            let remote_location = RemoteLocation::parse(path_str)
+                .context(format!("Failed to parse remote path: {}. Format should be ssh:host:/path", path_str))?;
+            
+            // Check if the directory exists
+            match remote_location.check_directory_exists() {
+                Ok(true) => {
+                    // Directory exists, proceed with scanning
+                    handle_remote_directory(cli, dir_path)
+                },
+                Ok(false) => {
+                    Err(anyhow::anyhow!(
+                        "Remote directory does not exist: {}. Please verify the path on host '{}'.",
+                        remote_location.path.display(),
+                        remote_location.host
+                    ))
+                },
+                Err(e) => {
+                    Err(anyhow::anyhow!(
+                        "Failed to check remote directory: {}. Error: {}",
+                        dir_path.display(),
+                        e
+                    ))
+                }
+            }
         }
         
         #[cfg(not(feature = "ssh"))]
         {
-            return Err(anyhow::anyhow!("SSH support is not enabled in this build"));
+            return Err(anyhow::anyhow!(
+                "SSH support is not enabled in this build. Please rebuild with --features ssh enabled."
+            ));
         }
     } else {
         // Local directory
+        if !dir_path.exists() {
+            return Err(anyhow::anyhow!(
+                "Local directory does not exist: {}. Please verify the path is correct.",
+                dir_path.display()
+            ));
+        }
         return scan_directory(cli, dir_path);
     }
 }
@@ -1867,22 +1915,47 @@ pub fn handle_directory(cli: &crate::Cli, dir_path: &Path) -> Result<Vec<FileInf
 fn handle_remote_directory(cli: &crate::Cli, dir_path: &Path) -> Result<Vec<FileInfo>> {
     use anyhow::Context;
     
-    log::info!("Handling remote directory: {:?}", dir_path);
-    
     // Convert Path to string for parsing
     let path_str = dir_path.to_str()
-        .ok_or_else(|| anyhow::anyhow!("Invalid UTF-8 in remote path"))?;
+        .ok_or_else(|| anyhow::anyhow!("Invalid UTF-8 in remote path: {}", dir_path.display()))?;
     
     // Parse the remote location
-    let remote_location = RemoteLocation::parse(path_str)?;
+    let remote_location = RemoteLocation::parse(path_str)
+        .with_context(|| format!("Failed to parse remote path: {}. Format should be ssh:host:/path", path_str))?;
     
     // Apply any CLI SSH/Rsync options to the remote location
     let mut remote = remote_location.clone();
+    
+    // Use system SSH configuration by default
+    remote.ssh_options.push("-F".to_string());
+    remote.ssh_options.push(shellexpand::tilde("~/.ssh/config").to_string());
+    
+    // Add any additional CLI SSH options
     if !cli.ssh_options.is_empty() {
         remote.ssh_options.extend(cli.ssh_options.clone());
     }
     if !cli.rsync_options.is_empty() {
         remote.rsync_options.extend(cli.rsync_options.clone());
+    }
+    
+    // First, verify the remote path exists
+    let check_cmd = format!("test -d '{}' || echo 'NOTFOUND'", remote.path.display());
+    match remote.run_command(&check_cmd) {
+        Ok(output) => {
+            if output.trim() == "NOTFOUND" {
+                return Err(anyhow::anyhow!(
+                    "Remote directory not found: {}. Please verify the path and SSH access.",
+                    remote.path.display()
+                ));
+            }
+        }
+        Err(e) => {
+            return Err(anyhow::anyhow!(
+                "Failed to access remote host '{}'. Error: {}. Please verify your SSH configuration.",
+                remote.host,
+                e
+            ));
+        }
     }
     
     // Check if dedups is installed on the remote
@@ -1941,9 +2014,29 @@ fn handle_remote_directory(cli: &crate::Cli, dir_path: &Path) -> Result<Vec<File
             }
         }
         
+        // Check if we're in media mode and warn appropriately
+        if cli.media_mode {
+            if !dedups_installed {
+                return Err(anyhow::anyhow!(
+                    "Media mode requires dedups to be installed on the remote host '{}'. \
+                    Please install dedups on the remote system or use --allow-remote-install.",
+                    remote.host
+                ));
+            } else if !cli.use_remote_dedups {
+                return Err(anyhow::anyhow!(
+                    "Media mode requires remote dedups to be enabled. \
+                    Please enable with --use-remote-dedups or update your .deduprc configuration."
+                ));
+            }
+        }
+        
         // Fallback to limited remote scanning via SSH commands
-        log::warn!("Using limited remote scanning functionality");
-        log::warn!("Media deduplication is not available in SSH fallback mode");
+        log::warn!("Using limited remote scanning functionality (no remote dedups available)");
+        if !dedups_installed {
+            log::info!("To enable full functionality, install dedups on the remote host or use --allow-remote-install");
+        } else if !cli.use_remote_dedups {
+            log::info!("To enable full functionality, enable remote dedups with --use-remote-dedups");
+        }
         
         // Perform basic file listing with remote commands
         let command = format!("find {} -type f -not -path '*/\\.*' | sort", remote.path.display());

@@ -8,7 +8,7 @@ use std::path::Path;
 use std::str::FromStr;
 
 use dedups::config::DedupConfig;
-use dedups::file_utils;
+use dedups::file_utils::{self, is_remote_path};
 use dedups::tui_app;
 use dedups::Cli;
 
@@ -98,18 +98,20 @@ fn main() -> Result<()> {
         }
     }
 
-    // Check if directories exist
+    // Check if directories exist (only for local paths)
     for dir in &cli.directories {
-        if !dir.exists() {
-            log::error!("Target directory {:?} does not exist.", dir);
-            return Err(anyhow::anyhow!(
-                "Target directory does not exist: {:?}",
-                dir
-            ));
-        }
-        if !dir.is_dir() {
-            log::error!("Target path {:?} is not a directory.", dir);
-            return Err(anyhow::anyhow!("Target path is not a directory: {:?}", dir));
+        if !is_remote_path(dir) {
+            if !dir.exists() {
+                log::error!("Local directory {:?} does not exist.", dir);
+                return Err(anyhow::anyhow!(
+                    "Local directory does not exist: {:?}",
+                    dir
+                ));
+            }
+            if !dir.is_dir() {
+                log::error!("Local path {:?} is not a directory.", dir);
+                return Err(anyhow::anyhow!("Local path is not a directory: {:?}", dir));
+            }
         }
     }
 

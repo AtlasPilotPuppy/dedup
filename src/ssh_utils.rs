@@ -167,140 +167,160 @@ impl RemoteLocation {
         cmd
     }
 
-    /// Check if dedups is installed on the remote system
-    pub async fn check_dedups_installed(&self) -> Result<bool> {
-        let output = self.run_command("which dedups || echo 'not found'")?;
-        Ok(!output.contains("not found"))
-    }
-
     /// Run a command on the remote system
     pub fn run_command(&self, command: &str) -> Result<String> {
-        // Connect to the remote host
-        let tcp = TcpStream::connect(format!(
-            "{}:{}",
-            self.host,
-            self.port.unwrap_or(22)
-        ))
-        .context("Failed to connect to remote host")?;
+        // Build SSH command with proper options
+        let mut ssh_cmd = vec!["ssh".to_string()];
         
-        let mut sess = Session::new()?;
-        sess.set_tcp_stream(tcp);
-        sess.handshake()?;
-        
-        // Try to authenticate with SSH agent first
-        match sess.userauth_agent(self.user.as_deref().unwrap_or("")) {
-            Ok(_) => (),
-            Err(_) => {
-                // Fallback to pubkey authentication
-                let mut tried_keys = false;
-                
-                // Try with default key locations
-                for key_file in get_default_key_files() {
-                    if key_file.exists() {
-                        if let Ok(_) = sess.userauth_pubkey_file(
-                            self.user.as_deref().unwrap_or(""),
-                            None,
-                            &key_file,
-                            None,
-                        ) {
-                            tried_keys = true;
-                            break;
-                        }
-                    }
-                }
-                
-                // If no key authentication worked, try password (will prompt user)
-                if !tried_keys {
-                    // For now just return an error, we'll add password auth later
-                    return Err(anyhow::anyhow!("Authentication failed"));
-                }
-            }
+        // Add port if specified
+        if let Some(port) = self.port {
+            ssh_cmd.extend(vec!["-p".to_string(), port.to_string()]);
         }
+        
+        // Always use system SSH config by default
+        ssh_cmd.extend(vec!["-F".to_string(), shellexpand::tilde("~/.ssh/config").into_owned()]);
+        
+        // Add any custom SSH options
+        ssh_cmd.extend(self.ssh_options.clone());
+        
+        // Add host with optional user
+        let host = if let Some(user) = &self.user {
+            format!("{}@{}", user, self.host)
+        } else {
+            self.host.clone()
+        };
+        ssh_cmd.push(host);
+        
+        // Add the command
+        ssh_cmd.push(command.to_string());
+        
+        // Log the command being executed
+        log::debug!("Executing SSH command: {}", ssh_cmd.join(" "));
         
         // Execute the command
-        let mut channel = sess.channel_session()?;
-        channel.exec(command)?;
+        let output = std::process::Command::new(&ssh_cmd[0])
+            .args(&ssh_cmd[1..])
+            .output()
+            .with_context(|| format!("Failed to execute SSH command. Please verify SSH access to host '{}' is configured correctly.", self.host))?;
         
-        // Get the output
-        let mut output = String::new();
-        channel.read_to_string(&mut output)?;
-        
-        // Check exit status
-        channel.wait_close()?;
-        let exit_status = channel.exit_status()?;
-        
-        if exit_status != 0 {
-            let mut stderr = String::new();
-            channel.stderr().read_to_string(&mut stderr)?;
-            
-            if !stderr.is_empty() {
-                return Err(anyhow::anyhow!(
-                    "Command failed with status {}: {}",
-                    exit_status,
-                    stderr
-                ));
-            }
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            log::error!("SSH command failed. Stderr: {}", stderr);
+            log::error!("SSH command stdout: {}", stdout);
+            return Err(anyhow::anyhow!(
+                "SSH command failed on host '{}': {}",
+                self.host,
+                stderr
+            ));
         }
         
-        Ok(output)
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+    
+    /// Check if dedups is installed on the remote system
+    pub async fn check_dedups_installed(&self) -> Result<bool> {
+        log::info!("Checking if dedups is installed on remote host '{}'...", self.host);
+        let output = self.run_command("which dedups 2>/dev/null || echo 'not found'")?;
+        let installed = !output.contains("not found");
+        if installed {
+            let path = output.trim();
+            log::info!("Found dedups on remote host '{}' at: {}", self.host, path);
+        } else {
+            log::info!("dedups not found on remote host '{}'", self.host);
+        }
+        Ok(installed)
     }
     
     /// Install dedups on the remote system
-    pub fn install_dedups(&self) -> Result<bool> {
-        // Try the installer script first
-        let install_script = r#"
-        curl -sSL https://raw.githubusercontent.com/AtlasPilotPuppy/dedup/main/install.sh | bash
-        "#;
+    pub fn install_dedups(&self) -> Result<()> {
+        log::info!("Attempting to install dedups on remote host '{}'...", self.host);
         
-        match self.run_command(install_script) {
+        // First check if we have sudo access
+        let has_sudo = self.run_command("sudo -n true 2>/dev/null && echo 'yes' || echo 'no'")?;
+        let install_dir = if has_sudo.trim() == "yes" {
+            log::info!("Sudo access available on remote host, will install to /usr/local/bin");
+            "/usr/local/bin"
+        } else {
+            log::info!("No sudo access on remote host, will install to user's ~/.local/bin");
+            "~/.local/bin"
+        };
+        
+        // Create install directory if it doesn't exist
+        let mkdir_cmd = format!("mkdir -p {}", install_dir);
+        log::debug!("Creating installation directory: {}", install_dir);
+        self.run_command(&mkdir_cmd)?;
+        
+        // Download and install dedups
+        let install_cmd = format!(
+            "curl -sSL https://raw.githubusercontent.com/AtlasPilotPuppy/dedup/main/install.sh | {} bash -s -- --ssh",
+            if has_sudo.trim() == "yes" { "sudo" } else { "" }
+        );
+        
+        log::info!("Downloading and installing dedups on remote host...");
+        match self.run_command(&install_cmd) {
             Ok(_) => {
-                log::info!("Successfully installed dedups on remote host");
-                return Ok(true);
-            }
-            Err(e) => {
-                log::warn!("Failed to install dedups with script: {}", e);
-                
-                // Fallback to manual binary download
-                log::info!("Attempting manual installation of dedups...");
-                
-                // Detect OS and architecture
-                let os_type = self.run_command("uname -s")?;
-                let arch = self.run_command("uname -m")?;
-                
-                let binary_name = match (os_type.trim(), arch.trim()) {
-                    ("Linux", "x86_64") => "dedups-linux-x86_64",
-                    ("Darwin", "x86_64") => "dedups-macos-x86_64",
-                    ("Darwin", "arm64") => "dedups-macos-aarch64",
-                    _ => {
-                        return Err(anyhow::anyhow!(
-                            "Unsupported OS/architecture: {}/{}",
-                            os_type.trim(),
-                            arch.trim()
-                        ));
-                    }
-                };
-                
-                // Try to download the binary
-                let download_cmd = format!(
-                    r#"
-                    mkdir -p ~/.local/bin
-                    curl -L "https://github.com/AtlasPilotPuppy/dedup/releases/latest/download/{}" -o ~/.local/bin/dedups
-                    chmod +x ~/.local/bin/dedups
-                    echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
-                    "#,
-                    binary_name
-                );
-                
-                match self.run_command(&download_cmd) {
-                    Ok(_) => {
-                        log::info!("Successfully installed dedups to ~/.local/bin on remote host");
-                        Ok(true)
+                // Verify installation
+                let verify_cmd = "which dedups";
+                match self.run_command(verify_cmd) {
+                    Ok(path) => {
+                        log::info!("Successfully installed dedups on remote host '{}' at: {}", self.host, path.trim());
+                        Ok(())
                     }
                     Err(e) => {
-                        log::error!("Failed to install dedups manually: {}", e);
-                        Err(anyhow::anyhow!("Failed to install dedups on remote host"))
+                        log::error!("Installation appeared to succeed but dedups not found in PATH. Error: {}", e);
+                        Err(anyhow::anyhow!("Installation verification failed: {}", e))
                     }
                 }
+            }
+            Err(e) => {
+                log::error!("Failed to install dedups on remote host '{}': {}", self.host, e);
+                Err(anyhow::anyhow!(
+                    "Failed to install dedups on remote host '{}': {}",
+                    self.host,
+                    e
+                ))
+            }
+        }
+    }
+
+    /// Check if a remote directory exists
+    pub fn check_directory_exists(&self) -> Result<bool> {
+        log::info!("Checking if remote directory exists: {}", self.path.display());
+        
+        // First try to establish basic SSH connectivity
+        let test_cmd = "echo 'SSH connection test successful'";
+        match self.run_command(test_cmd) {
+            Ok(_) => log::info!("SSH connection test successful"),
+            Err(e) => {
+                log::error!("SSH connection test failed: {}", e);
+                return Err(anyhow::anyhow!(
+                    "Failed to establish SSH connection to host '{}'. Please verify:\n\
+                    1. The host '{}' is configured in ~/.ssh/config\n\
+                    2. You have SSH key access to the host\n\
+                    3. The host is reachable\n\
+                    Error: {}", 
+                    self.host, self.host, e
+                ));
+            }
+        }
+
+        // Then check if the directory exists
+        let check_cmd = format!("test -d '{}' && echo 'EXISTS' || echo 'NOTFOUND'", self.path.display());
+        match self.run_command(&check_cmd) {
+            Ok(output) => {
+                let exists = output.trim() == "EXISTS";
+                log::info!(
+                    "Remote directory {} {} on host '{}'",
+                    self.path.display(),
+                    if exists { "exists" } else { "does not exist" },
+                    self.host
+                );
+                Ok(exists)
+            }
+            Err(e) => {
+                log::error!("Failed to check remote directory: {}", e);
+                Err(e)
             }
         }
     }
