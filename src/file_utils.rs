@@ -331,7 +331,7 @@ pub fn find_duplicate_files_with_progress(
                         files_scanned_count % 1000 == 0
                     };
                     
-                    if (should_update || last_update_time.elapsed() >= update_interval) {
+                    if should_update || last_update_time.elapsed() >= update_interval {
                         last_update_time = std::time::Instant::now();
                         // Show progress percentage if total is known
                         if total_files > 0 {

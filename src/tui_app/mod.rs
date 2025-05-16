@@ -117,6 +117,8 @@ pub struct AppState {
     pub is_processing_jobs: bool,
     pub job_processing_message: String,
     pub job_progress: (usize, usize), // (done, total)
+    
+    pub dry_run: bool, // Indicates if actions should be performed in dry run mode
 }
 
 // Channel for messages from scan thread to TUI thread
@@ -171,6 +173,7 @@ impl App {
             is_processing_jobs: false,
             job_processing_message: String::new(),
             job_progress: (0, 0),
+            dry_run: cli_args.dry_run, // Initialize from CLI args
         };
 
         // Always perform async scan for TUI
@@ -449,6 +452,18 @@ impl App {
             KeyCode::Char('h') => {
                 self.state.input_mode = InputMode::Help;
                 self.state.status_message = Some("Displaying Help. Esc to exit.".to_string());
+            }
+            KeyCode::Char('d') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
+                // Toggle dry run mode
+                self.state.dry_run = !self.state.dry_run;
+                let status = if self.state.dry_run {
+                    "Dry run mode ENABLED - No actual changes will be made"
+                } else {
+                    "Dry run mode DISABLED - Actions will perform actual changes"
+                };
+                self.state.status_message = Some(status.to_string());
+                self.state.log_messages.push(status.to_string());
+                log::info!("{}", status);
             }
             KeyCode::Char('a') => {
                 // Toggle keep/delete for all files in all sets in all folders (global toggle)
@@ -1098,8 +1113,20 @@ impl App {
             self.state.log_messages.push("No jobs to process.".to_string());
             return Ok(());
         }
+        
+        // Set the dry_run flag based on app state
+        let dry_run_mode = self.state.dry_run;
+        if dry_run_mode {
+            self.state.log_messages.push("DRY RUN MODE: Simulating actions without making changes".to_string());
+        }
+        
         self.state.is_processing_jobs = true;
-        self.state.job_processing_message = "Processing jobs...".to_string();
+        self.state.job_processing_message = if dry_run_mode {
+            "Simulating jobs (DRY RUN)..."
+        } else {
+            "Processing jobs..."
+        }.to_string();
+        
         let total_jobs = self.state.jobs.len();
         self.state.job_progress = (0, total_jobs);
         let mut success_count = 0;
@@ -1109,14 +1136,26 @@ impl App {
             self.state.job_progress = (idx + 1, total_jobs);
             let result: Result<(), anyhow::Error> = match job.action {
                 ActionType::Delete => {
-                    match delete_files(&[job.file_info.clone()], false) {
-                        Ok((1, _logs)) => Ok(()),
-                        Ok((count, _logs)) => Err(anyhow::anyhow!("Delete action affected {} files, expected 1. Logs: {:?}", count, _logs)),
+                    match delete_files(&[job.file_info.clone()], dry_run_mode) {
+                        Ok((1, logs)) => {
+                            // Add logs from delete_files to our log messages
+                            for log in logs {
+                                self.state.log_messages.push(log);
+                            }
+                            Ok(())
+                        },
+                        Ok((count, logs)) => {
+                            // Add logs anyway even when count is unexpected
+                            for log in logs {
+                                self.state.log_messages.push(log);
+                            }
+                            Err(anyhow::anyhow!("Delete action affected {} files, expected 1.", count))
+                        },
                         Err(e) => Err(e),
                     }
                 }
                 ActionType::Move(ref target_dir) => {
-                    match move_files(&[job.file_info.clone()], target_dir, false) {
+                    match move_files(&[job.file_info.clone()], target_dir, dry_run_mode) {
                         Ok(1) => Ok(()),
                         Ok(count) => Err(anyhow::anyhow!("Move action affected {} files, expected 1.", count)),
                         Err(e) => Err(e),
@@ -1124,45 +1163,62 @@ impl App {
                 }
                 ActionType::Copy(ref target_dir) => {
                     log::debug!("Attempting to copy {:?} to {:?}", job.file_info.path, target_dir);
-                    if !target_dir.exists() {
-                        if let Err(e) = std::fs::create_dir_all(&target_dir) {
-                            log::error!("Failed to create target directory {:?} for copy: {}", target_dir, e);
-                            return Err(e.into());
+                    
+                    if dry_run_mode {
+                        self.state.log_messages.push(format!("[DRY RUN] Would copy {} to {}", 
+                            job.file_info.path.display(), target_dir.display()));
+                        Ok(())
+                    } else {
+                        if !target_dir.exists() {
+                            if let Err(e) = std::fs::create_dir_all(&target_dir) {
+                                log::error!("Failed to create target directory {:?} for copy: {}", target_dir, e);
+                                return Err(e.into());
+                            }
                         }
+                        let file_name = job.file_info.path.file_name().unwrap_or_default();
+                        let mut dest_path = target_dir.join(file_name);
+                        let mut counter = 1;
+                        while dest_path.exists() {
+                            let stem = dest_path.file_stem().unwrap_or_default().to_string_lossy();
+                            let ext = dest_path.extension().unwrap_or_default().to_string_lossy();
+                            let new_name = format!("{}_copy({}){}{}", 
+                                                stem.trim_end_matches(&format!("_copy({})", counter -1 )).trim_end_matches("_copy"),
+                                                counter, 
+                                                if ext.is_empty() { "" } else { "." }, 
+                                                ext);
+                            dest_path = target_dir.join(new_name);
+                            counter += 1;
+                        }
+                        std::fs::copy(&job.file_info.path, &dest_path)
+                            .map(|_| ()) 
+                            .map_err(|e| {
+                                log::error!("Failed to copy {:?} to {:?}: {}", job.file_info.path, dest_path, e);
+                                anyhow::Error::from(e)
+                            })
                     }
-                    let file_name = job.file_info.path.file_name().unwrap_or_default();
-                    let mut dest_path = target_dir.join(file_name);
-                    let mut counter = 1;
-                    while dest_path.exists() {
-                        let stem = dest_path.file_stem().unwrap_or_default().to_string_lossy();
-                        let ext = dest_path.extension().unwrap_or_default().to_string_lossy();
-                        let new_name = format!("{}_copy({}){}{}", 
-                                              stem.trim_end_matches(&format!("_copy({})", counter -1 )).trim_end_matches("_copy"),
-                                              counter, 
-                                              if ext.is_empty() { "" } else { "." }, 
-                                              ext);
-                        dest_path = target_dir.join(new_name);
-                        counter += 1;
-                    }
-                    std::fs::copy(&job.file_info.path, &dest_path)
-                        .map(|_| ()) 
-                        .map_err(|e| {
-                            log::error!("Failed to copy {:?} to {:?}: {}", job.file_info.path, dest_path, e);
-                            anyhow::Error::from(e)
-                        })
                 }
                 ActionType::Keep | ActionType::Ignore => Ok(()),
             };
             if result.is_ok() {
                 success_count += 1;
-                self.state.log_messages.push(format!("Success: {:?} for {}", job.action, job.file_info.path.display()));
+                if dry_run_mode {
+                    self.state.log_messages.push(format!("[DRY RUN] Success: Would perform {:?} for {}", job.action, job.file_info.path.display()));
+                } else {
+                    self.state.log_messages.push(format!("Success: {:?} for {}", job.action, job.file_info.path.display()));
+                }
             } else {
                 fail_count += 1;
                 self.state.log_messages.push(format!("Failed: {:?} for {}: {}", job.action, job.file_info.path.display(), result.err().unwrap()));
             }
         }
         self.state.is_processing_jobs = false;
-        self.state.job_processing_message = format!("Jobs processed. Success: {}, Fail: {}", success_count, fail_count);
+        
+        if dry_run_mode {
+            self.state.job_processing_message = format!("[DRY RUN] Simulated jobs. Success: {}, Fail: {}", success_count, fail_count);
+        } else {
+            self.state.job_processing_message = format!("Jobs processed. Success: {}, Fail: {}", success_count, fail_count);
+        }
+        
         self.state.status_message = Some(self.state.job_processing_message.clone());
         self.state.job_progress = (0, 0);
         self.state.selected_job_index = 0;
@@ -1332,6 +1388,52 @@ fn run_main_loop(terminal: &mut Terminal<TerminalBackend>, app: &mut App, show_t
     }
 }
 
+// Helper function to parse progress information from loading messages
+fn parse_progress_from_message(message: &str) -> (String, String, Option<f64>) {
+    // Extract stage from messages like "📁 [1/3] File Discovery: Found 196200 files..."
+    let stage = if message.contains("[0/3]") {
+        "0/3 Pre-scan".to_string()
+    } else if message.contains("[1/3]") {
+        "1/3 Discovery".to_string()
+    } else if message.contains("[2/3]") {
+        "2/3 Size Analysis".to_string()
+    } else if message.contains("[3/3]") {
+        "3/3 Hashing".to_string()
+    } else {
+        "Loading".to_string()
+    };
+    
+    // Extract file counts and percentages
+    let mut progress_text = message.to_string();
+    
+    // Try to extract file counts for a better display format
+    if let Some(count_start) = message.find("Found ") {
+        if let Some(count_end) = message[count_start..].find(" files") {
+            let file_count_str = &message[count_start + 6..count_start + count_end];
+            progress_text = format!("Found {} files", file_count_str);
+        }
+    }
+    
+    // Extract scanning path for better display
+    if message.contains("Scanning:") {
+        progress_text = message.to_string();
+    }
+    
+    // Try to extract percentage values from messages containing them
+    let percentage = if let Some(pct_start) = message.find("(") {
+        if let Some(pct_end) = message[pct_start..].find("%)") {
+            let pct_str = &message[pct_start + 1..pct_start + pct_end];
+            pct_str.parse::<f64>().ok()
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    
+    (stage, progress_text, percentage)
+}
+
 fn format_file_size(size: u64, raw_sizes: bool) -> String {
     if raw_sizes {
         format!("{} bytes", size)
@@ -1354,46 +1456,67 @@ fn ui(frame: &mut Frame, app: &mut App) {
         .split(frame.size());
 
     if app.state.is_loading && app.scan_rx.is_some() {
-        // Show loading screen with loading message in the center
+        // Show loading screen with two progress bars - one for total progress, one for stage progress
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Percentage(40),
-                Constraint::Length(3),
-                Constraint::Length(3), // Add space for progress bar
-                Constraint::Percentage(40),
+                Constraint::Percentage(20),  // Upper space
+                Constraint::Length(3),       // Title and global progress
+                Constraint::Length(1),       // Spacing
+                Constraint::Length(3),       // Stage-specific progress
+                Constraint::Percentage(20),  // Lower space
             ])
             .split(frame.size());
         
-        let loading_block = Block::default().title("Loading...").borders(Borders::ALL);
-        let text = Paragraph::new(app.state.loading_message.as_str())
-            .alignment(Alignment::Center)
-            .wrap(Wrap { trim: true });
+        // Extract progress information from loading message
+        let (stage_str, progress_text, percentage) = parse_progress_from_message(&app.state.loading_message);
         
-        let area = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(20), Constraint::Percentage(60), Constraint::Percentage(20)]).split(chunks[1])[1]; // Middle 60% of the middle chunk
-
-        frame.render_widget(Clear, area); // Clear the area for the centered text
-        frame.render_widget(text.block(loading_block), area);
+        // Calculate the total progress based on the stage
+        let (current_stage, total_stages) = parse_stage_numbers(&stage_str);
+        let total_progress = if let (Some(current), Some(total), Some(pct)) = (current_stage, total_stages, percentage) {
+            // Overall progress = (completed stages + current stage progress)
+            ((current - 1) as f64 / total as f64) + (pct / 100.0 / total as f64)
+        } else {
+            // Indeterminate if we can't extract actual values
+            let now = std::time::Instant::now();
+            let secs = now.elapsed().as_secs_f64();
+            (secs % 2.0) / 2.0 // Pulse every 2 seconds
+        };
         
-        // Always show a progress bar during loading
-        let now = std::time::Instant::now();
-        let secs = now.elapsed().as_secs_f64();
-        let pulse = (secs % 2.0) / 2.0; // Pulse every 2 seconds
+        // Top bar: Total progress
+        let total_progress_text = if let (Some(current), Some(total)) = (current_stage, total_stages) {
+            format!("Total Progress: Stage {} of {} - {:.1}% Complete", 
+                   current, total, total_progress * 100.0)
+        } else {
+            "Processing...".to_string()
+        };
         
-        let gauge = Gauge::default()
-            .block(Block::default().borders(Borders::ALL).title("Progress"))
+        let total_progress_gauge = Gauge::default()
+            .block(Block::default().borders(Borders::ALL).title("Overall Progress"))
+            .gauge_style(Style::default().fg(Color::Cyan).bg(Color::Black))
+            .label(total_progress_text)
+            .ratio(total_progress);
+        
+        frame.render_widget(total_progress_gauge, chunks[1]);
+        
+        // Stage-specific progress (bottom bar)
+        // Use extracted percentage if available, otherwise animate
+        let stage_progress_value = if let Some(pct) = percentage {
+            pct / 100.0
+        } else {
+            // Animate when no percentage available
+            let now = std::time::Instant::now();
+            let secs = now.elapsed().as_secs_f64();
+            (secs % 3.0) / 3.0 // Cycles every 3 seconds (0.0 to 1.0)
+        };
+        
+        let stage_gauge = Gauge::default()
+            .block(Block::default().borders(Borders::ALL).title(stage_str))
             .gauge_style(Style::default().fg(Color::White).bg(Color::Black))
-            .label(format!("Scanning: {}...", app.cli_config.directories[0].display()))
-            .ratio(pulse);
+            .label(progress_text)
+            .ratio(stage_progress_value);
             
-        let progress_area = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(20), Constraint::Percentage(60), Constraint::Percentage(20)])
-            .split(chunks[2])[1]; // Middle 60% of the progress bar area
-            
-        frame.render_widget(gauge, progress_area);
+        frame.render_widget(stage_gauge, chunks[3]);
     } else if app.state.input_mode == InputMode::Settings {
         // Basic placeholder for settings UI
         let chunks = Layout::default()
@@ -1490,6 +1613,7 @@ fn ui(frame: &mut Frame, app: &mut App) {
             Line::from("  Ctrl+R     : Trigger a rescan with current settings"),
             Line::from("  Ctrl+S     : Open Settings menu (Esc to close)"),
             Line::from("  Ctrl+E     : Execute all pending jobs"),
+            Line::from("  Ctrl+D     : Toggle Dry Run mode (simulates actions without making changes)"),
             Line::from(""),
             Line::from(Span::styled("Sets/Folders Panel (Left):", Style::default().add_modifier(Modifier::BOLD))),
             Line::from("  Up/k       : Select previous folder/set"),
@@ -1669,9 +1793,27 @@ fn ui(frame: &mut Frame, app: &mut App) {
         // Status Bar / Input Area
         match app.state.input_mode {
             InputMode::Normal => {
-                let status_text = app.state.status_message.as_deref().unwrap_or("q/Ctrl+C:quit | Tab:cycle | Arrows/jk:nav | a:toggle s:keep d:del c:copy i:ign | Ctrl+E:exec | Ctrl+R:rescan | Ctrl+S:settings | x:del job");
+                // Show custom status message if available, otherwise show controls
+                let mut status_text = app.state.status_message.as_deref().unwrap_or(
+                    "q/Ctrl+C:quit | Tab:cycle | Arrows/jk:nav | a:toggle s:keep d:del c:copy i:ign | Ctrl+E:exec | Ctrl+R:rescan | Ctrl+S:settings | x:del job"
+                ).to_string();
+                
+                // Add dry run indicator if enabled
+                if app.state.dry_run {
+                    status_text = format!("[DRY RUN MODE] {} (Ctrl+D: Toggle)", status_text);
+                } else {
+                    status_text = format!("{} (Ctrl+D: Dry Run)", status_text);
+                }
+                
+                let status_style = if app.state.dry_run {
+                    // Use yellow for dry run mode to make it more obvious
+                    Style::default().fg(Color::Yellow)
+                } else {
+                    Style::default().fg(Color::LightCyan)
+                };
+                
                 let status_bar = Paragraph::new(status_text)
-                    .style(Style::default().fg(Color::LightCyan))
+                    .style(status_style)
                     .alignment(Alignment::Left);
                 frame.render_widget(status_bar, chunks[3]);
             }
@@ -1704,36 +1846,88 @@ fn ui(frame: &mut Frame, app: &mut App) {
         if app.state.is_processing_jobs {
             let (done, total) = app.state.job_progress;
             let percent = if total > 0 { done as f64 / total as f64 } else { 0.0 };
-            let gauge = Gauge::default()
-                .block(Block::default().borders(Borders::ALL).title("Job Progress"))
+            
+            // Create a progress display area for job processing
+            let progress_layout = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(1), // Top bar
+                    Constraint::Length(1), // Bottom bar
+                ])
+                .split(chunks[4]);
+            
+            // Top gauge shows overall progress
+            let top_gauge = Gauge::default()
+                .block(Block::default().borders(Borders::NONE).title(""))
+                .gauge_style(Style::default().fg(Color::Cyan).bg(Color::Black))
+                .label(format!("Overall: {}/{} jobs ({:.1}%)", done, total, percent * 100.0))
+                .ratio(percent);
+            
+            // Bottom gauge shows per-job details
+            let bottom_gauge = Gauge::default()
+                .block(Block::default().borders(Borders::NONE).title(""))
                 .gauge_style(Style::default().fg(Color::Green).bg(Color::Black))
-                .label(format!("Processing jobs: {}/{}", done, total))
-                .ratio(percent);
-            frame.render_widget(gauge, chunks[4]);
+                .label(format!("Current job: {}/{} - {}", done, total, app.state.job_processing_message))
+                .ratio(if done < total { (done as f64 + 0.5) / total as f64 } else { 1.0 });
+            
+            frame.render_widget(top_gauge, progress_layout[0]);
+            frame.render_widget(bottom_gauge, progress_layout[1]);
         } else if app.state.is_loading {
-            // Try to extract a percentage from the loading_message, fallback to indeterminate
-            let (label, percent) = if let Some((done, total)) = app.state.loading_message.split_once('/') {
-                let done = done.chars().rev().take_while(|c| c.is_digit(10)).collect::<String>().chars().rev().collect::<String>().parse::<u64>().ok();
-                let total = total.chars().take_while(|c| c.is_digit(10)).collect::<String>().parse::<u64>().ok();
-                if let (Some(done), Some(total)) = (done, total) {
-                    let percent = if total > 0 { done as f64 / total as f64 } else { 0.0 };
-                    (app.state.loading_message.clone(), percent)
-                } else {
-                    (app.state.loading_message.clone(), 0.0)
-                }
+            // Extract progress information from the loading message
+            let (stage_str, progress_text, percentage) = parse_progress_from_message(&app.state.loading_message);
+            
+            // Calculate total progress across stages
+            let (current_stage, total_stages) = parse_stage_numbers(&stage_str);
+            let total_progress = if let (Some(current), Some(total), Some(pct)) = (current_stage, total_stages, percentage) {
+                ((current - 1) as f64 / total as f64) + (pct / 100.0 / total as f64)
             } else {
-                // Always animate the bar when we don't have a percentage
+                // Animate when no percentage available
                 let now = std::time::Instant::now();
-                let secs = now.elapsed().as_secs() as f64;
-                let pulse = (secs % 3.0) / 3.0; // Cycles every 3 seconds (0.0 to 1.0)
-                (app.state.loading_message.clone(), pulse)
+                let secs = now.elapsed().as_secs_f64();
+                (secs % 3.0) / 3.0 // Cycles every 3 seconds (0.0 to 1.0)
             };
-            let gauge = Gauge::default()
-                .block(Block::default().borders(Borders::ALL).title("Progress"))
+            
+            // Create a progress display area with two progress bars
+            let progress_layout = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(1), // Top bar for overall progress
+                    Constraint::Length(1), // Bottom bar for stage progress
+                ])
+                .split(chunks[4]);
+            
+            // Top gauge shows overall progress across all stages
+            let top_gauge = Gauge::default()
+                .block(Block::default().borders(Borders::NONE).title(""))
+                .gauge_style(Style::default().fg(Color::Cyan).bg(Color::Black))
+                .label(if let (Some(current), Some(total)) = (current_stage, total_stages) {
+                    format!("Total Progress: Stage {} of {} ({:.1}%)", 
+                           current, total, total_progress * 100.0)
+                } else {
+                    "Processing...".to_string()
+                })
+                .ratio(total_progress);
+            
+            // Bottom gauge shows progress for current stage
+            let stage_progress_value = if let Some(pct) = percentage {
+                pct / 100.0
+            } else if let Some(counts) = extract_scan_counts(&app.state.loading_message) {
+                counts.0 as f64 / counts.1 as f64
+            } else {
+                // Animate when no percentage available
+                let now = std::time::Instant::now();
+                let secs = now.elapsed().as_secs_f64();
+                (secs % 3.0) / 3.0 // Cycles every 3 seconds (0.0 to 1.0)
+            };
+            
+            let bottom_gauge = Gauge::default()
+                .block(Block::default().borders(Borders::NONE).title(""))
                 .gauge_style(Style::default().fg(Color::White).bg(Color::Black))
-                .label(label)
-                .ratio(percent);
-            frame.render_widget(gauge, chunks[4]);
+                .label(progress_text)
+                .ratio(stage_progress_value);
+            
+            frame.render_widget(top_gauge, progress_layout[0]);
+            frame.render_widget(bottom_gauge, progress_layout[1]);
         } else if !app.state.jobs.is_empty() && app.state.input_mode == InputMode::Normal {
             let total = app.state.jobs.len();
             let completed = 0; // You can track completed jobs if you add a field
@@ -1780,6 +1974,74 @@ fn ui(frame: &mut Frame, app: &mut App) {
     }
 }
 
-// TODO: Define Job struct and ActionType enum for the right panel
-// enum ActionType { Delete, Copy, Move }
-// struct Job { action: ActionType, file_info: FileInfo, destination: Option<PathBuf> } 
+// Helper function to extract scan counts from loading messages
+// Returns (current_count, total_count) if available
+fn extract_scan_counts(message: &str) -> Option<(usize, usize)> {
+    // Look for patterns like "Found 123/456 files" or "Scanned 123/456 files"
+    if let Some(idx) = message.find('/') {
+        let before = &message[..idx];
+        let after = &message[idx+1..];
+        
+        // Extract current count from before the slash
+        let current = before
+            .chars()
+            .rev()
+            .take_while(|c| c.is_ascii_digit())
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect::<String>()
+            .parse::<usize>()
+            .ok()?;
+        
+        // Extract total count from after the slash
+        let total = after
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect::<String>()
+            .parse::<usize>()
+            .ok()?;
+        
+        if total > 0 {
+            return Some((current, total));
+        }
+    }
+    
+    None
+}
+
+// Helper function to parse stage numbers from a stage string like "1/3 Discovery"
+fn parse_stage_numbers(stage_str: &str) -> (Option<usize>, Option<usize>) {
+    // Look for patterns like "1/3" or "0/3"
+    if let Some(idx) = stage_str.find('/') {
+        if idx > 0 && idx + 1 < stage_str.len() {
+            let current_str = &stage_str[..idx];
+            let rest = &stage_str[idx+1..];
+            
+            // Extract current stage number
+            let current = current_str
+                .chars()
+                .rev()
+                .take_while(|c| c.is_ascii_digit())
+                .collect::<String>()
+                .chars()
+                .rev()
+                .collect::<String>()
+                .parse::<usize>()
+                .ok();
+            
+            // Extract total stages number
+            let total = if let Some(space_idx) = rest.find(' ') {
+                let total_str = &rest[..space_idx];
+                total_str.parse::<usize>().ok()
+            } else {
+                rest.parse::<usize>().ok()
+            };
+            
+            return (current, total);
+        }
+    }
+    
+    // Default if we couldn't parse the stage numbers
+    (None, None)
+}

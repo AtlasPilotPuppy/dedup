@@ -5,7 +5,7 @@ A high-performance duplicate file finder and manager written in Rust. `dedup` ef
 ## Features
 
 - **High Performance**: Uses multi-threading with Rayon for parallel hash calculation
-- **Multiple Hash Algorithms**: Choose between MD5, SHA1, SHA256, or Blake3 (default)
+- **Multiple Hash Algorithms**: Choose between MD5, SHA1, SHA256, Blake3, xxHash (default), GxHash, FNV1a, or CRC32
 - **Interactive TUI**: Visually inspect and manage duplicate files
 - **Selection Strategies**: Various automated selection strategies for keeping/removing duplicates
   - Shortest path: Keep files with the shortest paths
@@ -17,6 +17,7 @@ A high-performance duplicate file finder and manager written in Rust. `dedup` ef
 - **Output Formats**: Save duplicate file information as JSON or TOML
 - **Configurable**: Adjust thread count, verbosity, sorting options, and more
 - **Configuration File**: Use a custom configuration file to set defaults
+- **Dry Run Mode**: Simulate operations without making actual changes
 - **Planned Integration**: Future integration with rclone for cloud storage deduplication
 
 ## Installation
@@ -135,9 +136,9 @@ OPTIONS:
     -d, --delete                 Delete duplicate files automatically based on selection strategy
     -M, --move-to <move-to>      Move duplicate files to a specified directory
     -l, --log                    Log actions and errors to a file (dedup.log)
-    -o, --output <output>        Output duplicate sets to a file (e.g., duplicates.json)
+    -o, --output <o>        Output duplicate sets to a file (e.g., duplicates.json)
     -f, --format <format>        Format for the output file [json|toml] [default: json]
-    -a, --algorithm <algorithm>  Hashing algorithm [md5|sha1|sha256|blake3] [default: blake3]
+    -a, --algorithm <algorithm>  Hashing algorithm [md5|sha1|sha256|blake3|xxhash|gxhash|fnv1a|crc32] [default: xxhash]
     -p, --parallel <parallel>    Number of parallel threads for hashing (default: auto)
         --mode <mode>            Selection strategy for delete/move [newest_modified|oldest_modified|shortest_path|longest_path] [default: newest_modified]
     -i, --interactive            Run in interactive TUI mode
@@ -153,6 +154,7 @@ OPTIONS:
         --raw-sizes              Display file sizes in raw bytes instead of human-readable format
         --config-file <config-file>
                                  Path to a custom config file
+        --dry-run                Perform a dry run without making any actual changes
     -h, --help                   Print help information
     -V, --version                Print version information
 ```
@@ -205,6 +207,7 @@ The TUI mode provides an interactive interface for exploring and managing duplic
 - **h**: Display help screen
 - **Ctrl+S**: Open settings screen
 - **Ctrl+L**: Clear the log area
+- **Ctrl+D**: Toggle dry run mode (simulates operations without making actual changes)
 
 ### Settings
 

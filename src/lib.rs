@@ -123,6 +123,10 @@ pub struct Cli {
     /// Path to a custom config file. If provided, overrides the default ~/.deduprc file.
     #[clap(long, help = "Path to a custom config file")]
     pub config_file: Option<PathBuf>,
+    
+    /// Run in dry run mode - simulate actions without making actual changes.
+    #[clap(long, help = "Perform a dry run without making any actual changes")]
+    pub dry_run: bool,
 }
 
 impl Cli {
