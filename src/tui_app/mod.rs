@@ -46,7 +46,7 @@ pub enum ActivePanel {
 pub enum InputMode {
     Normal,
     CopyDestination,
-    SettingsMenu,
+    Settings, // New mode for settings
 }
 
 #[derive(Debug)]
@@ -66,7 +66,15 @@ pub struct AppState {
     // Fields for TUI loading progress
     pub is_loading: bool,
     pub loading_message: String, 
-    pub settings_menu_selection: usize, // For navigating settings menu
+    // pub loading_progress_percent: Option<f32>, // For a gauge, if we can get good percentages
+
+    // Modifiable scan settings
+    pub current_algorithm: String,
+    pub current_parallel: Option<usize>,
+    pub rescan_needed: bool, // Flag to indicate if settings changed and rescan is advised
+
+    // Settings Menu State
+    pub selected_setting_category_index: usize, // 0: Strategy, 1: Algorithm, 2: Parallelism
 }
 
 // Channel for messages from scan thread to TUI thread
@@ -83,7 +91,8 @@ pub struct App {
     pub should_quit: bool,
     scan_thread_join_handle: Option<std_thread::JoinHandle<()>>,
     scan_rx: Option<std_mpsc::Receiver<ScanMessage>>,
-    // cli_args: Cli, // Store if needed for re-scans or passing to thread
+    scan_tx: Option<std_mpsc::Sender<ScanMessage>>, // Added sender to be stored for rescans
+    cli_config: Cli, // Store the initial CLI config
 }
 
 impl App {
@@ -109,28 +118,34 @@ impl App {
             file_for_copy_move: None,
             is_loading: if cli_args.progress { true } else { false }, // Control initial loading state display
             loading_message: initial_status,
-            settings_menu_selection: 0,
+            current_algorithm: cli_args.algorithm.clone(), // Initialize from Cli
+            current_parallel: cli_args.parallel,        // Initialize from Cli
+            rescan_needed: false,
+            selected_setting_category_index: 0, // Default to strategy
         };
 
         let (tx, rx) = std_mpsc::channel::<ScanMessage>();
         let scan_join_handle: Option<std_thread::JoinHandle<()>> = if cli_args.progress {
-            let cli_clone = cli_args.clone(); // Clone cli_args for the thread
+            let mut current_cli_for_scan = cli_args.clone();
+            current_cli_for_scan.algorithm = app_state.current_algorithm.clone();
+            current_cli_for_scan.parallel = app_state.current_parallel;
+
+            let thread_tx = tx.clone();
             let handle = std_thread::spawn(move || {
-                // This is the background thread
-                log::info!("[ScanThread] Starting duplicate scan...");
-                match file_utils::find_duplicate_files_with_progress(&cli_clone, tx.clone()) {
+                log::info!("[ScanThread] Starting initial duplicate scan...");
+                match file_utils::find_duplicate_files_with_progress(&current_cli_for_scan, thread_tx.clone()) {
                     Ok(result) => {
-                        if tx.send(ScanMessage::Completed(Ok(result))).is_err() {
+                        if thread_tx.send(ScanMessage::Completed(Ok(result))).is_err() {
                             log::error!("[ScanThread] Failed to send completion message to TUI.");
                         }
                     }
                     Err(e) => {
-                        if tx.send(ScanMessage::Error(e.to_string())).is_err() {
+                        if thread_tx.send(ScanMessage::Error(e.to_string())).is_err() {
                             log::error!("[ScanThread] Failed to send error message to TUI.");
                         }
                     }
                 }
-                log::info!("[ScanThread] Scan finished.");
+                log::info!("[ScanThread] Initial scan finished.");
             });
             Some(handle)
         } else {
@@ -163,7 +178,73 @@ impl App {
             should_quit: false,
             scan_thread_join_handle: scan_join_handle,
             scan_rx: if cli_args.progress { Some(rx) } else { None },
-            // cli_args: cli_args.clone(), // If needed later
+            scan_tx: if cli_args.progress { Some(tx) } else { None }, // Store sender only if async
+            cli_config: cli_args.clone(), // Store a clone of the initial Cli
+        }
+    }
+
+    // Method to trigger a rescan
+    fn trigger_rescan(&mut self) {
+        if self.state.is_loading && self.scan_thread_join_handle.is_some() {
+            self.state.status_message = Some("Scan already in progress.".to_string());
+            return;
+        }
+
+        // Attempt to join the previous scan thread if it exists
+        if let Some(handle) = self.scan_thread_join_handle.take() {
+            log::debug!("Attempting to join previous scan thread before rescan...");
+            if let Err(e) = handle.join() {
+                log::error!("Failed to join previous scan thread: {:?}", e);
+                // Decide if we should proceed or not, for now, we proceed cautiously
+            }
+        }
+
+        self.state.duplicate_sets.clear();
+        self.state.jobs.clear();
+        self.state.selected_set_index = 0;
+        self.state.selected_file_index_in_set = 0;
+        self.state.selected_job_index = 0;
+        self.state.is_loading = true;
+        self.state.loading_message = "Rescanning with current settings...".to_string();
+        self.state.status_message = Some("Starting rescan...".to_string());
+        self.state.rescan_needed = false; // Reset flag as we are acting on it
+
+        let mut current_cli_for_scan = self.cli_config.clone(); // Use stored cli_config
+        current_cli_for_scan.algorithm = self.state.current_algorithm.clone();
+        current_cli_for_scan.parallel = self.state.current_parallel;
+        // Note: We always use progress for TUI internal scans regardless of initial cli.progress
+        // find_duplicate_files_with_progress requires a tx channel.
+        // Ensure scan_tx is Some.
+        if self.scan_tx.is_none() {
+            let (tx, rx) = std_mpsc::channel::<ScanMessage>();
+            self.scan_tx = Some(tx);
+            self.scan_rx = Some(rx); // Also need to re-assign rx if tx was None
+        }
+
+        if let Some(tx_cloned) = self.scan_tx.clone() { // Ensure tx exists
+            let handle = std_thread::spawn(move || {
+                log::info!("[ScanThread] Starting rescan for duplicates...");
+                match file_utils::find_duplicate_files_with_progress(&current_cli_for_scan, tx_cloned.clone()) {
+                    Ok(result) => {
+                        if tx_cloned.send(ScanMessage::Completed(Ok(result))).is_err() {
+                            log::error!("[ScanThread] Failed to send rescan completion message to TUI.");
+                        }
+                    }
+                    Err(e) => {
+                        if tx_cloned.send(ScanMessage::Error(e.to_string())).is_err() {
+                            log::error!("[ScanThread] Failed to send rescan error message to TUI.");
+                        }
+                    }
+                }
+                log::info!("[ScanThread] Rescan finished.");
+            });
+            self.scan_thread_join_handle = Some(handle);
+        } else {
+            // This case should ideally not be reached if TUI always uses progress/async scan
+            log::error!("Failed to start rescan: No sender channel available.");
+            self.state.is_loading = false;
+            self.state.loading_message = "Error: Could not start rescan.".to_string();
+            self.state.status_message = Some("Rescan failed to start. Check logs.".to_string());
         }
     }
 
@@ -211,44 +292,20 @@ impl App {
 
     pub fn on_key(&mut self, key_event: KeyEvent) {
         self.state.status_message = None; // Clear old status on new key press
-        let key_code = key_event.code;
-        let modifiers = key_event.modifiers;
-
-        if key_code == KeyCode::Char('q') {
-            self.should_quit = true;
-            return;
-        }
-
-        if key_code == KeyCode::Tab {
-            self.cycle_active_panel();
-            return;
-        }
-
-        if key_code == KeyCode::Char('s') && modifiers == KeyModifiers::CONTROL {
-            self.state.input_mode = InputMode::SettingsMenu;
-            self.state.settings_menu_selection = 0;
-            return;
-        }
-
-        if key_code == KeyCode::Char('e') && modifiers == KeyModifiers::CONTROL {
-            if let Err(e) = self.process_pending_jobs() {
-                self.state.status_message = Some(format!("Error processing jobs: {}", e));
-            }
-            return;
-        }
 
         match self.state.input_mode {
             InputMode::Normal => self.handle_normal_mode_key(key_event),
             InputMode::CopyDestination => self.handle_copy_dest_input_key(key_event),
-            InputMode::SettingsMenu => self.handle_settings_menu_key(key_event),
+            InputMode::Settings => self.handle_settings_mode_key(key_event),
         }
-        self.validate_selection_indices();
+        self.validate_selection_indices(); // Ensure selections are valid after any action
     }
 
     fn handle_normal_mode_key(&mut self, key_event: KeyEvent) {
         let key_code = key_event.code;
         let modifiers = key_event.modifiers;
 
+        // General shortcuts first
         if key_code == KeyCode::Char('q') {
             self.should_quit = true;
             return;
@@ -257,24 +314,30 @@ impl App {
             self.cycle_active_panel();
             return;
         }
-        if key_code == KeyCode::Char('s') && modifiers == KeyModifiers::CONTROL {
-            self.state.input_mode = InputMode::SettingsMenu;
-            self.state.settings_menu_selection = 0;
-            return;
-        }
         if key_code == KeyCode::Char('e') && modifiers == KeyModifiers::CONTROL {
             if let Err(e) = self.process_pending_jobs() {
                 self.state.status_message = Some(format!("Error processing jobs: {}", e));
             }
             return;
         }
+        if key_code == KeyCode::Char('r') && modifiers == KeyModifiers::CONTROL {
+            self.trigger_rescan();
+            return;
+        }
+        if key_code == KeyCode::Char('s') && modifiers == KeyModifiers::CONTROL { // Ctrl+S for Settings
+            self.state.input_mode = InputMode::Settings;
+            self.state.status_message = Some("Entered settings mode. Esc to exit.".to_string());
+            // TODO: Initialize settings focus, e.g., self.state.selected_setting_index = 0;
+            return;
+        }
 
+        // Then panel-specific shortcuts
         match self.state.active_panel {
             ActivePanel::Sets => match key_code {
                 KeyCode::Down | KeyCode::Char('j') => self.select_next_set(),
                 KeyCode::Up | KeyCode::Char('k') => self.select_previous_set(),
                 KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => self.focus_files_panel(),
-                KeyCode::Char('d') => self.delete_current_set(),
+                KeyCode::Char('d') => self.mark_set_for_deletion(),
                 _ => {}
             },
             ActivePanel::Files => match key_code {
@@ -284,7 +347,7 @@ impl App {
                 KeyCode::Char('c') => self.initiate_copy_action(),
                 KeyCode::Char('s') => self.set_selected_file_as_kept(),
                 KeyCode::Char('i') => self.set_action_for_selected_file(ActionType::Ignore),
-                KeyCode::Left | KeyCode::Char('h') => self.state.active_panel = ActivePanel::Sets, // Go back to Sets panel
+                KeyCode::Left | KeyCode::Char('h') => self.state.active_panel = ActivePanel::Sets,
                 _ => {}
             },
             ActivePanel::Jobs => match key_code {
@@ -293,6 +356,101 @@ impl App {
                 KeyCode::Delete | KeyCode::Backspace | KeyCode::Char('x') => self.remove_selected_job(),
                 _ => {}
             },
+        }
+        // self.validate_selection_indices(); // Already called in on_key
+    }
+
+    fn handle_settings_mode_key(&mut self, key_event: KeyEvent) {
+        match key_event.code {
+            KeyCode::Esc => {
+                self.state.input_mode = InputMode::Normal;
+                if self.state.rescan_needed {
+                    self.state.status_message = Some("Exited settings. Ctrl+R to apply changes.".to_string());
+                } else {
+                    self.state.status_message = Some("Exited settings mode.".to_string());
+                }
+            }
+            KeyCode::Up => {
+                self.state.selected_setting_category_index = self.state.selected_setting_category_index.saturating_sub(1);
+            }
+            KeyCode::Down => {
+                self.state.selected_setting_category_index = (self.state.selected_setting_category_index + 1).min(2); // 3 categories (0,1,2)
+            }
+            // Strategy selection keys (n, o, s, l)
+            KeyCode::Char('n') if self.state.selected_setting_category_index == 0 => { 
+                self.state.default_selection_strategy = SelectionStrategy::NewestModified;
+                self.state.status_message = Some("Strategy: Newest Modified".to_string());
+            }
+            KeyCode::Char('o') if self.state.selected_setting_category_index == 0 => { 
+                self.state.default_selection_strategy = SelectionStrategy::OldestModified;
+                self.state.status_message = Some("Strategy: Oldest Modified".to_string());
+            }
+            KeyCode::Char('s') if self.state.selected_setting_category_index == 0 => { 
+                self.state.default_selection_strategy = SelectionStrategy::ShortestPath;
+                self.state.status_message = Some("Strategy: Shortest Path".to_string());
+            }
+            KeyCode::Char('l') if self.state.selected_setting_category_index == 0 => { 
+                self.state.default_selection_strategy = SelectionStrategy::LongestPath;
+                self.state.status_message = Some("Strategy: Longest Path".to_string());
+            }
+            // Algorithm selection keys (m, a, b)
+            KeyCode::Char('m') if self.state.selected_setting_category_index == 1 => {
+                self.state.current_algorithm = "md5".to_string();
+                self.state.rescan_needed = true;
+                self.state.status_message = Some("Algorithm: md5 (Rescan needed)".to_string());
+            }
+            KeyCode::Char('a') if self.state.selected_setting_category_index == 1 => {
+                self.state.current_algorithm = "sha256".to_string();
+                self.state.rescan_needed = true;
+                self.state.status_message = Some("Algorithm: sha256 (Rescan needed)".to_string());
+            }
+            KeyCode::Char('b') if self.state.selected_setting_category_index == 1 => {
+                self.state.current_algorithm = "blake3".to_string();
+                self.state.rescan_needed = true;
+                self.state.status_message = Some("Algorithm: blake3 (Rescan needed)".to_string());
+            }
+            // Parallelism adjustment keys (+, -, 0-9)
+            KeyCode::Char('0') if self.state.selected_setting_category_index == 2 => {
+                self.state.current_parallel = None; // None signifies auto
+                self.state.rescan_needed = true;
+                self.state.status_message = Some("Parallel Cores: Auto (Rescan needed)".to_string());
+            }
+            KeyCode::Char(c @ '1'..='9') if self.state.selected_setting_category_index == 2 => {
+                // Simple single digit for now. Could extend to multi-digit input.
+                let cores = c.to_digit(10).map(|d| d as usize);
+                if self.state.current_parallel != cores {
+                    self.state.current_parallel = cores;
+                    self.state.rescan_needed = true;
+                    self.state.status_message = Some(format!("Parallel Cores: {} (Rescan needed)", c));
+                }
+            }
+            KeyCode::Char('+') if self.state.selected_setting_category_index == 2 => {
+                let current_val = self.state.current_parallel.unwrap_or(0);
+                // Cap at num_cpus or a reasonable max like 16 if num_cpus is too high/unavailable?
+                // For simplicity, let's just increment, max 16 for now.
+                let new_val = (current_val + 1).min(16);
+                if self.state.current_parallel != Some(new_val) {
+                    self.state.current_parallel = Some(new_val);
+                    self.state.rescan_needed = true;
+                    self.state.status_message = Some(format!("Parallel Cores: {} (Rescan needed)", new_val));
+                }
+            }
+            KeyCode::Char('-') if self.state.selected_setting_category_index == 2 => {
+                let current_val = self.state.current_parallel.unwrap_or(1); // If auto (None), treat as 1 for decrement start
+                if current_val > 1 { // Minimum 1 core
+                    let new_val = current_val - 1;
+                     if self.state.current_parallel != Some(new_val) {
+                        self.state.current_parallel = Some(new_val);
+                        self.state.rescan_needed = true;
+                        self.state.status_message = Some(format!("Parallel Cores: {} (Rescan needed)", new_val));
+                    }
+                } else if current_val == 1 && self.state.current_parallel.is_some() { // Allow going from 1 to Auto (None)
+                    self.state.current_parallel = None;
+                    self.state.rescan_needed = true;
+                    self.state.status_message = Some("Parallel Cores: Auto (Rescan needed)".to_string());
+                }
+            }
+            _ => {}
         }
     }
 
@@ -443,6 +601,54 @@ impl App {
         }
     }
     
+    fn mark_set_for_deletion(&mut self) {
+        if let Some(selected_set) = self.current_selected_set().cloned() { // Clone to avoid borrow issues
+            if selected_set.files.len() < 2 {
+                self.state.status_message = Some("Set has less than 2 files, no action taken.".to_string());
+                return;
+            }
+
+            match file_utils::determine_action_targets(&selected_set, self.state.default_selection_strategy) {
+                Ok((kept_file, files_to_delete)) => {
+                    let kept_file_path = kept_file.path.clone();
+                    let mut files_marked_for_delete = 0;
+
+                    // First, remove any existing jobs for files in this set
+                    self.state.jobs.retain(|job| {
+                        !selected_set.files.iter().any(|f_in_set| f_in_set.path == job.file_info.path)
+                    });
+
+                    // Add Keep job for the determined file
+                    self.state.jobs.push(Job {
+                        action: ActionType::Keep,
+                        file_info: kept_file.clone(),
+                    });
+                    log::info!("Auto-marking {:?} to KEEP based on strategy {:?}.", kept_file.path, self.state.default_selection_strategy);
+
+                    // Add Delete jobs for all other files
+                    for file_to_delete in files_to_delete {
+                        // Double check it's not the one we decided to keep (should be handled by determine_action_targets)
+                        if file_to_delete.path != kept_file_path {
+                            self.state.jobs.push(Job {
+                                action: ActionType::Delete,
+                                file_info: file_to_delete.clone(),
+                            });
+                            files_marked_for_delete += 1;
+                            log::info!("Auto-marking {:?} for DELETE in set.", file_to_delete.path);
+                        }
+                    }
+                    self.state.status_message = Some(format!("Marked {} files for DELETE, 1 to KEEP in current set.", files_marked_for_delete));
+                }
+                Err(e) => {
+                    self.state.status_message = Some(format!("Error determining actions for set: {}", e));
+                    log::error!("Could not determine action targets for set deletion: {}", e);
+                }
+            }
+        } else {
+            self.state.status_message = Some("No set selected.".to_string());
+        }
+    }
+
     fn validate_selection_indices(&mut self) {
         if self.state.duplicate_sets.is_empty() {
             self.state.selected_set_index = 0;
@@ -595,76 +801,6 @@ impl App {
             self.state.status_message = Some("No job selected to remove or jobs list empty.".to_string());
         }
     }
-
-    fn handle_settings_menu_key(&mut self, key_event: KeyEvent) {
-        match key_event.code {
-            KeyCode::Esc => {
-                self.state.input_mode = InputMode::Normal;
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                self.state.settings_menu_selection = (self.state.settings_menu_selection + 1) % 4; // 4 settings options
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                self.state.settings_menu_selection = if self.state.settings_menu_selection > 0 {
-                    self.state.settings_menu_selection - 1
-                } else {
-                    3
-                };
-            }
-            KeyCode::Enter => {
-                match self.state.settings_menu_selection {
-                    0 => {
-                        // Selection Strategy
-                        self.state.default_selection_strategy = match self.state.default_selection_strategy {
-                            SelectionStrategy::NewestModified => SelectionStrategy::OldestModified,
-                            SelectionStrategy::OldestModified => SelectionStrategy::ShortestPath,
-                            SelectionStrategy::ShortestPath => SelectionStrategy::LongestPath,
-                            SelectionStrategy::LongestPath => SelectionStrategy::NewestModified,
-                        };
-                        self.state.status_message = Some(format!("Selection strategy set to: {:?}", self.state.default_selection_strategy));
-                    }
-                    1 => {
-                        // Number of cores
-                        let current_cores = num_cpus::get();
-                        let new_cores = if current_cores > 1 { current_cores - 1 } else { current_cores };
-                        // TODO: Implement core count setting
-                        self.state.status_message = Some(format!("Core count set to: {}", new_cores));
-                    }
-                    2 => {
-                        // Hashing algorithm
-                        // TODO: Implement algorithm selection
-                        self.state.status_message = Some("Algorithm selection not yet implemented".to_string());
-                    }
-                    3 => {
-                        // Progress display
-                        // TODO: Implement progress toggle
-                        self.state.status_message = Some("Progress display toggle not yet implemented".to_string());
-                    }
-                    _ => {}
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn delete_current_set(&mut self) {
-        if let Some(set) = self.current_selected_set() {
-            let strategy = self.state.default_selection_strategy;
-            if let Ok((kept_file, files_to_delete)) = file_utils::determine_action_targets(set, strategy) {
-                // Mark the kept file
-                self.state.jobs.retain(|job| job.file_info.path != kept_file.path);
-                self.state.jobs.push(Job { action: ActionType::Keep, file_info: kept_file.clone() });
-                
-                // Mark all other files for deletion
-                for file in files_to_delete {
-                    self.state.jobs.retain(|job| job.file_info.path != file.path);
-                    self.state.jobs.push(Job { action: ActionType::Delete, file_info: file.clone() });
-                }
-                
-                self.state.status_message = Some(format!("Marked set for deletion, keeping: {}", kept_file.path.display()));
-            }
-        }
-    }
 }
 
 type TerminalBackend = CrosstermBackend<Stdout>;
@@ -777,204 +913,211 @@ fn ui(frame: &mut Frame, app: &mut App) {
 
         frame.render_widget(Clear, area); // Clear the area for the centered text
         frame.render_widget(text.block(loading_block), area);
+    } else if app.state.input_mode == InputMode::Settings {
+        // Basic placeholder for settings UI
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .margin(2)
+            .constraints([
+                Constraint::Length(3), // Title
+                Constraint::Min(10),   // Settings options
+                Constraint::Length(1), // Hint
+            ])
+            .split(frame.size());
+
+        let title = Paragraph::new("--- Settings Menu ---")
+            .alignment(Alignment::Center)
+            .block(Block::default().borders(Borders::ALL).title("Settings (Ctrl+S to enter/Esc to exit)"));
+        frame.render_widget(title, chunks[0]);
+
+        let mut strategy_style = Style::default();
+        let mut algo_style = Style::default();
+        let mut parallel_style = Style::default();
+
+        match app.state.selected_setting_category_index {
+            0 => strategy_style = strategy_style.fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            1 => algo_style = algo_style.fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            2 => parallel_style = parallel_style.fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            _ => {}
+        }
+
+        let settings_text = vec![
+            Line::from(Span::styled(format!("1. File Selection Strategy: {:?}", app.state.default_selection_strategy), strategy_style)),
+            Line::from(Span::styled(format!("   (n:newest, o:oldest, s:shortest, l:longest)"), strategy_style)),
+            Line::from(Span::raw("")),
+            Line::from(Span::styled(format!("2. Hashing Algorithm: {}", app.state.current_algorithm), algo_style)),
+            Line::from(Span::styled(format!("   (m:md5, a:sha256, b:blake3)"), algo_style)),
+            Line::from(Span::raw("")),
+            Line::from(Span::styled(format!("3. Parallel Cores: {}", app.state.current_parallel.map_or("Auto".to_string(), |c| c.to_string())), parallel_style)),
+            Line::from(Span::styled(format!("   (0 for auto, 1-N for specific count. Use +/- or numbers)"), parallel_style)),
+            Line::from(Span::raw("")),
+            Line::from(Span::raw(if app.state.rescan_needed {
+                "[!] Settings changed. Press Ctrl+R to rescan for changes to take effect."
+            } else {
+                "No pending setting changes."
+            })),
+        ];
+        let settings_paragraph = Paragraph::new(settings_text)
+            .block(Block::default().borders(Borders::ALL).title("Options"))
+            .wrap({ Wrap { trim: true } });
+        frame.render_widget(settings_paragraph, chunks[1]);
+
+        let hint = Paragraph::new("Esc: Exit Settings | Use indicated keys to change values.")
+            .alignment(Alignment::Center);
+        frame.render_widget(hint, chunks[2]);
+
     } else {
-        match app.state.input_mode {
-            InputMode::SettingsMenu => {
-                let chunks = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([
-                        Constraint::Percentage(40),
-                        Constraint::Length(10),
-                        Constraint::Percentage(40),
-                    ])
-                    .split(frame.size());
+        // Main UI (3 panels + status bar)
+        let (content_chunk, status_chunk) = {
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Min(0), 
+                    Constraint::Length(if app.state.input_mode == InputMode::Normal { 1 } else { 3 }), 
+                ])
+                .split(frame.size());
+            (chunks[0], chunks[1])
+        };
 
-                let settings_block = Block::default()
-                    .title("Settings (Esc to exit)")
-                    .borders(Borders::ALL);
+        let main_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Percentage(33), 
+                Constraint::Percentage(34), 
+                Constraint::Percentage(33), 
+            ].as_ref())
+            .split(content_chunk); 
 
-                let settings_items = vec![
-                    format!("Selection Strategy: {:?}", app.state.default_selection_strategy),
-                    String::from("Number of Cores (TODO)"),
-                    String::from("Hashing Algorithm (TODO)"),
-                    String::from("Progress Display (TODO)"),
-                ];
+        // Helper to create a block with a title and border, highlighting if active
+        let create_block = |title_string: String, is_active: bool| {
+            let base_style = if is_active { Style::default().fg(Color::Yellow) } else { Style::default().fg(Color::White) };
+            Block::default()
+                .borders(Borders::ALL)
+                .title(Span::styled(title_string, base_style))
+                .border_style(base_style)
+        };
 
-                let settings_list = List::new(
-                    settings_items
-                        .into_iter()
-                        .enumerate()
-                        .map(|(i, item)| {
-                            let style = if i == app.state.settings_menu_selection {
-                                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
-                            } else {
-                                Style::default()
-                            };
-                            ListItem::new(item).style(style)
-                        })
-                        .collect::<Vec<_>>(),
-                )
-                .block(settings_block)
-                .highlight_style(Style::default().add_modifier(Modifier::BOLD).bg(Color::Blue))
-                .highlight_symbol(">> ");
+        // Left Panel: Duplicate Sets
+        let sets_panel_title_string = format!("Duplicate Sets ({}/{}) (Tab)", app.state.selected_set_index.saturating_add(1).min(app.state.duplicate_sets.len()), app.state.duplicate_sets.len());
+        let sets_block = create_block(sets_panel_title_string, app.state.active_panel == ActivePanel::Sets && app.state.input_mode == InputMode::Normal);
+        let set_items: Vec<ListItem> = app.state.duplicate_sets.iter().map(|set| {
+            let content = Line::from(Span::styled(
+                format!("Hash: {}... ({} files, {})",
+                    set.hash.chars().take(8).collect::<String>(),
+                    set.files.len(),
+                    format_size(set.size, DECIMAL)),
+                Style::default(),
+            ));
+            ListItem::new(content)
+        }).collect();
+        let sets_list = List::new(set_items)
+            .block(sets_block)
+            .highlight_style(Style::default().add_modifier(Modifier::BOLD).bg(Color::Blue))
+            .highlight_symbol(">> ");
+        let mut sets_list_state = ListState::default();
+        if !app.state.duplicate_sets.is_empty() {
+            sets_list_state.select(Some(app.state.selected_set_index));
+        }
+        frame.render_stateful_widget(sets_list, main_chunks[0], &mut sets_list_state);
 
-                let mut list_state = ListState::default();
-                list_state.select(Some(app.state.settings_menu_selection));
-                frame.render_stateful_widget(settings_list, chunks[1], &mut list_state);
-            }
-            _ => {
-                // Main UI (3 panels + status bar)
-                let (content_chunk, status_chunk) = {
-                    let chunks = Layout::default()
-                        .direction(Direction::Vertical)
-                        .constraints([
-                            Constraint::Min(0), 
-                            Constraint::Length(if app.state.input_mode == InputMode::Normal { 1 } else { 3 }), 
-                        ])
-                        .split(frame.size());
-                    (chunks[0], chunks[1])
-                };
-
-                let main_chunks = Layout::default()
-                    .direction(Direction::Horizontal)
-                    .constraints([
-                        Constraint::Percentage(33), 
-                        Constraint::Percentage(34), 
-                        Constraint::Percentage(33), 
-                    ].as_ref())
-                    .split(content_chunk); 
-
-                // Helper to create a block with a title and border, highlighting if active
-                let create_block = |title_string: String, is_active: bool| {
-                    let base_style = if is_active { Style::default().fg(Color::Yellow) } else { Style::default().fg(Color::White) };
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title(Span::styled(title_string, base_style))
-                        .border_style(base_style)
-                };
-
-                // Left Panel: Duplicate Sets
-                let sets_panel_title_string = format!("Duplicate Sets ({}/{}) (Tab)", app.state.selected_set_index.saturating_add(1).min(app.state.duplicate_sets.len()), app.state.duplicate_sets.len());
-                let sets_block = create_block(sets_panel_title_string, app.state.active_panel == ActivePanel::Sets && app.state.input_mode == InputMode::Normal);
-                let set_items: Vec<ListItem> = app.state.duplicate_sets.iter().map(|set| {
-                    let content = Line::from(Span::styled(
-                        format!("Hash: {}... ({} files, {})",
-                            set.hash.chars().take(8).collect::<String>(),
-                            set.files.len(),
-                            format_size(set.size, DECIMAL)),
-                        Style::default(),
-                    ));
-                    ListItem::new(content)
-                }).collect();
-                let sets_list = List::new(set_items)
-                    .block(sets_block)
-                    .highlight_style(Style::default().add_modifier(Modifier::BOLD).bg(Color::Blue))
-                    .highlight_symbol(">> ");
-                let mut sets_list_state = ListState::default();
-                if !app.state.duplicate_sets.is_empty() {
-                    sets_list_state.select(Some(app.state.selected_set_index));
-                }
-                frame.render_stateful_widget(sets_list, main_chunks[0], &mut sets_list_state);
-
-                // Middle Panel: Files in Selected Set
-                let (files_panel_title_string, file_items) = 
-                    if let Some(selected_set) = app.current_selected_set() {
-                        let title = format!("Files ({}/{}) (s:keep d:del c:copy i:ign h:back)", 
-                                            app.state.selected_file_index_in_set.saturating_add(1).min(selected_set.files.len()), 
-                                            selected_set.files.len());
-                        let items: Vec<ListItem> = selected_set.files.iter().map(|file_info| {
-                            let mut style = Style::default();
-                            let mut prefix = "   ";
-                            if let Some(job) = app.state.jobs.iter().find(|j| j.file_info.path == file_info.path) {
-                                match job.action {
-                                    ActionType::Keep => { style = style.fg(Color::Green).add_modifier(Modifier::BOLD); prefix = "[K]"; }
-                                    ActionType::Delete => { style = style.fg(Color::Red).add_modifier(Modifier::CROSSED_OUT); prefix = "[D]"; }
-                                    ActionType::Copy(_) => { style = style.fg(Color::Cyan); prefix = "[C]"; }
-                                    ActionType::Move(_) => { style = style.fg(Color::Magenta); prefix = "[M]"; }
-                                    ActionType::Ignore => { style = style.fg(Color::DarkGray); prefix = "[I]"; }
-                                }
-                            } else {
-                                if let Ok((default_kept, _)) = file_utils::determine_action_targets(selected_set, app.state.default_selection_strategy) {
-                                    if default_kept.path == file_info.path {
-                                        style = style.fg(Color::Green);
-                                        prefix = "[k]";
-                                    }
-                                }
-                            }
-                            ListItem::new(Line::from(vec![
-                                Span::styled(format!("{} ", prefix), style),
-                                Span::styled(file_info.path.display().to_string(), style)
-                            ]))
-                        }).collect();
-                        (title, items)
+        // Middle Panel: Files in Selected Set
+        let (files_panel_title_string, file_items) = 
+            if let Some(selected_set) = app.current_selected_set() {
+                let title = format!("Files ({}/{}) (s:keep d:del c:copy i:ign h:back)", 
+                                    app.state.selected_file_index_in_set.saturating_add(1).min(selected_set.files.len()), 
+                                    selected_set.files.len());
+                let items: Vec<ListItem> = selected_set.files.iter().map(|file_info| {
+                    let mut style = Style::default();
+                    let mut prefix = "   ";
+                    if let Some(job) = app.state.jobs.iter().find(|j| j.file_info.path == file_info.path) {
+                        match job.action {
+                            ActionType::Keep => { style = style.fg(Color::Green).add_modifier(Modifier::BOLD); prefix = "[K]"; }
+                            ActionType::Delete => { style = style.fg(Color::Red).add_modifier(Modifier::CROSSED_OUT); prefix = "[D]"; }
+                            ActionType::Copy(_) => { style = style.fg(Color::Cyan); prefix = "[C]"; }
+                            ActionType::Move(_) => { style = style.fg(Color::Magenta); prefix = "[M]"; }
+                            ActionType::Ignore => { style = style.fg(Color::DarkGray); prefix = "[I]"; }
+                        }
                     } else {
-                        ("Files (0/0)".to_string(), vec![ListItem::new("No set selected or set is empty")])
-                    };
-                let files_block = create_block(files_panel_title_string, app.state.active_panel == ActivePanel::Files && app.state.input_mode == InputMode::Normal);
-                let files_list = List::new(file_items)
-                    .block(files_block)
-                    .highlight_style(Style::default().add_modifier(Modifier::BOLD).bg(Color::DarkGray))
-                    .highlight_symbol("> ");
-
-                let mut files_list_state = ListState::default();
-                if app.current_selected_set().map_or(false, |s| !s.files.is_empty()) {
-                    files_list_state.select(Some(app.state.selected_file_index_in_set));
-                }
-                frame.render_stateful_widget(files_list, main_chunks[1], &mut files_list_state);
-
-                // Right Panel: Jobs
-                let jobs_panel_title_string = format!("Jobs ({}) (Ctrl+E: Exec, x:del)", app.state.jobs.len());
-                let jobs_block = create_block(jobs_panel_title_string, app.state.active_panel == ActivePanel::Jobs && app.state.input_mode == InputMode::Normal);
-                let job_items: Vec<ListItem> = app.state.jobs.iter().map(|job| {
-                    let action_str = match &job.action {
-                        ActionType::Keep => "KEEP".to_string(),
-                        ActionType::Delete => "DELETE".to_string(),
-                        ActionType::Move(dest) => format!("MOVE to {}", dest.display()),
-                        ActionType::Copy(dest) => format!("COPY to {}", dest.display()),
-                        ActionType::Ignore => "IGNORE".to_string(),
-                    };
-                    let content = Line::from(Span::raw(format!("{} - {:?}", action_str, job.file_info.path.file_name().unwrap_or_default())));
-                    ListItem::new(content)
+                        if let Ok((default_kept, _)) = file_utils::determine_action_targets(selected_set, app.state.default_selection_strategy) {
+                            if default_kept.path == file_info.path {
+                                style = style.fg(Color::Green);
+                                prefix = "[k]";
+                            }
+                        }
+                    }
+                    ListItem::new(Line::from(vec![
+                        Span::styled(format!("{} ", prefix), style),
+                        Span::styled(file_info.path.display().to_string(), style)
+                    ]))
                 }).collect();
-                let jobs_list_widget = List::new(job_items)
-                    .block(jobs_block)
-                    .highlight_style(Style::default().add_modifier(Modifier::BOLD).bg(Color::Magenta))
-                    .highlight_symbol(">> ");
-                let mut jobs_list_state = ListState::default();
-                if !app.state.jobs.is_empty() {
-                    jobs_list_state.select(Some(app.state.selected_job_index));
-                }
-                frame.render_stateful_widget(jobs_list_widget, main_chunks[2], &mut jobs_list_state);
+                (title, items)
+            } else {
+                ("Files (0/0)".to_string(), vec![ListItem::new("No set selected or set is empty")])
+            };
+        let files_block = create_block(files_panel_title_string, app.state.active_panel == ActivePanel::Files && app.state.input_mode == InputMode::Normal);
+        let files_list = List::new(file_items)
+            .block(files_block)
+            .highlight_style(Style::default().add_modifier(Modifier::BOLD).bg(Color::DarkGray))
+            .highlight_symbol("> ");
 
-                // Status Bar / Input Area
-                match app.state.input_mode {
-                    InputMode::Normal => {
-                        let status_text = app.state.status_message.as_deref().unwrap_or(&String::from("q:quit | Tab:cycle | Arrows/jk:nav | s:keep d:del c:copy i:ign | Ctrl+E:exec | x:del job | Ctrl+S:settings")).to_string();
-                        let status_bar = Paragraph::new(status_text)
-                            .style(Style::default().fg(Color::LightCyan))
-                            .alignment(Alignment::Left);
-                        frame.render_widget(status_bar, status_chunk);
-                    }
-                    InputMode::CopyDestination => { 
-                        let input_chunks = Layout::default()
-                            .direction(Direction::Vertical)
-                            .constraints([Constraint::Length(1), Constraint::Length(1)]).split(status_chunk);
-                        let prompt_text = app.state.status_message.as_deref().unwrap_or(&String::from("Enter destination path for copy (Enter:confirm, Esc:cancel):")).to_string();
-                        let prompt_p = Paragraph::new(prompt_text).fg(Color::Yellow);
-                        frame.render_widget(prompt_p, input_chunks[0]);
-                        let input_field = Paragraph::new(app.state.current_input.value())
-                            .block(Block::default().borders(Borders::TOP).title("Path").border_style(Style::default().fg(Color::Yellow)))
-                            .fg(Color::White);
-                        frame.render_widget(input_field, input_chunks[1]);
-                        frame.set_cursor(
-                            input_chunks[1].x + app.state.current_input.visual_cursor() as u16 + 1, 
-                            input_chunks[1].y + 1 
-                        );
-                     }
-                    InputMode::SettingsMenu => {
-                        // Settings menu is handled in the main UI match above
-                    }
-                }
+        let mut files_list_state = ListState::default();
+        if app.current_selected_set().map_or(false, |s| !s.files.is_empty()) {
+            files_list_state.select(Some(app.state.selected_file_index_in_set));
+        }
+        frame.render_stateful_widget(files_list, main_chunks[1], &mut files_list_state);
+
+        // Right Panel: Jobs
+        let jobs_panel_title_string = format!("Jobs ({}) (Ctrl+E: Exec, x:del)", app.state.jobs.len());
+        let jobs_block = create_block(jobs_panel_title_string, app.state.active_panel == ActivePanel::Jobs && app.state.input_mode == InputMode::Normal);
+        let job_items: Vec<ListItem> = app.state.jobs.iter().map(|job| {
+            let action_str = match &job.action {
+                ActionType::Keep => "KEEP".to_string(),
+                ActionType::Delete => "DELETE".to_string(),
+                ActionType::Move(dest) => format!("MOVE to {}", dest.display()),
+                ActionType::Copy(dest) => format!("COPY to {}", dest.display()),
+                ActionType::Ignore => "IGNORE".to_string(),
+            };
+            let content = Line::from(Span::raw(format!("{} - {:?}", action_str, job.file_info.path.file_name().unwrap_or_default())));
+            ListItem::new(content)
+        }).collect();
+        let jobs_list_widget = List::new(job_items)
+            .block(jobs_block)
+            .highlight_style(Style::default().add_modifier(Modifier::BOLD).bg(Color::Magenta))
+            .highlight_symbol(">> ");
+        let mut jobs_list_state = ListState::default();
+        if !app.state.jobs.is_empty() {
+            jobs_list_state.select(Some(app.state.selected_job_index));
+        }
+        frame.render_stateful_widget(jobs_list_widget, main_chunks[2], &mut jobs_list_state);
+
+        // Status Bar / Input Area
+        match app.state.input_mode {
+            InputMode::Normal => {
+                let status_text = app.state.status_message.as_deref().unwrap_or("q:quit | Tab:cycle | Arrows/jk:nav | s:keep d:del c:copy i:ign | Ctrl+E:exec | Ctrl+R:rescan | Ctrl+S:settings | x:del job");
+                let status_bar = Paragraph::new(status_text)
+                    .style(Style::default().fg(Color::LightCyan))
+                    .alignment(Alignment::Left);
+                frame.render_widget(status_bar, status_chunk);
+            }
+            InputMode::CopyDestination => { 
+                let input_chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Length(1), Constraint::Length(1)]).split(status_chunk);
+                let prompt_text = app.state.status_message.as_deref().unwrap_or("Enter destination path for copy (Enter:confirm, Esc:cancel):");
+                let prompt_p = Paragraph::new(prompt_text).fg(Color::Yellow);
+                frame.render_widget(prompt_p, input_chunks[0]);
+                let input_field = Paragraph::new(app.state.current_input.value())
+                    .block(Block::default().borders(Borders::TOP).title("Path").border_style(Style::default().fg(Color::Yellow)))
+                    .fg(Color::White);
+                frame.render_widget(input_field, input_chunks[1]);
+                frame.set_cursor(
+                    input_chunks[1].x + app.state.current_input.visual_cursor() as u16 + 1, 
+                    input_chunks[1].y + 1 
+                );
+             }
+            InputMode::Settings => {
+                // The Settings mode has its own full-screen UI, so no specific status bar here.
+                // The hints are part of the settings_paragraph and hint Paragraph already rendered.
             }
         }
     }
