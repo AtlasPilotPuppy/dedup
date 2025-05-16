@@ -21,6 +21,31 @@ print_warning() {
     echo -e "${YELLOW}[dedups]${NC} $1"
 }
 
+# Parse command line arguments
+SSH_VARIANT=false
+FORCE_VARIANT=""
+
+while [[ "$#" -gt 0 ]]; do
+    case $1 in
+        --ssh) SSH_VARIANT=true ;;
+        --no-ssh) SSH_VARIANT=false ;;
+        --help)
+            echo "Usage: $0 [OPTIONS]"
+            echo "Options:"
+            echo "  --ssh       Install the SSH-enabled variant (with remote filesystem support)"
+            echo "  --no-ssh    Install the standard variant without SSH support (default)"
+            echo "  --help      Show this help message"
+            exit 0
+            ;;
+        *)
+            print_error "Unknown parameter: $1"
+            echo "Use --help for usage information"
+            exit 1
+            ;;
+    esac
+    shift
+done
+
 # Function to detect OS and architecture
 detect_platform() {
     local OS
@@ -38,78 +63,116 @@ detect_platform() {
     # Detect architecture
     case "$(uname -m)" in
         x86_64)     ARCH="x86_64";;
-        aarch64)    ARCH="aarch64";;
-        arm64)      ARCH="aarch64";;
-        *)          print_error "Unsupported architecture"; exit 1;;
+        arm64|aarch64) 
+            ARCH="aarch64"
+            # Only macOS supports ARM officially
+            if [ "$OS" != "macos" ]; then
+                print_warning "ARM architecture detected on non-macOS platform. This might not be supported."
+            fi
+            ;;
+        *)
+            print_error "Unsupported architecture: $(uname -m)"
+            exit 1
+            ;;
     esac
 
-    # Set binary name based on OS
-    if [ "$OS" = "windows" ]; then
+    # Handle architecture-specific naming for macOS
+    if [ "$OS" = "macos" ] && [ "$ARCH" = "aarch64" ]; then
+        BINARY_NAME="dedups-macos-aarch64"
+    elif [ "$OS" = "macos" ]; then
+        BINARY_NAME="dedups-macos-x86_64"
+    elif [ "$OS" = "linux" ]; then
+        BINARY_NAME="dedups-linux-x86_64"
+    elif [ "$OS" = "windows" ]; then
         BINARY_NAME="dedups-windows-x86_64.exe"
-    else
-        BINARY_NAME="dedups-${OS}-${ARCH}"
+    fi
+
+    # Add -ssh suffix if SSH variant is requested
+    if [ "$SSH_VARIANT" = true ]; then
+        # Check if the binary name has an extension (Windows)
+        if [[ "$BINARY_NAME" == *.exe ]]; then
+            BINARY_NAME="${BINARY_NAME%.exe}-ssh.exe"
+        else
+            BINARY_NAME="${BINARY_NAME}-ssh"
+        fi
     fi
 
     echo "$BINARY_NAME"
 }
 
-# Function to get latest release version
-get_latest_release() {
-    curl -s "https://api.github.com/repos/AtlasPilotPuppy/dedup/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/'
-}
+# Get the binary name for this platform
+BINARY_NAME=$(detect_platform)
 
-# Function to install binary
-install_binary() {
-    local BINARY_NAME=$1
-    local VERSION=$2
-    local INSTALL_DIR
+# Print information about the platform
+if [ "$SSH_VARIANT" = true ]; then
+    print_message "Installing dedups with SSH/remote file system support..."
+else
+    print_message "Installing standard dedups binary..."
+fi
+print_message "Detected binary: $BINARY_NAME"
 
-    # Try to install to /usr/local/bin first
-    if [ -w "/usr/local/bin" ]; then
-        INSTALL_DIR="/usr/local/bin"
+# Determine download URL
+LATEST_RELEASE_URL="https://github.com/AtlasPilotPuppy/dedup/releases/latest/download/${BINARY_NAME}"
+print_message "Downloading from: $LATEST_RELEASE_URL"
+
+# Determine install path
+DEDUPS_INSTALL_DIR=""
+if [ "$(id -u)" -eq 0 ]; then
+    # Root user
+    DEDUPS_INSTALL_DIR="/usr/local/bin"
+elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+    # User with sudo privileges (cached credentials)
+    DEDUPS_INSTALL_DIR="/usr/local/bin"
+else
+    # Regular user
+    if [ -d "$HOME/.local/bin" ] || mkdir -p "$HOME/.local/bin" 2>/dev/null; then
+        DEDUPS_INSTALL_DIR="$HOME/.local/bin"
+        if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
+            print_warning "~/.local/bin is not in your PATH. You may need to add it."
+            print_warning "Add this to your ~/.bashrc or ~/.zshrc:"
+            print_warning "    export PATH=\"\$HOME/.local/bin:\$PATH\""
+        fi
     else
-        # Fallback to ~/.local/bin
-        INSTALL_DIR="$HOME/.local/bin"
-        mkdir -p "$INSTALL_DIR"
-    fi
-
-    print_message "Downloading dedups $VERSION..."
-    curl -L "https://github.com/AtlasPilotPuppy/dedup/releases/download/${VERSION}/${BINARY_NAME}" -o "$INSTALL_DIR/dedups"
-
-    # Make it executable
-    chmod +x "$INSTALL_DIR/dedups"
-
-    print_message "Installed dedups to $INSTALL_DIR/dedups"
-    
-    # Check if the binary is in PATH
-    if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
-        print_warning "The installation directory is not in your PATH. Add this line to your shell configuration file:"
-        echo "export PATH=\"$INSTALL_DIR:\$PATH\""
-    fi
-}
-
-# Main installation process
-main() {
-    print_message "Starting installation..."
-
-    # Detect platform and get binary name
-    BINARY_NAME=$(detect_platform)
-    if [ $? -ne 0 ]; then
+        print_error "Failed to determine installation directory"
         exit 1
     fi
+fi
 
-    # Get latest release version
-    VERSION=$(get_latest_release)
-    if [ -z "$VERSION" ]; then
-        print_error "Failed to get latest release version"
+# Set the destination path
+DEST_PATH="$DEDUPS_INSTALL_DIR/dedups"
+
+# Download and install
+print_message "Installing to: $DEST_PATH"
+
+if [ "$(id -u)" -eq 0 ] || [ "$DEDUPS_INSTALL_DIR" = "$HOME/.local/bin" ]; then
+    # Direct install
+    curl -L --progress-bar "$LATEST_RELEASE_URL" -o "$DEST_PATH" || {
+        print_error "Download failed"
         exit 1
-    fi
+    }
+    chmod +x "$DEST_PATH"
+else
+    # Use sudo
+    curl -L --progress-bar "$LATEST_RELEASE_URL" -o "/tmp/dedups_${BINARY_NAME}" || {
+        print_error "Download failed"
+        exit 1
+    }
+    chmod +x "/tmp/dedups_${BINARY_NAME}"
+    sudo mv "/tmp/dedups_${BINARY_NAME}" "$DEST_PATH" || {
+        print_error "Failed to move binary (sudo required)"
+        exit 1
+    }
+fi
 
-    # Install the binary
-    install_binary "$BINARY_NAME" "$VERSION"
+print_message "Installation complete! 🎉"
+print_message "Run 'dedups --help' to get started."
 
-    print_message "Installation complete! You can now use 'dedups' command."
-}
+# Show SSH info if that variant was installed
+if [ "$SSH_VARIANT" = true ]; then
+    print_message "SSH support is enabled. You can use commands like:"
+    print_message "  dedups ssh:hostname:/path"
+    print_message "  dedups /local/path ssh:hostname:/remote/path"
+    print_message "See the documentation for more SSH usage examples."
+fi
 
-# Run main function
-main 
+exit 0 

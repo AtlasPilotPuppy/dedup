@@ -11,9 +11,12 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::SystemTime;
 use walkdir::WalkDir;
+use itertools::Itertools;
+use anyhow::Context;
 
 use crate::tui_app::ScanMessage;
 use crate::Cli;
+use std::sync::mpsc as stdmpsc;
 use std::sync::mpsc::Sender as StdMpscSender;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -278,12 +281,12 @@ pub fn calculate_hash(path: &Path, algorithm: &str) -> Result<String> {
     }
 }
 
-/// Find duplicate files with progress reporting (TUI mode)
+/// Finds duplicate files with progress updates
 pub fn find_duplicate_files_with_progress(
-    cli: &Cli,
+    cli: &crate::Cli,
     tx_progress: StdMpscSender<ScanMessage>,
 ) -> Result<Vec<DuplicateSet>> {
-    // Clone tx_progress before moving it into any closure
+    // Clone tx before moving it into any closure
     let tx_progress_for_media = tx_progress.clone();
 
     log::info!(
@@ -325,153 +328,45 @@ pub fn find_duplicate_files_with_progress(
         }
     };
 
-    // ========== STAGE 0: PRE-SCAN FOR TOTAL COUNT ==========
-    send_status(
-        0,
-        format!(
-            "Pre-scan: Counting files in {}",
-            cli.directories[0].display()
-        ),
-    );
-
-    // Pre-scan to count total files
-    let total_files = match count_files_in_directory(&cli.directories[0], &filter_rules) {
-        Ok(count) => {
-            send_status(0, format!("Pre-scan complete: Found {} total files", count));
-            count
-        }
-        Err(e) => {
-            log::warn!("[ScanThread] Failed to count files: {}", e);
-            send_status(0, format!("Pre-scan failed: {}", e));
-            0 // Continue without total count
-        }
-    };
-
     // ========== STAGE 1: FILE DISCOVERY ==========
-    send_status(
-        1,
-        format!(
-            "Stage 1/3: 📁 Starting file discovery in {} (0/{} files)",
-            cli.directories[0].display(),
-            if total_files > 0 {
-                total_files.to_string()
-            } else {
-                "?".to_string()
-            }
-        ),
-    );
-
-    let mut files_by_size: HashMap<u64, Vec<PathBuf>> = HashMap::new();
-    let walker = WalkDir::new(&cli.directories[0]).into_iter();
-    let mut files_scanned_count = 0;
-    let mut last_update_time = std::time::Instant::now();
-    let update_interval = std::time::Duration::from_millis(400); // Less frequent updates (400ms)
-
-    for entry in walker
-        .filter_entry(|e| {
-            if is_hidden(e) || is_symlink(e) {
-                return false;
-            }
-            if let Some(path_str) = e.path().to_str() {
-                filter_rules.is_match(path_str)
-            } else {
-                log::warn!(
-                    "[ScanThread] Path {:?} is not valid UTF-8, excluding.",
-                    e.path()
-                );
-                false
-            }
-        })
-        .flatten()
-    {
-        if entry.file_type().is_file() {
-            let path = entry.path().to_path_buf();
-            files_scanned_count += 1;
-
-            // Determine update frequency based on file count
-            let should_update = if files_scanned_count < 100 {
-                files_scanned_count % 10 == 0
-            } else if files_scanned_count < 500 {
-                files_scanned_count % 20 == 0
-            } else if files_scanned_count < 1000 {
-                files_scanned_count % 50 == 0
-            } else if files_scanned_count < 5000 {
-                files_scanned_count % 100 == 0
-            } else if files_scanned_count < 10000 {
-                files_scanned_count % 200 == 0
-            } else if files_scanned_count < 50000 {
-                files_scanned_count % 500 == 0
-            } else {
-                files_scanned_count % 1000 == 0
-            };
-
-            if should_update || last_update_time.elapsed() >= update_interval {
-                last_update_time = std::time::Instant::now();
-                // Show progress percentage if total is known
-                if total_files > 0 {
-                    let percent = (files_scanned_count as f64 / total_files as f64) * 100.0;
-                    send_status(
-                        1,
-                        format!(
-                            "Stage 1/3: 📁 Scanning files: {}/{} ({:.1}%)",
-                            files_scanned_count, total_files, percent
-                        ),
-                    );
-                } else {
-                    // Remove file name from status update to reduce repaints
-                    send_status(
-                        1,
-                        format!("Stage 1/3: 📁 Found {} files...", files_scanned_count),
-                    );
-                }
-            }
-
-            match fs::metadata(&path) {
-                Ok(metadata) => {
-                    if metadata.len() > 0 {
-                        files_by_size.entry(metadata.len()).or_default().push(path);
-                    }
-                }
-                Err(e) => {
-                    log::warn!("[ScanThread] Failed to get metadata for {:?}: {}", path, e)
-                }
-            }
-        }
+    send_status(1, format!("Scanning {} directories", cli.directories.len()));
+    
+    // Collect files from all directories
+    let mut all_files = Vec::new();
+    let mut current_directory_index = 0;
+    
+    for directory in &cli.directories {
+        current_directory_index += 1;
+        let dir_str = directory.to_string_lossy().to_string();
+        
+        send_status(1, format!("Scanning directory {} of {}: {}", 
+            current_directory_index, cli.directories.len(), dir_str));
+        
+        // Check if this is a remote directory
+        let mut files = handle_directory(cli, directory)?;
+        
+        // Add files to the main list
+        all_files.append(&mut files);
+        
+        // Update progress
+        send_status(1, format!("Found {} files in {}", files.len(), dir_str));
     }
 
-    let file_count = files_by_size.values().map(|v| v.len()).sum::<usize>();
-    let size_group_count = files_by_size.len();
-
-    if total_files > 0 {
-        let percent_found = (files_scanned_count as f64 / total_files as f64) * 100.0;
-        send_status(
-            1,
-            format!(
-                "Stage 1/3: 📁 File discovery complete. Found {} files ({:.1}%) in {} size groups.",
-                file_count, percent_found, size_group_count
-            ),
-        );
-    } else {
-        send_status(
-            1,
-            format!(
-                "Stage 1/3: 📁 File discovery complete. Found {} files in {} size groups.",
-                file_count, size_group_count
-            ),
-        );
-    }
-
-    log::info!(
-        "[ScanThread] Found {} files matching criteria, grouped into {} unique file sizes.",
-        file_count,
-        size_group_count
-    );
+    let _total_files = all_files.len();
 
     // ========== STAGE 2: SIZE COMPARISON ==========
     let mut duplicate_sets: Vec<DuplicateSet> = Vec::new();
-    let potential_duplicates: Vec<_> = files_by_size
+    
+    // Group files by size
+    let mut size_groups: HashMap<u64, Vec<FileInfo>> = HashMap::new();
+    for file in all_files {
+        size_groups.entry(file.size).or_default().push(file);
+    }
+    
+    // Keep only groups with more than one file (potential duplicates)
+    let potential_duplicates: Vec<(u64, Vec<FileInfo>)> = size_groups
         .into_iter()
-        .filter(|(_, paths)| paths.len() > 1)
+        .filter(|(_, files)| files.len() > 1)
         .collect();
 
     let _potential_duplicate_count = potential_duplicates.len();
@@ -496,7 +391,7 @@ pub fn find_duplicate_files_with_progress(
     let potential_groups = potential_duplicates.len();
     let potential_files: usize = potential_duplicates
         .iter()
-        .map(|(_, paths)| paths.len())
+        .map(|(_, group)| group.len())
         .sum();
 
     send_status(
@@ -525,7 +420,7 @@ pub fn find_duplicate_files_with_progress(
     let mut groups_hashed_count = 0;
     let total_files_to_hash = potential_duplicates
         .iter()
-        .map(|(_, paths)| paths.len())
+        .map(|(_, group)| group.len())
         .sum::<usize>();
 
     send_status(
@@ -536,24 +431,28 @@ pub fn find_duplicate_files_with_progress(
         ),
     );
 
-    // Keep track of all collected FileInfos for possible media processing later
+    // Shared storage for all file_infos
     let mut all_file_infos = Vec::new();
 
+    // Some variables needed for updating UI
+    let update_interval = std::time::Duration::from_millis(400);
+    let mut last_update_time = std::time::Instant::now();
+    
     pool.install(|| {
         potential_duplicates
-            .into_par_iter()
-            .for_each_with(local_tx, |thread_local_tx, (size, paths)| {
+            .par_iter()
+            .for_each_with(local_tx, |thread_local_tx, (size, files)| {
                 let mut hashes_in_group: HashMap<String, Vec<FileInfo>> = HashMap::new();
 
                 // Thread-local cache hits counter
                 let mut thread_cache_hits = 0;
 
-                for path in paths {
+                for file_info in files {
                     // Try to get hash from cache first if fast mode is enabled
                     let mut hash_from_cache = None;
                     if let Some(cache) = file_cache.as_ref() {
                         if let Ok(cache_guard) = cache.lock() {
-                            hash_from_cache = cache_guard.get_file_info(&path);
+                            hash_from_cache = cache_guard.get_file_info(&file_info.path);
                             if hash_from_cache.is_some() {
                                 thread_cache_hits += 1;
                             }
@@ -562,27 +461,36 @@ pub fn find_duplicate_files_with_progress(
 
                     match hash_from_cache {
                         // Use cached hash if available
-                        Some(file_info) => {
-                            if let Some(hash_str) = &file_info.hash {
-                                hashes_in_group.entry(hash_str.clone()).or_default().push(file_info);
+                        Some(cached_info) => {
+                            if let Some(hash_str) = &cached_info.hash {
+                                hashes_in_group
+                                    .entry(hash_str.clone())
+                                    .or_default()
+                                    .push(FileInfo {
+                                        path: file_info.path.clone(),
+                                        size: *size,
+                                        hash: Some(hash_str.clone()),
+                                        modified_at: cached_info.modified_at,
+                                        created_at: cached_info.created_at,
+                                    });
                             }
                         },
                         // Calculate hash if not cached or cache miss
-                        None => match calculate_hash(&path, &cli.algorithm) {
+                        None => match calculate_hash(&file_info.path, &cli.algorithm) {
                             Ok(hash_str) => {
-                                let metadata = match fs::metadata(&path) {
+                                let metadata = match fs::metadata(&file_info.path) {
                                     Ok(m) => m,
                                     Err(e) => {
-                                        log::warn!("Failed to get metadata for {:?}: {}", path, e);
+                                        log::warn!("Failed to get metadata for {:?}: {}", file_info.path, e);
                                         continue;
                                     }
                                 };
                                 let file_info = FileInfo {
-                                    path: path.clone(),
-                                    size,
+                                    path: file_info.path.clone(),
+                                    size: *size,
                                     hash: Some(hash_str.clone()),
-                                    modified_at: metadata.modified().ok(),
-                                    created_at: metadata.created().ok(),
+                                    modified_at: file_time_to_system_time(metadata.modified()),
+                                    created_at: file_time_to_system_time(metadata.created()),
                                 };
 
                                 // Update cache if available
@@ -592,10 +500,10 @@ pub fn find_duplicate_files_with_progress(
                                     }
                                 }
 
-                                hashes_in_group.entry(hash_str).or_default().push(file_info);
+                                hashes_in_group.entry(hash_str).or_default().push(file_info.clone());
                             }
                             Err(e) => {
-                                log::warn!("[ScanThread] Failed to hash {:?}: {}", path, e);
+                                log::warn!("[ScanThread] Failed to hash {:?}: {}", file_info.path, e);
                                 if thread_local_tx.send(Err(e)).is_err() {
                                     log::error!("[ScanThread] Hashing thread failed to send error (channel closed).");
                                 }
@@ -1042,152 +950,318 @@ pub fn determine_action_targets(
     Ok((kept_file_info, files_to_process))
 }
 
-pub fn delete_files(files_to_delete: &[FileInfo], dry_run: bool) -> Result<(usize, Vec<String>)> {
-    let mut count = 0;
-    let mut logs = Vec::new();
-    if dry_run {
-        logs.push("[DRY RUN] Would delete the following files:".to_string());
-        for file_info in files_to_delete {
-            logs.push(format!("[DRY RUN]    - {}", file_info.path.display()));
-            count += 1;
-        }
-    } else {
-        logs.push("Deleting the following files:".to_string());
-        for file_info in files_to_delete {
-            match fs::remove_file(&file_info.path) {
-                Ok(_) => {
-                    logs.push(format!("Deleted: {}", file_info.path.display()));
-                    count += 1;
-                }
-                Err(e) => {
-                    logs.push(format!(
-                        "Error deleting {}: {}",
-                        file_info.path.display(),
-                        e
-                    ));
-                }
-            }
-        }
-    }
-    Ok((count, logs))
-}
-
-pub fn move_files(
-    files_to_move: &[FileInfo],
-    target_dir: &Path,
+/// Delete files, handling remote paths
+pub fn delete_files(
+    files: &[FileInfo],
     dry_run: bool,
 ) -> Result<(usize, Vec<String>)> {
     let mut count = 0;
     let mut logs = Vec::new();
 
-    if !target_dir.exists() {
-        if dry_run {
-            logs.push(format!(
-                "[DRY RUN] Target directory {} does not exist. Would create it.",
-                target_dir.display()
-            ));
-            log::info!(
-                "[DRY RUN] Target directory {:?} does not exist. Would attempt to create it.",
-                target_dir
-            );
-        } else {
-            log::info!(
-                "Target directory {:?} does not exist. Creating it.",
-                target_dir
-            );
-            fs::create_dir_all(target_dir)?;
-            logs.push(format!(
-                "Created target directory: {}",
-                target_dir.display()
-            ));
-        }
-    } else if !target_dir.is_dir() {
-        return Err(anyhow::anyhow!(
-            "Target move path {:?} exists but is not a directory.",
-            target_dir
-        ));
-    }
-
-    if dry_run {
-        logs.push(format!(
-            "[DRY RUN] Would move the following files to {}:",
-            target_dir.display()
-        ));
-        for file_info in files_to_move {
-            let target_path = target_dir.join(
-                file_info
-                    .path
-                    .file_name()
-                    .unwrap_or_else(|| file_info.path.as_os_str()),
-            );
-            logs.push(format!(
-                "[DRY RUN]    - {} -> {}",
-                file_info.path.display(),
-                target_path.display()
-            ));
-            log::info!("[DRY RUN]    - {:?} -> {:?}", file_info.path, target_path);
-            count += 1;
-        }
-    } else {
-        logs.push(format!(
-            "Moving the following files to {}:",
-            target_dir.display()
-        ));
-        for file_info in files_to_move {
-            let file_name = file_info
-                .path
-                .file_name()
-                .unwrap_or_else(|| file_info.path.as_os_str());
-            let mut target_path = target_dir.join(file_name);
-
-            // Handle potential name collisions in the target directory
-            let mut counter = 1;
-            while target_path.exists() {
-                let stem = target_path
-                    .file_stem()
-                    .unwrap_or_default()
-                    .to_string_lossy();
-                let ext = target_path
-                    .extension()
-                    .unwrap_or_default()
-                    .to_string_lossy();
-                let new_name = format!(
-                    "{}_copy({}){}{}",
-                    stem.trim_end_matches(&format!("_copy({})", counter - 1))
-                        .trim_end_matches("_copy"),
-                    counter,
-                    if ext.is_empty() { "" } else { "." },
-                    ext
-                );
-                target_path = target_dir.join(new_name);
-                counter += 1;
+    for file in files {
+        let path = &file.path;
+        
+        // Handle remote paths
+        if is_remote_path(path) {
+            #[cfg(feature = "ssh")]
+            {
+                if let Err(e) = delete_file_remote(path, dry_run, &mut logs, &mut count) {
+                    logs.push(format!("Error deleting remote file: {}", e));
+                    log::error!("Error deleting remote file: {}", e);
+                }
+                continue;
             }
+            
+            #[cfg(not(feature = "ssh"))]
+            {
+                logs.push(format!("Error: SSH support not enabled for path: {}", path.display()));
+                log::error!("SSH support not enabled for path: {}", path.display());
+                continue;
+            }
+        }
 
-            match fs::rename(&file_info.path, &target_path) {
-                // Using rename for move
+        // Handle local paths
+        let file_display = path.display().to_string();
+        
+        if dry_run {
+            let msg = format!("[DRY RUN] Would delete: {}", file_display);
+            logs.push(msg.clone());
+            log::info!("{}", msg);
+            count += 1;
+        } else {
+            match fs::remove_file(path) {
                 Ok(_) => {
-                    logs.push(format!(
-                        "Moved: {} -> {}",
-                        file_info.path.display(),
-                        target_path.display()
-                    ));
-                    log::info!("    Moved: {:?} -> {:?}", file_info.path, target_path);
+                    let msg = format!("Deleted: {}", file_display);
+                    logs.push(msg.clone());
+                    log::info!("{}", msg);
                     count += 1;
                 }
                 Err(e) => {
-                    let error_msg = format!("Error moving {}: {}", file_info.path.display(), e);
-                    logs.push(error_msg);
-                    log::error!(
-                        "Failed to move {:?} to {:?}: {}",
-                        file_info.path,
-                        target_path,
-                        e
-                    );
+                    let error_msg = format!("Failed to delete {}: {}", file_display, e);
+                    logs.push(error_msg.clone());
+                    log::error!("{}", error_msg);
                 }
             }
         }
     }
+
     Ok((count, logs))
+}
+
+/// Delete a file on a remote system using SSH
+#[cfg(feature = "ssh")]
+fn delete_file_remote(
+    path: &Path,
+    dry_run: bool,
+    logs: &mut Vec<String>,
+    count: &mut usize,
+) -> Result<()> {
+    let path_str = path.to_str()
+        .ok_or_else(|| anyhow::anyhow!("Invalid UTF-8 in path"))?;
+    
+    let remote = crate::ssh_utils::RemoteLocation::parse(path_str)?;
+    let file_path = &remote.path;
+    
+    if dry_run {
+        let msg = format!("[DRY RUN] Would delete remote file: {}", file_path.display());
+        logs.push(msg.clone());
+        log::info!("{}", msg);
+        *count += 1;
+        return Ok(());
+    }
+    
+    // Use SSH to delete the file
+    let command = format!("rm -f '{}'", file_path.display());
+    match remote.run_command(&command) {
+        Ok(_) => {
+            let msg = format!("Deleted remote file: {}", file_path.display());
+            logs.push(msg.clone());
+            log::info!("{}", msg);
+            *count += 1;
+            Ok(())
+        }
+        Err(e) => {
+            Err(anyhow::anyhow!("Failed to delete remote file: {}", e))
+        }
+    }
+}
+
+/// Move files to a destination directory, handling remote paths
+pub fn move_files(
+    files: &[FileInfo],
+    dest_dir: &Path,
+    dry_run: bool,
+) -> Result<(usize, Vec<String>)> {
+    let mut count = 0;
+    let mut logs = Vec::new();
+    
+    // Handle destination being remote
+    let dest_is_remote = is_remote_path(dest_dir);
+    
+    if dest_is_remote {
+        #[cfg(not(feature = "ssh"))]
+        {
+            return Err(anyhow::anyhow!("SSH support is not enabled in this build"));
+        }
+    } else if !dest_dir.exists() {
+        if dry_run {
+            let msg = format!(
+                "[DRY RUN] Would create destination directory: {}",
+                dest_dir.display()
+            );
+            logs.push(msg.clone());
+            log::info!("{}", msg);
+        } else {
+            fs::create_dir_all(dest_dir)?;
+            let msg = format!("Created destination directory: {}", dest_dir.display());
+            logs.push(msg.clone());
+            log::info!("{}", msg);
+        }
+    }
+    
+    // Process each file
+    for file in files {
+        let path = &file.path;
+        let file_name = path.file_name().ok_or_else(|| {
+            anyhow::anyhow!("Failed to get file name from {}", path.display())
+        })?;
+        
+        // Keep original paths relative to differentiate files with the same name
+        let relative_path = if let Ok(rel_path) = path.strip_prefix("/") {
+            rel_path.to_path_buf()
+        } else {
+            path.to_path_buf()
+        };
+        
+        let dest_path = dest_dir.join(file_name);
+        
+        // Ensure we have a unique destination path
+        let final_dest_path = ensure_unique_path(dest_path, &relative_path)?;
+        
+        // Handle source path being remote
+        if is_remote_path(path) {
+            #[cfg(feature = "ssh")]
+            {
+                if let Err(e) = move_remote_file(path, &final_dest_path, dry_run, &mut logs, &mut count) {
+                    logs.push(format!("Error moving remote file: {}", e));
+                    log::error!("Error moving remote file: {}", e);
+                }
+                continue;
+            }
+            
+            #[cfg(not(feature = "ssh"))]
+            {
+                logs.push(format!("Error: SSH support not enabled for path: {}", path.display()));
+                log::error!("SSH support not enabled for path: {}", path.display());
+                continue;
+            }
+        }
+        
+        // Handle local to local or local to remote move
+        if dest_is_remote {
+            #[cfg(feature = "ssh")]
+            {
+                // Local to remote move (copy then delete)
+                if let Err(e) = copy_file(path, &final_dest_path, dry_run) {
+                    logs.push(format!("Failed to copy file for move: {}", e));
+                    log::error!("Failed to copy file for move: {}", e);
+                    continue;
+                }
+                
+                // Delete the source file after successful copy
+                if !dry_run {
+                    if let Err(e) = fs::remove_file(path) {
+                        logs.push(format!("Failed to delete source file after copy: {}", e));
+                        log::error!("Failed to delete source file after copy: {}", e);
+                        continue;
+                    }
+                }
+                
+                let msg = if dry_run {
+                    format!("[DRY RUN] Would move {} to {}", path.display(), final_dest_path.display())
+                } else {
+                    format!("Moved {} to {}", path.display(), final_dest_path.display())
+                };
+                logs.push(msg.clone());
+                log::info!("{}", msg);
+                count += 1;
+            }
+        } else {
+            // Local to local move
+            if dry_run {
+                let msg = format!(
+                    "[DRY RUN] Would move {} to {}",
+                    path.display(),
+                    final_dest_path.display()
+                );
+                logs.push(msg.clone());
+                log::info!("{}", msg);
+                count += 1;
+            } else {
+                // Create parent directories if needed
+                if let Some(parent) = final_dest_path.parent() {
+                    if !parent.exists() {
+                        fs::create_dir_all(parent)?;
+                    }
+                }
+                
+                match fs::rename(path, &final_dest_path) {
+                    Ok(_) => {
+                        let msg = format!(
+                            "Moved {} to {}",
+                            path.display(),
+                            final_dest_path.display()
+                        );
+                        logs.push(msg.clone());
+                        log::info!("{}", msg);
+                        count += 1;
+                    }
+                    Err(e) => {
+                        let error_msg = format!(
+                            "Failed to move {} to {}: {}",
+                            path.display(),
+                            final_dest_path.display(),
+                            e
+                        );
+                        logs.push(error_msg.clone());
+                        log::error!("{}", error_msg);
+                    }
+                }
+            }
+        }
+    }
+    
+    Ok((count, logs))
+}
+
+/// Move a file from a remote source
+#[cfg(feature = "ssh")]
+fn move_remote_file(
+    src_path: &Path,
+    dest_path: &Path,
+    dry_run: bool,
+    logs: &mut Vec<String>,
+    count: &mut usize,
+) -> Result<()> {
+    // Move is implemented as copy + delete for remote files
+    if let Err(e) = copy_file(src_path, dest_path, dry_run) {
+        return Err(anyhow::anyhow!("Failed to copy file during move: {}", e));
+    }
+    
+    // Delete the source file after successful copy
+    if !dry_run {
+        let src_str = src_path.to_str()
+            .ok_or_else(|| anyhow::anyhow!("Invalid UTF-8 in path"))?;
+        
+        let remote = crate::ssh_utils::RemoteLocation::parse(src_str)?;
+        let file_path = &remote.path;
+        
+        // Use SSH to delete the file
+        let command = format!("rm -f '{}'", file_path.display());
+        if let Err(e) = remote.run_command(&command) {
+            return Err(anyhow::anyhow!("Failed to delete source file after copy: {}", e));
+        }
+    }
+    
+    let msg = if dry_run {
+        format!("[DRY RUN] Would move {} to {}", src_path.display(), dest_path.display())
+    } else {
+        format!("Moved {} to {}", src_path.display(), dest_path.display())
+    };
+    logs.push(msg.clone());
+    log::info!("{}", msg);
+    *count += 1;
+    
+    Ok(())
+}
+
+/// Helper to ensure a unique path for moved files
+fn ensure_unique_path(base_path: PathBuf, relative_path: &Path) -> Result<PathBuf> {
+    // If the path doesn't exist, we can use it directly
+    if !base_path.exists() {
+        return Ok(base_path);
+    }
+    
+    // Get file extension if any
+    let ext = base_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    
+    // Get file stem (name without extension)
+    let stem = base_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+    
+    // Create a hash of the relative path for uniqueness
+    let path_hash = format!("{:x}", md5::compute(relative_path.to_string_lossy().as_bytes()));
+    let short_hash = &path_hash[0..8]; // Use first 8 chars of hash
+    
+    // Create a new unique path
+    let parent = base_path.parent().unwrap_or(Path::new(""));
+    
+    let new_name = if ext.is_empty() {
+        format!("{}_{}", stem, short_hash)
+    } else {
+        format!("{}_{}.{}", stem, short_hash, ext)
+    };
+    
+    Ok(parent.join(new_name))
 }
 
 // Helper function to sort a Vec<FileInfo>
@@ -1442,128 +1516,161 @@ fn scan_directory(cli: &Cli, directory: &Path) -> Result<Vec<FileInfo>> {
     Ok(files)
 }
 
-// Copy missing files to target directory
+/// Copy files from source to destination, handling remote paths
+pub fn copy_file(source: &Path, dest: &Path, dry_run: bool) -> Result<()> {
+    if is_remote_path(source) || is_remote_path(dest) {
+        // At least one path is remote, handle with SSH/rsync
+        #[cfg(feature = "ssh")]
+        {
+            return copy_file_remote(source, dest, dry_run);
+        }
+        
+        #[cfg(not(feature = "ssh"))]
+        {
+            return Err(anyhow::anyhow!("SSH support is not enabled in this build"));
+        }
+    } else {
+        // Both paths are local, use standard copy
+        if dry_run {
+            log::info!("[DRY RUN] Would copy {} to {}", source.display(), dest.display());
+            return Ok(());
+        }
+        
+        // Create parent directories if they don't exist
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        
+        // Copy the file
+        std::fs::copy(source, dest)?;
+        Ok(())
+    }
+}
+
+/// Copy a file using SSH/rsync when at least one path is remote
+#[cfg(feature = "ssh")]
+fn copy_file_remote(source: &Path, dest: &Path, dry_run: bool) -> Result<()> {
+    use std::process::Command;
+    
+    // Determine which path is remote and parse it
+    let (remote_path, local_path, is_remote_source) = if is_remote_path(source) {
+        let source_str = source.to_str()
+            .ok_or_else(|| anyhow::anyhow!("Invalid UTF-8 in path"))?;
+        let remote = crate::ssh_utils::RemoteLocation::parse(source_str)?;
+        (remote, dest.to_path_buf(), true)
+    } else {
+        let dest_str = dest.to_str()
+            .ok_or_else(|| anyhow::anyhow!("Invalid UTF-8 in path"))?;
+        let remote = crate::ssh_utils::RemoteLocation::parse(dest_str)?;
+        (remote, source.to_path_buf(), false)
+    };
+    
+    // Generate rsync command
+    let rsync_cmd = remote_path.rsync_command(
+        if is_remote_source { &remote_path.path } else { &local_path },
+        if is_remote_source { &local_path } else { &remote_path.path },
+        is_remote_source
+    );
+    
+    // Add --dry-run if needed
+    let mut cmd_args = rsync_cmd.clone();
+    if dry_run {
+        cmd_args.push("--dry-run".to_string());
+    }
+    
+    // Log the command
+    log::info!("Executing: {}", cmd_args.join(" "));
+    
+    if dry_run {
+        log::info!("[DRY RUN] Would execute: {}", cmd_args.join(" "));
+        return Ok(());
+    }
+    
+    // Execute the command
+    let output = Command::new(&cmd_args[0])
+        .args(&cmd_args[1..])
+        .output()?;
+    
+    // Check for errors
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow::anyhow!("rsync failed: {}", stderr));
+    }
+    
+    Ok(())
+}
+
+/// Copy missing files between directories, handling remote paths
 pub fn copy_missing_files(
     missing_files: &[FileInfo],
     target_dir: &Path,
     dry_run: bool,
 ) -> Result<(usize, Vec<String>)> {
-    let mut count = 0;
+    let mut copy_count = 0;
     let mut logs = Vec::new();
-
-    if !target_dir.exists() {
-        if dry_run {
-            let msg = format!(
-                "[DRY RUN] Target directory {} does not exist. Would create it.",
-                target_dir.display()
-            );
-            log::info!("{}", msg);
-            logs.push(msg);
+    
+    for file in missing_files {
+        let source_path = &file.path;
+        
+        // Use local path handling logic for both remote and local
+        let _source_file_name = source_path
+            .file_name()
+            .ok_or_else(|| anyhow::anyhow!("Failed to get file name"))?;
+            
+        // For now we'll preserve the source directory structure under target
+        // This makes more sense for remote copying to avoid name conflicts
+        let relative_path = if let Ok(rel_path) = source_path.strip_prefix("/") {
+            rel_path.to_path_buf()
         } else {
-            log::info!(
-                "Target directory {:?} does not exist. Creating it.",
-                target_dir
-            );
-            fs::create_dir_all(target_dir)?;
-            logs.push(format!(
-                "Created target directory: {}",
-                target_dir.display()
-            ));
-        }
-    } else if !target_dir.is_dir() {
-        return Err(anyhow::anyhow!(
-            "Target path {:?} exists but is not a directory.",
-            target_dir
-        ));
-    }
-
-    if dry_run {
-        logs.push(format!(
-            "[DRY RUN] Would copy {} missing files to {}",
-            missing_files.len(),
-            target_dir.display()
-        ));
-
-        for file in missing_files {
-            let relative_path = match file
-                .path
-                .strip_prefix(file.path.parent().unwrap().parent().unwrap())
-            {
-                Ok(rel) => rel.to_path_buf(),
-                Err(_) => {
-                    // If we can't determine a good relative path, just use the filename
-                    PathBuf::from(file.path.file_name().unwrap_or_default())
-                }
-            };
-
-            let target_path = target_dir.join(relative_path);
-
-            logs.push(format!(
-                "[DRY RUN] Would copy {} to {}",
-                file.path.display(),
-                target_path.display()
-            ));
-            log::info!("[DRY RUN] Would copy {:?} to {:?}", file.path, target_path);
-            count += 1;
-        }
-    } else {
-        logs.push(format!(
-            "Copying {} missing files to {}",
-            missing_files.len(),
-            target_dir.display()
-        ));
-
-        for file in missing_files {
-            let relative_path = match file
-                .path
-                .strip_prefix(file.path.parent().unwrap().parent().unwrap())
-            {
-                Ok(rel) => rel.to_path_buf(),
-                Err(_) => {
-                    // If we can't determine a good relative path, just use the filename
-                    PathBuf::from(file.path.file_name().unwrap_or_default())
-                }
-            };
-
-            let target_path = target_dir.join(relative_path);
-
-            // Ensure parent directory exists
+            source_path.to_path_buf()
+        };
+        
+        let target_path = target_dir.join(relative_path);
+        
+        // Create parent directories if they don't exist (only for local target)
+        if !is_remote_path(target_dir) {
             if let Some(parent) = target_path.parent() {
-                if !parent.exists() {
-                    fs::create_dir_all(parent)?;
-                    let msg = format!("Created parent directory: {}", parent.display());
-                    logs.push(msg.clone());
-                    log::debug!("{}", msg);
+                if dry_run {
+                    logs.push(format!("[DRY RUN] Would create directory: {}", parent.display()));
+                } else {
+                    std::fs::create_dir_all(parent)?;
+                    logs.push(format!("Created directory: {}", parent.display()));
                 }
             }
-
-            match fs::copy(&file.path, &target_path) {
+        }
+        
+        // Copy the file
+        if dry_run {
+            logs.push(format!(
+                "[DRY RUN] Would copy {} to {}",
+                source_path.display(),
+                target_path.display()
+            ));
+        } else {
+            match copy_file(source_path, &target_path, dry_run) {
                 Ok(_) => {
-                    let msg = format!(
-                        "Copied: {} -> {}",
-                        file.path.display(),
+                    logs.push(format!(
+                        "Copied {} to {}",
+                        source_path.display(),
                         target_path.display()
-                    );
-                    logs.push(msg.clone());
-                    log::info!("{}", msg);
-                    count += 1;
+                    ));
+                    copy_count += 1;
                 }
                 Err(e) => {
                     let error_msg = format!(
                         "Failed to copy {} to {}: {}",
-                        file.path.display(),
+                        source_path.display(),
                         target_path.display(),
                         e
                     );
                     logs.push(error_msg.clone());
                     log::error!("{}", error_msg);
-                    // Continue with other files
                 }
             }
         }
     }
-
-    Ok((count, logs))
+    
+    Ok((copy_count, logs))
 }
 
 // Add this new function for counting files in a directory
@@ -1723,4 +1830,160 @@ mod tests {
         let expected_empty_blake3 = hash.clone();
         assert_eq!(hash, expected_empty_blake3);
     }
+}
+
+#[cfg(feature = "ssh")]
+use crate::ssh_utils::RemoteLocation;
+
+/// Determines if a path is a remote SSH path
+pub fn is_remote_path(path: &Path) -> bool {
+    #[cfg(feature = "ssh")]
+    {
+        if let Some(path_str) = path.to_str() {
+            return RemoteLocation::is_ssh_path(path_str);
+        }
+    }
+    
+    false
+}
+
+/// Handles a directory that could be either local or remote
+pub fn handle_directory(cli: &crate::Cli, dir_path: &Path) -> Result<Vec<FileInfo>> {
+    if is_remote_path(dir_path) {
+        #[cfg(feature = "ssh")]
+        {
+            return handle_remote_directory(cli, dir_path);
+        }
+        
+        #[cfg(not(feature = "ssh"))]
+        {
+            return Err(anyhow::anyhow!("SSH support is not enabled in this build"));
+        }
+    } else {
+        // Local directory
+        return scan_directory(cli, dir_path);
+    }
+}
+
+/// Handles a remote directory for scanning
+#[cfg(feature = "ssh")]
+fn handle_remote_directory(cli: &crate::Cli, dir_path: &Path) -> Result<Vec<FileInfo>> {
+    use anyhow::Context;
+    
+    log::info!("Handling remote directory: {:?}", dir_path);
+    
+    // Convert Path to string for parsing
+    let path_str = dir_path.to_str()
+        .ok_or_else(|| anyhow::anyhow!("Invalid UTF-8 in remote path"))?;
+    
+    // Parse the remote location
+    let remote_location = RemoteLocation::parse(path_str)?;
+    
+    // Apply any CLI SSH/Rsync options to the remote location
+    let mut remote = remote_location.clone();
+    if !cli.ssh_options.is_empty() {
+        remote.ssh_options.extend(cli.ssh_options.clone());
+    }
+    if !cli.rsync_options.is_empty() {
+        remote.rsync_options.extend(cli.rsync_options.clone());
+    }
+    
+    // Check if dedups is installed on the remote
+    let dedups_installed = tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(remote.check_dedups_installed())?;
+    
+    if dedups_installed && cli.use_remote_dedups {
+        log::info!("Using remote dedups for directory scan");
+        
+        // Set up SSH protocol for communication
+        let mut protocol = crate::ssh_utils::SshProtocol::new(remote.clone());
+        protocol.connect()?;
+        
+        // Prepare dedups arguments for remote execution
+        let mut args_vec = Vec::new();
+        args_vec.push(remote.path.to_str().unwrap_or("/"));
+        
+        // Add common arguments that make sense for remote execution
+        if !cli.include.is_empty() {
+            args_vec.push("--include");
+            for pattern in &cli.include {
+                args_vec.push(pattern);
+            }
+        }
+        if !cli.exclude.is_empty() {
+            args_vec.push("--exclude");
+            for pattern in &cli.exclude {
+                args_vec.push(pattern);
+            }
+        }
+        if let Some(ref filter_file) = cli.filter_from {
+            args_vec.push("--filter-from");
+            args_vec.push(filter_file.to_str().unwrap_or(""));
+        }
+        
+        // Create a vector of string slices manually
+        let mut args = Vec::new();
+        for s in &args_vec {
+            args.push(s.as_ref());
+        }
+        
+        // Execute remote dedups scan and parse results
+        let output = protocol.execute_dedups(&args)?;
+        
+        // Parse JSON output (assuming dedups outputs JSON)
+        let scan_result: Vec<FileInfo> = serde_json::from_str(&output)
+            .with_context(|| "Failed to parse remote dedups output")?;
+        
+        Ok(scan_result)
+    } else {
+        if !dedups_installed && cli.allow_remote_install {
+            log::info!("dedups not found on remote, attempting installation");
+            if let Err(e) = remote.install_dedups() {
+                log::warn!("Failed to install dedups on remote: {}", e);
+            }
+        }
+        
+        // Fallback to limited remote scanning via SSH commands
+        log::warn!("Using limited remote scanning functionality");
+        log::warn!("Media deduplication is not available in SSH fallback mode");
+        
+        // Perform basic file listing with remote commands
+        let command = format!("find {} -type f -not -path '*/\\.*' | sort", remote.path.display());
+        let output = remote.run_command(&command)?;
+        
+        // Parse output into FileInfo structs
+        let mut file_infos = Vec::new();
+        for line in output.lines() {
+            let path = std::path::PathBuf::from(line.trim());
+            
+            // Get file stats
+            let stat_cmd = format!("stat -c '%s %Y' '{}'", path.display());
+            let stat_output = remote.run_command(&stat_cmd)?;
+            let parts: Vec<&str> = stat_output.split_whitespace().collect();
+            
+            if parts.len() >= 2 {
+                let size = parts[0].parse::<u64>().unwrap_or(0);
+                let mtime_secs = parts[1].parse::<u64>().unwrap_or(0);
+                
+                // Create the FileInfo with correct modified_at type
+                let file_info = FileInfo {
+                    path: path.clone(),
+                    size,
+                    modified_at: std::time::SystemTime::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(mtime_secs)),
+                    created_at: None, // Not easily available on all systems
+                    hash: None, // We'll compute this later if needed
+                };
+                
+                file_infos.push(file_info);
+            }
+        }
+        
+        Ok(file_infos)
+    }
+}
+
+// Helper function to convert std::io::Result<FileTime> to Option<SystemTime>
+fn file_time_to_system_time(time_result: std::io::Result<SystemTime>) -> Option<SystemTime> {
+    time_result.ok()
 }

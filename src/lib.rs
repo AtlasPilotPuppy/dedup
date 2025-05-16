@@ -23,6 +23,10 @@ pub mod audio_fingerprint;
 // Add video fingerprinting module
 pub mod video_fingerprint;
 
+// Add SSH utilities module (feature-gated)
+#[cfg(feature = "ssh")]
+pub mod ssh_utils;
+
 // To make Cli accessible, you'll need to move its definition from main.rs to lib.rs
 // or re-export it from main.rs if main.rs uses this lib.rs as a library.
 // For a typical binary project that also wants to expose a library for testing/other uses:
@@ -52,6 +56,7 @@ pub struct Cli {
     /// The directories to scan for duplicate or missing files.
     /// When multiple directories are specified, the last one is treated as the target
     /// for copying missing files, unless --target is specified.
+    /// Supports SSH paths in the format ssh:host:/path, ssh:user@host:/path, or ssh:user@host:port:/path.
     #[clap(required_unless_present = "interactive")]
     pub directories: Vec<PathBuf>,
 
@@ -222,6 +227,26 @@ pub struct Cli {
     /// Media deduplication options (will be populated from above arguments)
     #[clap(skip)]
     pub media_dedup_options: MediaDedupOptions,
+
+    /// Allow installation of dedups on remote systems if not found
+    #[cfg(feature = "ssh")]
+    #[clap(long, default_value_t = true, help = "Allow installation of dedups on remote systems")]
+    pub allow_remote_install: bool,
+
+    /// SSH specific options for remote connections (comma-separated)
+    #[cfg(feature = "ssh")]
+    #[clap(long, help = "SSH options to pass to the ssh command (comma-separated)")]
+    pub ssh_options: Vec<String>,
+
+    /// Rsync specific options for file transfers (comma-separated)
+    #[cfg(feature = "ssh")]
+    #[clap(long, help = "Rsync options to pass to the rsync command (comma-separated)")]
+    pub rsync_options: Vec<String>,
+
+    /// Whether to attempt to use the remote dedups (if available) for operations
+    #[cfg(feature = "ssh")]
+    #[clap(long, default_value_t = true, help = "Use remote dedups instance if available")]
+    pub use_remote_dedups: bool,
 }
 
 impl Cli {
@@ -337,6 +362,30 @@ impl Cli {
             self.media_dedup_options = config.media_dedup;
         }
 
+        // Apply SSH options from config
+        #[cfg(feature = "ssh")]
+        {
+            // Only apply if not explicitly set on CLI
+            if self.ssh_options.is_empty() && !config.ssh.ssh_options.is_empty() {
+                self.ssh_options = config.ssh.ssh_options.clone();
+            }
+            
+            if self.rsync_options.is_empty() && !config.ssh.rsync_options.is_empty() {
+                self.rsync_options = config.ssh.rsync_options.clone();
+            }
+            
+            // Boolean options should use config value if not explicitly changed
+            if self.allow_remote_install == true && config.ssh.allow_remote_install == false {
+                // If config is false but CLI default is true, use config value
+                self.allow_remote_install = config.ssh.allow_remote_install;
+            }
+            
+            if self.use_remote_dedups == true && config.ssh.use_remote_dedups == false {
+                // If config is false but CLI default is true, use config value
+                self.use_remote_dedups = config.ssh.use_remote_dedups;
+            }
+        }
+
         // Ensure we always have defaults for required fields that might be empty
         if self.algorithm.is_empty() {
             self.algorithm = "xxhash".to_string();
@@ -370,3 +419,9 @@ impl Cli {
 // then main.rs would use `use dedup::Cli;` (if Cli is made public in lib.rs).
 
 // Simplest path for now: Define Cli in a new module within the library, e.g. `
+
+#[cfg(test)]
+mod tests {
+    #[cfg(feature = "ssh")]
+    mod ssh_tests;
+}

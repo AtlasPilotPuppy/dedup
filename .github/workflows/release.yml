@@ -16,92 +16,158 @@ jobs:
     strategy:
       matrix:
         include:
+          # Linux builds - standard and SSH
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             artifact_name: dedups-linux-x86_64
             binary_name: dedups
+            features: "linux"
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact_name: dedups-linux-x86_64-ssh
+            binary_name: dedups
+            features: "linux,ssh"
+          
+          # macOS builds - standard and SSH
           - os: macos-latest
             target: x86_64-apple-darwin
             artifact_name: dedups-macos-x86_64
             binary_name: dedups
+            features: ""
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact_name: dedups-macos-x86_64-ssh
+            binary_name: dedups
+            features: "ssh"
+          
+          # macOS ARM builds - standard and SSH
           - os: macos-latest
             target: aarch64-apple-darwin
             artifact_name: dedups-macos-aarch64
             binary_name: dedups
+            features: ""
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact_name: dedups-macos-aarch64-ssh
+            binary_name: dedups
+            features: "ssh"
+          
+          # Windows builds - standard and SSH
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             artifact_name: dedups-windows-x86_64.exe
             binary_name: dedups.exe
+            features: ""
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_name: dedups-windows-x86_64-ssh.exe
+            binary_name: dedups.exe
+            features: "ssh"
 
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          target: ${{ matrix.target }}
+      
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      
+      - name: Install Linux development dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev pkg-config
 
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
-      with:
-        targets: ${{ matrix.target }}
-
-    - name: Cache dependencies
-      uses: actions/cache@v4
-      with:
-        path: |
-          ~/.cargo/registry
-          ~/.cargo/git
-          target
-        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-
-    - name: Build
-      run: cargo build --release --target ${{ matrix.target }}
-
-    - name: Prepare artifact
-      shell: bash
-      run: |
-        mkdir -p artifacts
-        if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-          cp target/${{ matrix.target }}/release/dedups.exe artifacts/dedups-windows-x86_64.exe
-        elif [[ "${{ matrix.os }}" == "macos-latest" && "${{ matrix.target }}" == "aarch64-apple-darwin" ]]; then
-          cp target/${{ matrix.target }}/release/dedups artifacts/dedups-macos-aarch64
-        elif [[ "${{ matrix.os }}" == "macos-latest" ]]; then
-          cp target/${{ matrix.target }}/release/dedups artifacts/dedups-macos-x86_64
-        else
-          cp target/${{ matrix.target }}/release/dedups artifacts/dedups-linux-x86_64
-        fi
-
-    - name: Upload artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: ${{ matrix.artifact_name }}
-        path: artifacts/${{ matrix.artifact_name }}
+      # Set up cross-compilation for ARM on macOS
+      - name: Install cross-compilation tools for macOS ARM
+        if: matrix.target == 'aarch64-apple-darwin'
+        run: |
+          rustup target add aarch64-apple-darwin
+      
+      # Build with Linux-specific flags
+      - name: Build (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          cargo build --release --target ${{ matrix.target }} --features ${{ matrix.features }}
+        env:
+          RUSTFLAGS: "-C target-cpu=native"
+      
+      # Build with macOS ARM flags
+      - name: Build (macOS ARM)
+        if: matrix.target == 'aarch64-apple-darwin'
+        run: |
+          cargo build --release --target ${{ matrix.target }} --features ${{ matrix.features }}
+        env:
+          RUSTFLAGS: "-C target-feature=+aes,+neon"
+      
+      # Standard build for other platforms
+      - name: Build (Standard)
+        if: matrix.os != 'ubuntu-latest' && matrix.target != 'aarch64-apple-darwin'
+        run: |
+          cargo build --release --target ${{ matrix.target }} --features ${{ matrix.features }}
+      
+      # Prepare artifact on Linux/macOS
+      - name: Prepare artifact
+        if: matrix.os != 'windows-latest'
+        run: |
+          cd target/${{ matrix.target }}/release
+          cp ${{ matrix.binary_name }} ${{ matrix.artifact_name }}
+          strip ${{ matrix.artifact_name }}
+      
+      # Prepare artifact on Windows (no strip command)
+      - name: Prepare artifact (Windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          cd target/${{ matrix.target }}/release
+          cp ${{ matrix.binary_name }} ${{ matrix.artifact_name }}
+      
+      # Upload the artifact
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
+          if-no-files-found: error
 
   release:
-    name: Create Release
+    name: Release
     needs: build
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
-    - uses: actions/checkout@v4
-
-    - name: Download all artifacts
-      uses: actions/download-artifact@v4
-      with:
-        path: artifacts
-
-    - name: Move all artifacts to root
-      run: |
-        find artifacts -type f -exec mv {} . \;
-
-    - name: List downloaded artifacts
-      run: ls -la
-
-    - name: Create Release and Upload Assets
-      uses: softprops/action-gh-release@v1
-      with:
-        files: |
-          dedups-linux-x86_64
-          dedups-macos-x86_64
-          dedups-macos-aarch64
-          dedups-windows-x86_64.exe
-        generate_release_notes: true
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      
+      - name: Move all artifacts to root
+        run: |
+          for dir in artifacts/*/; do
+            cp "$dir"/* .
+          done
+          ls -la
+      
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            dedups-linux-x86_64
+            dedups-linux-x86_64-ssh
+            dedups-macos-x86_64
+            dedups-macos-x86_64-ssh
+            dedups-macos-aarch64
+            dedups-macos-aarch64-ssh
+            dedups-windows-x86_64.exe
+            dedups-windows-x86_64-ssh.exe
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

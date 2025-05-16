@@ -72,6 +72,32 @@ pub struct DedupConfig {
     /// Media deduplication options
     #[serde(default)]
     pub media_dedup: MediaDedupOptions,
+
+    /// SSH remote options
+    #[cfg(feature = "ssh")]
+    #[serde(default)]
+    pub ssh: SshConfig,
+}
+
+/// Configuration for SSH remote operations
+#[cfg(feature = "ssh")]
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SshConfig {
+    /// Allow installation of dedups on remote systems
+    #[serde(default = "default_allow_remote_install")]
+    pub allow_remote_install: bool,
+
+    /// Whether to use remote dedups if available
+    #[serde(default = "default_use_remote_dedups")]
+    pub use_remote_dedups: bool,
+
+    /// Default SSH options
+    #[serde(default)]
+    pub ssh_options: Vec<String>,
+
+    /// Default Rsync options
+    #[serde(default)]
+    pub rsync_options: Vec<String>,
 }
 
 fn default_algorithm() -> String {
@@ -94,6 +120,28 @@ fn default_sort_order() -> String {
     "descending".to_string()
 }
 
+#[cfg(feature = "ssh")]
+fn default_allow_remote_install() -> bool {
+    true
+}
+
+#[cfg(feature = "ssh")]
+fn default_use_remote_dedups() -> bool {
+    true
+}
+
+#[cfg(feature = "ssh")]
+impl Default for SshConfig {
+    fn default() -> Self {
+        Self {
+            allow_remote_install: default_allow_remote_install(),
+            use_remote_dedups: default_use_remote_dedups(),
+            ssh_options: Vec::new(),
+            rsync_options: Vec::new(),
+        }
+    }
+}
+
 impl Default for DedupConfig {
     fn default() -> Self {
         Self {
@@ -109,6 +157,8 @@ impl Default for DedupConfig {
             cache_location: None,
             fast_mode: false,
             media_dedup: MediaDedupOptions::default(),
+            #[cfg(feature = "ssh")]
+            ssh: SshConfig::default(),
         }
     }
 }
