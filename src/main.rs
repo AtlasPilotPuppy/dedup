@@ -188,7 +188,7 @@ fn main() -> Result<()> {
 
                                     if cli.delete {
                                         match file_utils::delete_files(&files_to_action, cli.progress) {
-                                            Ok((count, logs)) => total_deleted += count,
+                                            Ok((count, _logs)) => total_deleted += count,
                                             Err(e) => log::error!("Error during deletion batch: {}", e),
                                         }
                                     } else if let Some(ref target_move_dir) = cli.move_to {

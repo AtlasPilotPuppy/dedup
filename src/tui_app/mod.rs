@@ -601,14 +601,6 @@ impl App {
                 self.state.log_scroll = 0;
                 self.state.status_message = Some("Log cleared.".to_string());
             }
-            KeyCode::Up if self.state.log_focus => {
-                if self.state.log_scroll > 0 { self.state.log_scroll -= 1; }
-            }
-            KeyCode::Down if self.state.log_focus => {
-                let log_height = 5;
-                let max_scroll = self.state.log_messages.len().saturating_sub(log_height);
-                if self.state.log_scroll < max_scroll { self.state.log_scroll += 1; }
-            }
             KeyCode::PageUp if self.state.log_focus => {
                 let log_height = 5;
                 if self.state.log_scroll >= log_height { self.state.log_scroll -= log_height; } else { self.state.log_scroll = 0; }
@@ -881,6 +873,7 @@ impl App {
         }
     }
 
+    #[allow(dead_code)]
     fn set_selected_file_as_kept(&mut self) {
         let file_index_in_set = self.state.selected_file_index_in_set;
         let mut _status_update: Option<String> = None;
@@ -938,6 +931,7 @@ impl App {
         }
     }
     
+    #[allow(dead_code)]
     fn mark_set_for_deletion(&mut self) {
         if let Some(selected_set_to_action) = self.current_selected_set_from_display_list().cloned() { // Use the renamed method
             if selected_set_to_action.files.len() < 2 {

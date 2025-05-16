@@ -278,7 +278,7 @@ pub fn find_duplicate_files_with_progress(
     let (local_tx, local_rx) = std::sync::mpsc::channel::<Result<HashMap<String, Vec<FileInfo>>>>(); 
     let total_groups_to_hash = potential_duplicates.len();
     let mut groups_hashed_count = 0;
-    let mut total_files_to_hash = potential_duplicates.iter().map(|(_, paths)| paths.len()).sum::<usize>();
+    let total_files_to_hash = potential_duplicates.iter().map(|(_, paths)| paths.len()).sum::<usize>();
     send_status(format!("Hashing {} files across {} size groups (using {} threads)...", 
         total_files_to_hash, total_groups_to_hash, num_threads));
 
