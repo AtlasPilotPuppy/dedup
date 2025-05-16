@@ -2,16 +2,16 @@ use anyhow::Result;
 use glob::{Pattern, PatternError};
 use num_cpus;
 use rayon::prelude::*;
+use sha1::Digest;
+use sha2::Digest as Sha2Digest;
 use std::collections::HashMap;
 use std::fs::{self, File};
+use std::hash::Hasher;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::SystemTime;
 use walkdir::WalkDir;
-use std::hash::Hasher;
-use sha1::Digest;
-use sha2::Digest as Sha2Digest;
 
 use crate::tui_app::ScanMessage;
 use crate::Cli;
@@ -264,7 +264,9 @@ pub fn calculate_hash(path: &Path, algorithm: &str) -> Result<String> {
         }
         #[cfg(not(feature = "linux"))]
         "gxhash" => {
-            return Err(anyhow::anyhow!("gxhash is only available on Linux platforms"));
+            return Err(anyhow::anyhow!(
+                "gxhash is only available on Linux platforms"
+            ));
         }
         "fnv1a" => {
             let mut hasher = fnv::FnvHasher::default();
