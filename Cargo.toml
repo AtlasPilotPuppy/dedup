@@ -51,6 +51,7 @@ base64 = "0.21"                       # For decoding base64 in audio fingerprint
 [features]
 default = []
 linux = ["gxhash"]  # Enable gxhash only on Linux platforms
+test_mode = []     # Used for integration tests
 
 [dev-dependencies]
 assert_cmd = "~2.0.14"

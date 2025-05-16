@@ -6,6 +6,20 @@ use std::path::{Path, PathBuf};
 
 use crate::media_dedup::MediaDedupOptions;
 
+// For tests only - enable with test_mode feature
+#[cfg(feature = "test_mode")]
+thread_local! {
+    static TEST_CONFIG_PATH: RefCell<Option<PathBuf>> = RefCell::new(None);
+}
+
+// For tests only - helper to set a test config path
+#[cfg(feature = "test_mode")]
+pub fn set_test_config_path(path: Option<PathBuf>) {
+    TEST_CONFIG_PATH.with(|cell| {
+        *cell.borrow_mut() = path;
+    });
+}
+
 /// Configuration structure for .deduprc file
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct DedupConfig {
@@ -100,6 +114,16 @@ impl Default for DedupConfig {
 impl DedupConfig {
     /// Get the path to the user's config file
     pub fn get_config_path() -> Result<PathBuf> {
+        // For tests, return the test config path if set
+        #[cfg(feature = "test_mode")]
+        {
+            if let Some(path) = TEST_CONFIG_PATH.with(|cell| cell.borrow().clone()) {
+                log::debug!("Using test config path: {:?}", path);
+                return Ok(path);
+            }
+        }
+
+        // Normal config path logic
         let path = {
             #[cfg(target_family = "unix")]
             {

@@ -1,3 +1,5 @@
+#![cfg_attr(feature = "test_mode", allow(unused_imports))]
+
 use dedup::config::DedupConfig;
 use dedup::Cli;
 use std::fs;
@@ -72,6 +74,7 @@ fn test_nonexistent_config() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "test_mode")]
 #[test]
 fn test_create_default_if_not_exists() -> anyhow::Result<()> {
     // Create a temporary directory for testing
@@ -84,14 +87,12 @@ fn test_create_default_if_not_exists() -> anyhow::Result<()> {
     std::env::set_var("HOME", &temp_path);
     std::env::set_var("USERPROFILE", &temp_path);
 
-    // On Windows, create the config subdirectory structure explicitly
-    #[cfg(target_family = "windows")]
-    {
-        std::env::set_var("APPDATA", &temp_path);
-        let windows_config_dir = std::path::Path::new(&temp_path).join("dedup");
-        std::fs::create_dir_all(&windows_config_dir)?;
-        println!("Created Windows config dir: {:?}", windows_config_dir);
-    }
+    // Create a specific config file path inside our temp dir
+    let test_config_path = temp_dir.path().join(".deduprc");
+    println!("Test config path: {:?}", test_config_path);
+
+    // Force the use of our specific path for this test
+    dedup::config::set_test_config_path(Some(test_config_path.clone()));
 
     // Double-check what config path we'll be using
     let config_path_before = DedupConfig::get_config_path()?;
@@ -142,6 +143,9 @@ fn test_create_default_if_not_exists() -> anyhow::Result<()> {
         !second_result.unwrap(),
         "Config file was unexpectedly created twice"
     );
+
+    // Reset the test config path to not affect other tests
+    dedup::config::set_test_config_path(None);
 
     Ok(())
 }

@@ -68,4 +68,4 @@ jobs:
 
     - name: Run integration tests (Windows)
       if: matrix.os == 'windows-latest'
-      run: cargo test --test '*' 
+      run: cargo test --test '*' --features test_mode 
