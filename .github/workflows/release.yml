@@ -91,6 +91,11 @@ jobs:
     - name: Download all artifacts
       uses: actions/download-artifact@v4
 
+    - name: Move all artifacts to root
+      run: |
+        shopt -s globstar
+        find . -type f -name "dedups-*" -exec mv {} . \;
+
     - name: List downloaded artifacts
       run: ls -la
 
