@@ -11,13 +11,14 @@ use std::time::{Duration, Instant};
 use std::sync::mpsc as std_mpsc; // Alias to avoid conflict if crate::mpsc is used elsewhere
 use std::thread as std_thread; // Alias for clarity
 use num_cpus; // For displaying actual core count in auto mode
-
-use crate::Cli;
-use crate::file_utils::{self, DuplicateSet, FileInfo, SelectionStrategy, delete_files, move_files}; // Added delete_files, move_files
-use std::path::PathBuf; // For Job destination
+use std::collections::HashMap; // For grouping
+use std::path::{Path, PathBuf}; // Ensure Path is imported here
 use humansize::{format_size, DECIMAL}; // For displaying human-readable sizes
 use tui_input::backend::crossterm::EventHandler; // For tui-input
 use tui_input::Input;
+
+use crate::Cli;
+use crate::file_utils::{self, DuplicateSet, FileInfo, SelectionStrategy, delete_files, move_files}; // Added delete_files, move_files
 
 // Application state
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)] // Added PartialEq, Eq
@@ -48,14 +49,43 @@ pub enum InputMode {
     Normal,
     CopyDestination,
     Settings, // New mode for settings
+    RegexInput,
 }
+
+// ---- New structs for parent folder grouping ----
+#[derive(Debug, Clone)]
+pub struct ParentFolderGroup {
+    pub path: PathBuf,
+    pub sets: Vec<DuplicateSet>,
+    pub is_expanded: bool,
+}
+
+#[derive(Debug, Clone)]
+pub enum DisplayListItem {
+    Folder {
+        path: PathBuf,
+        is_expanded: bool,
+        set_count: usize,
+        original_group_index: usize,
+    },
+    SetEntry {
+        set_hash_preview: String,
+        set_total_size: u64,
+        file_count_in_set: usize,
+        original_group_index: usize,
+        original_set_index_in_group: usize,
+        indent: bool,
+    },
+}
+// ---- End new structs ----
 
 #[derive(Debug)]
 pub struct AppState {
-    pub duplicate_sets: Vec<DuplicateSet>,
-    pub selected_set_index: usize, // Using usize, ensure bounds checking
-    pub selected_file_index_in_set: usize, // Using usize, ensure bounds checking
-    pub selected_job_index: usize, // For navigating jobs
+    pub grouped_data: Vec<ParentFolderGroup>,
+    pub display_list: Vec<DisplayListItem>,
+    pub selected_display_list_index: usize,
+    pub selected_file_index_in_set: usize,
+    pub selected_job_index: usize,
     pub jobs: Vec<Job>,
     pub active_panel: ActivePanel,
     pub default_selection_strategy: SelectionStrategy, // Store parsed strategy
@@ -106,8 +136,9 @@ impl App {
         };
 
         let mut app_state = AppState {
-            duplicate_sets: Vec::new(), // Start empty, load async
-            selected_set_index: 0,
+            grouped_data: Vec::new(),
+            display_list: Vec::new(),
+            selected_display_list_index: 0,
             selected_file_index_in_set: 0,
             selected_job_index: 0,
             jobs: Vec::new(),
@@ -135,8 +166,8 @@ impl App {
             let handle = std_thread::spawn(move || {
                 log::info!("[ScanThread] Starting initial duplicate scan...");
                 match file_utils::find_duplicate_files_with_progress(&current_cli_for_scan, thread_tx.clone()) {
-                    Ok(result) => {
-                        if thread_tx.send(ScanMessage::Completed(Ok(result))).is_err() {
+                    Ok(raw_sets) => {
+                        if thread_tx.send(ScanMessage::Completed(Ok(raw_sets))).is_err() {
                             log::error!("[ScanThread] Failed to send completion message to TUI.");
                         }
                     }
@@ -153,9 +184,11 @@ impl App {
             // Synchronous scan if --progress is not set
             log::info!("Performing synchronous scan as --progress is not set for TUI.");
             match file_utils::find_duplicate_files(cli_args) {
-                Ok(sets) => {
-                    app_state.duplicate_sets = sets;
-                    if app_state.duplicate_sets.is_empty() {
+                Ok(raw_sets) => {
+                    let (grouped_data, display_list) = App::process_raw_sets_into_grouped_view(raw_sets, true); // Default expanded
+                    app_state.grouped_data = grouped_data;
+                    app_state.display_list = display_list;
+                    if app_state.display_list.is_empty() {
                         app_state.status_message = Some("No duplicate sets found.".to_string());
                     }
                 }
@@ -167,11 +200,8 @@ impl App {
             None // No join handle for synchronous scan
         };
         
-        if app_state.duplicate_sets.is_empty() && !cli_args.progress {
-            // If sync scan and empty, selected_set_index is fine at 0.
-            // Already handled: app_state.status_message = Some("No duplicate sets found.".to_string());
-        } else if app_state.selected_set_index >= app_state.duplicate_sets.len() && !cli_args.progress {
-             app_state.selected_set_index = app_state.duplicate_sets.len().saturating_sub(1);
+        if app_state.selected_display_list_index >= app_state.display_list.len() && !app_state.display_list.is_empty() {
+            app_state.selected_display_list_index = app_state.display_list.len().saturating_sub(1);
         }
 
         Self {
@@ -182,6 +212,57 @@ impl App {
             scan_tx: if cli_args.progress { Some(tx) } else { None }, // Store sender only if async
             cli_config: cli_args.clone(), // Store a clone of the initial Cli
         }
+    }
+
+    fn process_raw_sets_into_grouped_view(sets: Vec<DuplicateSet>, default_expanded: bool) -> (Vec<ParentFolderGroup>, Vec<DisplayListItem>) {
+        let mut parent_map: HashMap<PathBuf, Vec<DuplicateSet>> = HashMap::new();
+        for set in sets {
+            if let Some(first_file) = set.files.first() {
+                let parent = first_file.path.parent().unwrap_or_else(|| Path::new("/")).to_path_buf();
+                parent_map.entry(parent).or_default().push(set);
+            }
+        }
+
+        let mut grouped_data: Vec<ParentFolderGroup> = parent_map.into_iter()
+            .map(|(path, sets_in_group)| ParentFolderGroup {
+                path,
+                sets: sets_in_group,
+                is_expanded: default_expanded,
+            })
+            .collect();
+
+        grouped_data.sort_by(|a, b| a.path.cmp(&b.path));
+        for group in &mut grouped_data {
+            group.sets.sort_by(|a,b| a.hash.cmp(&b.hash)); // Ensure consistent order of sets within a folder
+        }
+
+        let display_list = App::build_display_list_from_grouped_data(&grouped_data);
+        (grouped_data, display_list)
+    }
+
+    fn build_display_list_from_grouped_data(grouped_data: &[ParentFolderGroup]) -> Vec<DisplayListItem> {
+        let mut display_list = Vec::new();
+        for (group_idx, group) in grouped_data.iter().enumerate() {
+            display_list.push(DisplayListItem::Folder {
+                path: group.path.clone(),
+                is_expanded: group.is_expanded,
+                set_count: group.sets.len(),
+                original_group_index: group_idx,
+            });
+            if group.is_expanded {
+                for (set_idx, set_item) in group.sets.iter().enumerate() {
+                    display_list.push(DisplayListItem::SetEntry {
+                        set_hash_preview: set_item.hash.chars().take(8).collect(),
+                        set_total_size: set_item.size,
+                        file_count_in_set: set_item.files.len(),
+                        original_group_index: group_idx,
+                        original_set_index_in_group: set_idx,
+                        indent: true,
+                    });
+                }
+            }
+        }
+        display_list
     }
 
     // Method to trigger a rescan
@@ -200,9 +281,10 @@ impl App {
             }
         }
 
-        self.state.duplicate_sets.clear();
+        self.state.grouped_data.clear();
+        self.state.display_list.clear();
         self.state.jobs.clear();
-        self.state.selected_set_index = 0;
+        self.state.selected_display_list_index = 0;
         self.state.selected_file_index_in_set = 0;
         self.state.selected_job_index = 0;
         self.state.is_loading = true;
@@ -226,8 +308,8 @@ impl App {
             let handle = std_thread::spawn(move || {
                 log::info!("[ScanThread] Starting rescan for duplicates...");
                 match file_utils::find_duplicate_files_with_progress(&current_cli_for_scan, tx_cloned.clone()) {
-                    Ok(result) => {
-                        if tx_cloned.send(ScanMessage::Completed(Ok(result))).is_err() {
+                    Ok(raw_sets) => {
+                        if tx_cloned.send(ScanMessage::Completed(Ok(raw_sets))).is_err() {
                             log::error!("[ScanThread] Failed to send rescan completion message to TUI.");
                         }
                     }
@@ -262,21 +344,23 @@ impl App {
                         log::info!("TUI received scan completion.");
                         self.state.is_loading = false;
                         match result {
-                            Ok(sets) => {
-                                self.state.duplicate_sets = sets;
-                                if self.state.duplicate_sets.is_empty() {
-                                    self.state.status_message = Some("Scan complete. No duplicate sets found.".to_string());
+                            Ok(raw_sets) => {
+                                let (grouped_data, display_list) = App::process_raw_sets_into_grouped_view(raw_sets, true); // Default expanded
+                                self.state.grouped_data = grouped_data;
+                                self.state.display_list = display_list;
+                                if self.state.display_list.is_empty() {
+                                    self.state.status_message = Some("Scan complete. No duplicates found.".to_string());
                                 } else {
-                                     self.state.status_message = Some(format!("Scan complete. Found {} sets.", self.state.duplicate_sets.len()));
+                                    self.state.status_message = Some(format!("Scan complete. Found {} display items.", self.state.display_list.len()));
                                 }
                             }
                             Err(e) => {
                                 self.state.loading_message = format!("Error during scan: {}", e);
-                                self.state.status_message = Some(format!("Scan failed: Check logs."));
+                                self.state.status_message = Some("Scan failed: Check logs.".to_string());
                                 log::error!("Scan thread reported error: {}", e);
                             }
                         }
-                        self.validate_selection_indices(); // Important after loading data
+                        self.rebuild_display_list(); // This ensures validate_selection_indices is called
                         break; // Process one completion, then redraw
                     }
                     ScanMessage::Error(err_msg) => {
@@ -298,6 +382,7 @@ impl App {
             InputMode::Normal => self.handle_normal_mode_key(key_event),
             InputMode::CopyDestination => self.handle_copy_dest_input_key(key_event),
             InputMode::Settings => self.handle_settings_mode_key(key_event),
+            InputMode::RegexInput => self.handle_regex_input_key(key_event),
         }
         self.validate_selection_indices(); // Ensure selections are valid after any action
     }
@@ -507,32 +592,32 @@ impl App {
     }
 
     fn focus_files_panel(&mut self) {
-        if !self.state.duplicate_sets.is_empty() {
+        if !self.state.display_list.is_empty() {
             self.state.active_panel = ActivePanel::Files;
         }
     }
 
     fn select_next_set(&mut self) {
-        if !self.state.duplicate_sets.is_empty() {
-            self.state.selected_set_index = 
-                (self.state.selected_set_index + 1) % self.state.duplicate_sets.len();
+        if !self.state.display_list.is_empty() {
+            self.state.selected_display_list_index = 
+                (self.state.selected_display_list_index + 1) % self.state.display_list.len();
             self.state.selected_file_index_in_set = 0;
         }
     }
 
     fn select_previous_set(&mut self) {
-        if !self.state.duplicate_sets.is_empty() {
-            if self.state.selected_set_index > 0 {
-                self.state.selected_set_index -= 1;
+        if !self.state.display_list.is_empty() {
+            if self.state.selected_display_list_index > 0 {
+                self.state.selected_display_list_index -= 1;
             } else {
-                self.state.selected_set_index = self.state.duplicate_sets.len() - 1;
+                self.state.selected_display_list_index = self.state.display_list.len() - 1;
             }
             self.state.selected_file_index_in_set = 0;
         }
     }
 
     fn select_next_file_in_set(&mut self) {
-        if let Some(set) = self.current_selected_set() {
+        if let Some(set) = self.current_selected_set_from_display_list() {
             if !set.files.is_empty() {
                 self.state.selected_file_index_in_set = 
                     (self.state.selected_file_index_in_set + 1) % set.files.len();
@@ -541,7 +626,7 @@ impl App {
     }
 
     fn select_previous_file_in_set(&mut self) {
-        if let Some(set) = self.current_selected_set() {
+        if let Some(set) = self.current_selected_set_from_display_list() {
             if !set.files.is_empty() {
                 if self.state.selected_file_index_in_set > 0 {
                     self.state.selected_file_index_in_set -= 1;
@@ -570,53 +655,77 @@ impl App {
     }
 
     fn set_selected_file_as_kept(&mut self) {
-        let set_index = self.state.selected_set_index;
         let file_index_in_set = self.state.selected_file_index_in_set;
+        let mut status_update: Option<String> = None;
+        let mut jobs_to_add: Vec<Job> = Vec::new();
+        let mut paths_in_set_to_update_jobs_for: Vec<PathBuf> = Vec::new();
+        let mut file_to_keep_path_option: Option<PathBuf> = None;
 
-        if let Some(file_to_keep) = self.state.duplicate_sets.get(set_index)
-                                    .and_then(|s| s.files.get(file_index_in_set).cloned()) {
-            
-            log::info!("User designated {:?} as to be KEPT.", file_to_keep.path);
-            self.state.status_message = Some(format!("Marked {} to be KEPT.", file_to_keep.path.file_name().unwrap_or_default().to_string_lossy()));
+        if let Some(current_duplicate_set_ref) = self.current_selected_set_from_display_list() {
+            if let Some(file_to_keep_cloned) = current_duplicate_set_ref.files.get(file_index_in_set).cloned() {
+                log::info!("User designated {:?} as to be KEPT.", file_to_keep_cloned.path);
+                status_update = Some(format!("Marked {} to be KEPT.", file_to_keep_cloned.path.file_name().unwrap_or_default().to_string_lossy()));
 
-            // Set selected file to Keep
-            self.state.jobs.retain(|job| job.file_info.path != file_to_keep.path); 
-            self.state.jobs.push(Job { action: ActionType::Keep, file_info: file_to_keep.clone() });
+                file_to_keep_path_option = Some(file_to_keep_cloned.path.clone());
+                jobs_to_add.push(Job { action: ActionType::Keep, file_info: file_to_keep_cloned.clone() });
+                
+                paths_in_set_to_update_jobs_for = current_duplicate_set_ref.files.iter().map(|f| f.path.clone()).collect();
 
-            let current_set_files_clone = self.state.duplicate_sets.get(set_index).map_or(Vec::new(), |s| s.files.clone());
-
-            for file_in_set in current_set_files_clone {
-                if file_in_set.path != file_to_keep.path {
-                    let is_ignored = self.state.jobs.iter().any(|job| 
-                        job.file_info.path == file_in_set.path && job.action == ActionType::Ignore
-                    );
-                    if !is_ignored {
-                        self.state.jobs.retain(|job| job.file_info.path != file_in_set.path); 
-                        self.state.jobs.push(Job { action: ActionType::Delete, file_info: file_in_set.clone() });
-                        log::debug!("Auto-marking {:?} for DELETE as another file in set is kept.", file_in_set.path);
+                for file_in_set in &current_duplicate_set_ref.files {
+                    if file_in_set.path != file_to_keep_cloned.path {
+                        // Check if already ignored before deciding to mark for delete
+                        let is_ignored = self.state.jobs.iter().any(|job|
+                            job.file_info.path == file_in_set.path && job.action == ActionType::Ignore
+                        );
+                        if !is_ignored {
+                            jobs_to_add.push(Job { action: ActionType::Delete, file_info: file_in_set.clone() });
+                            log::debug!("Auto-marking {:?} for DELETE as another file in set is kept.", file_in_set.path);
+                        }
                     }
                 }
+            } else {
+                status_update = Some("No file selected in set, or set is empty.".to_string());
             }
         } else {
-            self.state.status_message = Some("No file/set selected or available to keep.".to_string());
+            status_update = Some("No duplicate set selected (or a folder is selected).".to_string());
+        }
+
+        // Now, perform mutations to self.state *after* borrows from current_selected_set_from_display_list are dropped
+        if let Some(msg) = status_update {
+            self.state.status_message = Some(msg);
+        }
+
+        if let Some(kept_path) = file_to_keep_path_option {
+            // Remove all existing jobs for any file in this specific set first
+            // This is important to handle re-marking a different file as kept, or changing mind.
+            if !paths_in_set_to_update_jobs_for.is_empty() {
+                 self.state.jobs.retain(|job| !paths_in_set_to_update_jobs_for.contains(&job.file_info.path));
+            }
+            // Then add the new jobs decided above
+            self.state.jobs.extend(jobs_to_add);
+        } else if !jobs_to_add.is_empty(){
+             // This case might happen if only a delete was added without a keep (e.g. if logic changes)
+             // For now, if no file_to_keep was identified, we only update status.
+             // If jobs_to_add contains items but file_to_keep_path_option is None, it implies an issue or an edge case not fully handled.
+             // However, the current logic ensures jobs_to_add is only populated if file_to_keep is found.
         }
     }
     
     fn mark_set_for_deletion(&mut self) {
-        if let Some(selected_set) = self.current_selected_set().cloned() { // Clone to avoid borrow issues
-            if selected_set.files.len() < 2 {
+        if let Some(selected_set_to_action) = self.current_selected_set_from_display_list().cloned() { // Use the renamed method
+            if selected_set_to_action.files.len() < 2 {
                 self.state.status_message = Some("Set has less than 2 files, no action taken.".to_string());
                 return;
             }
 
-            match file_utils::determine_action_targets(&selected_set, self.state.default_selection_strategy) {
+            match file_utils::determine_action_targets(&selected_set_to_action, self.state.default_selection_strategy) {
                 Ok((kept_file, files_to_delete)) => {
                     let kept_file_path = kept_file.path.clone();
                     let mut files_marked_for_delete = 0;
 
                     // First, remove any existing jobs for files in this set
                     self.state.jobs.retain(|job| {
-                        !selected_set.files.iter().any(|f_in_set| f_in_set.path == job.file_info.path)
+                        !selected_set_to_action.files.iter().any(|f_in_set| f_in_set.path == job.file_info.path)
                     });
 
                     // Add Keep job for the determined file
@@ -651,22 +760,35 @@ impl App {
     }
 
     fn validate_selection_indices(&mut self) {
-        if self.state.duplicate_sets.is_empty() {
-            self.state.selected_set_index = 0;
+        if self.state.display_list.is_empty() {
+            self.state.selected_display_list_index = 0;
             self.state.selected_file_index_in_set = 0;
             return;
         }
-        if self.state.selected_set_index >= self.state.duplicate_sets.len() {
-            self.state.selected_set_index = self.state.duplicate_sets.len().saturating_sub(1);
+        if self.state.selected_display_list_index >= self.state.display_list.len() {
+            self.state.selected_display_list_index = self.state.display_list.len().saturating_sub(1);
         }
 
-        if let Some(current_set) = self.state.duplicate_sets.get(self.state.selected_set_index) {
-            if current_set.files.is_empty() {
-                self.state.selected_file_index_in_set = 0;
-            } else if self.state.selected_file_index_in_set >= current_set.files.len() {
-                self.state.selected_file_index_in_set = current_set.files.len().saturating_sub(1);
+        if let Some(selected_item) = self.state.display_list.get(self.state.selected_display_list_index) {
+            match selected_item {
+                DisplayListItem::SetEntry { original_group_index, original_set_index_in_group, .. } => {
+                    if let Some(current_set) = self.state.grouped_data.get(*original_group_index)
+                                                .and_then(|group| group.sets.get(*original_set_index_in_group)) {
+                        if current_set.files.is_empty() {
+                            self.state.selected_file_index_in_set = 0;
+                        } else if self.state.selected_file_index_in_set >= current_set.files.len() {
+                            self.state.selected_file_index_in_set = current_set.files.len().saturating_sub(1);
+                        }
+                    } else {
+                        self.state.selected_file_index_in_set = 0; // Should not happen if display_list is sync with grouped_data
+                    }
+                }
+                DisplayListItem::Folder { .. } => {
+                    self.state.selected_file_index_in_set = 0; // No files to select when a folder is selected
+                }
             }
         } else {
+             // display_list is empty or index out of bounds (should be caught by earlier check)
             self.state.selected_file_index_in_set = 0;
         }
 
@@ -677,12 +799,24 @@ impl App {
         }
     }
 
-    pub fn current_selected_set(&self) -> Option<&DuplicateSet> {
-        self.state.duplicate_sets.get(self.state.selected_set_index)
+    // Gets the actual DuplicateSet if a SetEntry is selected in the display list
+    pub fn current_selected_set_from_display_list(&self) -> Option<&DuplicateSet> {
+        if let Some(selected_item) = self.state.display_list.get(self.state.selected_display_list_index) {
+            match selected_item {
+                DisplayListItem::SetEntry { original_group_index, original_set_index_in_group, .. } => {
+                    self.state.grouped_data.get(*original_group_index)
+                        .and_then(|group| group.sets.get(*original_set_index_in_group))
+                }
+                DisplayListItem::Folder { .. } => None, // No specific set if a folder is selected
+            }
+        } else {
+            None
+        }
     }
 
+    // Current selected file in the middle panel, uses current_selected_set_from_display_list
     pub fn current_selected_file(&self) -> Option<&FileInfo> {
-        self.current_selected_set()
+        self.current_selected_set_from_display_list()
             .and_then(|set| set.files.get(self.state.selected_file_index_in_set))
     }
 
@@ -801,6 +935,17 @@ impl App {
         } else {
             self.state.status_message = Some("No job selected to remove or jobs list empty.".to_string());
         }
+    }
+
+    fn handle_regex_input_key(&mut self, key_event: KeyEvent) {
+        // Implementation of handle_regex_input_key method
+        // This method is not provided in the original file or the new code block
+        // It's assumed to exist as it's called in the on_key method
+    }
+
+    fn rebuild_display_list(&mut self) {
+        self.state.display_list = App::build_display_list_from_grouped_data(&self.state.grouped_data);
+        self.validate_selection_indices(); // Ensure selection is still valid
     }
 }
 
@@ -1003,32 +1148,50 @@ fn ui(frame: &mut Frame, app: &mut App) {
                 .border_style(base_style)
         };
 
-        // Left Panel: Duplicate Sets
-        let sets_panel_title_string = format!("Duplicate Sets ({}/{}) (Tab)", app.state.selected_set_index.saturating_add(1).min(app.state.duplicate_sets.len()), app.state.duplicate_sets.len());
+        // Left Panel: Duplicate Sets (actually folders and sets)
+        let sets_panel_title_string = format!("Parent Folders / Duplicate Sets ({}/{}) (Tab to navigate)", 
+            app.state.selected_display_list_index.saturating_add(1).min(app.state.display_list.len()), 
+            app.state.display_list.len()
+        );
         let sets_block = create_block(sets_panel_title_string, app.state.active_panel == ActivePanel::Sets && app.state.input_mode == InputMode::Normal);
-        let set_items: Vec<ListItem> = app.state.duplicate_sets.iter().map(|set| {
-            let content = Line::from(Span::styled(
-                format!("Hash: {}... ({} files, {})",
-                    set.hash.chars().take(8).collect::<String>(),
-                    set.files.len(),
-                    format_size(set.size, DECIMAL)),
-                Style::default(),
-            ));
-            ListItem::new(content)
+        
+        let list_items: Vec<ListItem> = app.state.display_list.iter().map(|item| {
+            match item {
+                DisplayListItem::Folder { path, is_expanded, set_count, .. } => {
+                    let prefix = if *is_expanded { "[-]" } else { "[+]" };
+                    ListItem::new(Line::from(Span::styled(
+                        format!("{} {} ({} sets)", prefix, path.display(), set_count),
+                        Style::default().add_modifier(Modifier::BOLD)
+                    )))
+                }
+                DisplayListItem::SetEntry { set_hash_preview, set_total_size, file_count_in_set, indent, .. } => {
+                    let indent_str = if *indent { "  " } else { "" };
+                    ListItem::new(Line::from(Span::styled(
+                        format!("{}Hash: {}... ({} files, {})", 
+                            indent_str,
+                            set_hash_preview, 
+                            file_count_in_set, 
+                            humansize::format_size(*set_total_size, humansize::DECIMAL)
+                        ),
+                        Style::default()
+                    )))
+                }
+            }
         }).collect();
-        let sets_list = List::new(set_items)
+
+        let sets_list = List::new(list_items)
             .block(sets_block)
             .highlight_style(Style::default().add_modifier(Modifier::BOLD).bg(Color::Blue))
             .highlight_symbol(">> ");
         let mut sets_list_state = ListState::default();
-        if !app.state.duplicate_sets.is_empty() {
-            sets_list_state.select(Some(app.state.selected_set_index));
+        if !app.state.display_list.is_empty() {
+            sets_list_state.select(Some(app.state.selected_display_list_index));
         }
         frame.render_stateful_widget(sets_list, main_chunks[0], &mut sets_list_state);
 
         // Middle Panel: Files in Selected Set
         let (files_panel_title_string, file_items) = 
-            if let Some(selected_set) = app.current_selected_set() {
+            if let Some(selected_set) = app.current_selected_set_from_display_list() {
                 let title = format!("Files ({}/{}) (s:keep d:del c:copy i:ign h:back)", 
                                     app.state.selected_file_index_in_set.saturating_add(1).min(selected_set.files.len()), 
                                     selected_set.files.len());
@@ -1067,7 +1230,7 @@ fn ui(frame: &mut Frame, app: &mut App) {
             .highlight_symbol("> ");
 
         let mut files_list_state = ListState::default();
-        if app.current_selected_set().map_or(false, |s| !s.files.is_empty()) {
+        if app.current_selected_set_from_display_list().map_or(false, |s| !s.files.is_empty()) {
             files_list_state.select(Some(app.state.selected_file_index_in_set));
         }
         frame.render_stateful_widget(files_list, main_chunks[1], &mut files_list_state);
@@ -1124,6 +1287,11 @@ fn ui(frame: &mut Frame, app: &mut App) {
             InputMode::Settings => {
                 // The Settings mode has its own full-screen UI, so no specific status bar here.
                 // The hints are part of the settings_paragraph and hint Paragraph already rendered.
+            }
+            InputMode::RegexInput => {
+                // Implementation of handle_regex_input_key method
+                // This method is not provided in the original file or the new code block
+                // It's assumed to exist as it's called in the on_key method
             }
         }
     }
