@@ -51,8 +51,12 @@ jobs:
       env:
         RUSTFLAGS: "-C target-cpu=native"
 
-    - name: Build (macOS/Windows)
-      if: matrix.os != 'ubuntu-latest'
+    - name: Build (macOS)
+      if: matrix.os == 'macos-latest'
+      run: cargo build --release --target ${{ matrix.target }} --features linux
+
+    - name: Build (Windows)
+      if: matrix.os == 'windows-latest'
       run: cargo build --release --target ${{ matrix.target }}
 
     - name: Package
