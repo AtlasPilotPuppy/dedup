@@ -390,44 +390,37 @@ impl App {
 
     fn set_selected_file_as_kept(&mut self) {
         let mut new_status_message = None;
-        if let Some(selected_set_path) = self.current_selected_set().map(|s| s.files[self.state.selected_file_index_in_set].path.clone()) {
-            // We need to operate on a clone or indices to avoid prolonged borrow issues
-            let set_index = self.state.selected_set_index;
-            let file_index_in_set = self.state.selected_file_index_in_set;
+        let set_index = self.state.selected_set_index;
+        let file_index_in_set = self.state.selected_file_index_in_set;
 
-            if let Some(file_to_keep) = self.state.duplicate_sets.get(set_index)
-                                        .and_then(|s| s.files.get(file_index_in_set).cloned()) {
-                
-                log::info!("User designated {:?} as to be KEPT.", file_to_keep.path);
-                new_status_message = Some(format!("Marked {} to be KEPT.", file_to_keep.path.file_name().unwrap_or_default().to_string_lossy()));
+        if let Some(file_to_keep) = self.state.duplicate_sets.get(set_index)
+                                    .and_then(|s| s.files.get(file_index_in_set).cloned()) {
+            
+            log::info!("User designated {:?} as to be KEPT.", file_to_keep.path);
+            new_status_message = Some(format!("Marked {} to be KEPT.", file_to_keep.path.file_name().unwrap_or_default().to_string_lossy()));
 
-                // Set selected file to Keep
-                self.state.jobs.retain(|job| job.file_info.path != file_to_keep.path); 
-                self.state.jobs.push(Job { action: ActionType::Keep, file_info: file_to_keep.clone() });
+            // Set selected file to Keep
+            self.state.jobs.retain(|job| job.file_info.path != file_to_keep.path); 
+            self.state.jobs.push(Job { action: ActionType::Keep, file_info: file_to_keep.clone() });
 
-                // Set other files in the same set to Delete (unless they are already Ignore or the kept one)
-                // Need to iterate carefully to avoid borrow issues if modifying jobs list for current set.
-                let current_set_files_clone = self.state.duplicate_sets.get(set_index).map_or(Vec::new(), |s| s.files.clone());
+            let current_set_files_clone = self.state.duplicate_sets.get(set_index).map_or(Vec::new(), |s| s.files.clone());
 
-                for file_in_set in current_set_files_clone {
-                    if file_in_set.path != file_to_keep.path {
-                        let is_ignored = self.state.jobs.iter().any(|job| 
-                            job.file_info.path == file_in_set.path && job.action == ActionType::Ignore
-                        );
-                        if !is_ignored {
-                            self.state.jobs.retain(|job| job.file_info.path != file_in_set.path); 
-                            self.state.jobs.push(Job { action: ActionType::Delete, file_info: file_in_set.clone() });
-                            log::debug!("Auto-marking {:?} for DELETE as another file in set is kept.", file_in_set.path);
-                        }
+            for file_in_set in current_set_files_clone {
+                if file_in_set.path != file_to_keep.path {
+                    let is_ignored = self.state.jobs.iter().any(|job| 
+                        job.file_info.path == file_in_set.path && job.action == ActionType::Ignore
+                    );
+                    if !is_ignored {
+                        self.state.jobs.retain(|job| job.file_info.path != file_in_set.path); 
+                        self.state.jobs.push(Job { action: ActionType::Delete, file_info: file_in_set.clone() });
+                        log::debug!("Auto-marking {:?} for DELETE as another file in set is kept.", file_in_set.path);
                     }
                 }
-            } else {
-                 new_status_message = Some("No file selected to keep.".to_string());
             }
         } else {
-            new_status_message = Some("No duplicate set selected or file missing.".to_string());
+            new_status_message = Some("No file/set selected or available to keep.".to_string());
         }
-        self.state.status_message = new_status_message; // Assign status message at the end
+        self.state.status_message = new_status_message; 
     }
     
     fn validate_selection_indices(&mut self) {
@@ -620,11 +613,11 @@ pub fn run_tui_app(cli: &Cli) -> Result<()> {
     if let Err(err) = res {
         log::error!("TUI Error: {}", err);
         if log::log_enabled!(log::Level::Debug) {
-            if let Some(backtrace) = err.backtrace() {
-                 println!("Error in TUI: {}\nStack backtrace:\n{}", err, backtrace);
-            } else {
-                 println!("Error in TUI: {}", err);
+            let mut backtrace_output = "(backtrace not available or disabled)".to_string();
+            if let Some(bt) = err.backtrace() { // bt is &Backtrace
+                backtrace_output = format!("Stack backtrace:\n{}", bt); // bt is Display
             }
+            println!("Error in TUI: {}\n{}", err, backtrace_output);
         } else {
             println!("Error in TUI: {}. Run with -vv for more details.", err);
         }
@@ -712,15 +705,17 @@ fn ui(frame: &mut Frame, app: &mut App) {
             .split(content_chunk); 
 
         // Helper to create a block with a title and border, highlighting if active
-        let create_block = |title: &str, is_active: bool| {
+        let create_block = |title_string: String, is_active: bool| {
             let base_style = if is_active { Style::default().fg(Color::Yellow) } else { Style::default().fg(Color::White) };
             Block::default()
                 .borders(Borders::ALL)
-                .title(Span::styled(title, base_style))
+                .title(Span::styled(title_string, base_style))
                 .border_style(base_style)
         };
-        let sets_block_title = format!("Duplicate Sets ({}/{}) (Tab)", app.state.selected_set_index.saturating_add(1).min(app.state.duplicate_sets.len()), app.state.duplicate_sets.len());
-        let sets_block = create_block(&sets_block_title, app.state.active_panel == ActivePanel::Sets && app.state.input_mode == InputMode::Normal);
+
+        // Left Panel: Duplicate Sets
+        let sets_panel_title_string = format!("Duplicate Sets ({}/{}) (Tab)", app.state.selected_set_index.saturating_add(1).min(app.state.duplicate_sets.len()), app.state.duplicate_sets.len());
+        let sets_block = create_block(sets_panel_title_string, app.state.active_panel == ActivePanel::Sets && app.state.input_mode == InputMode::Normal);
         let set_items: Vec<ListItem> = app.state.duplicate_sets.iter().map(|set| {
             let content = Line::from(Span::styled(
                 format!("Hash: {}... ({} files, {})",
@@ -740,7 +735,9 @@ fn ui(frame: &mut Frame, app: &mut App) {
             sets_list_state.select(Some(app.state.selected_set_index));
         }
         frame.render_stateful_widget(sets_list, main_chunks[0], &mut sets_list_state);
-        let (files_block_title, file_items) = 
+
+        // Middle Panel: Files in Selected Set
+        let (files_panel_title_string, file_items) = 
             if let Some(selected_set) = app.current_selected_set() {
                 let title = format!("Files ({}/{}) (s:keep d:del c:copy i:ign h:back)", 
                                     app.state.selected_file_index_in_set.saturating_add(1).min(selected_set.files.len()), 
@@ -773,7 +770,7 @@ fn ui(frame: &mut Frame, app: &mut App) {
             } else {
                 ("Files (0/0)".to_string(), vec![ListItem::new("No set selected or set is empty")])
             };
-        let files_block = create_block(&files_block_title, app.state.active_panel == ActivePanel::Files && app.state.input_mode == InputMode::Normal);
+        let files_block = create_block(files_panel_title_string, app.state.active_panel == ActivePanel::Files && app.state.input_mode == InputMode::Normal);
         let files_list = List::new(file_items)
             .block(files_block)
             .highlight_style(Style::default().add_modifier(Modifier::BOLD).bg(Color::DarkGray))
@@ -784,8 +781,10 @@ fn ui(frame: &mut Frame, app: &mut App) {
             files_list_state.select(Some(app.state.selected_file_index_in_set));
         }
         frame.render_stateful_widget(files_list, main_chunks[1], &mut files_list_state);
-        let jobs_block_title = format!("Jobs ({}) (Ctrl+E: Exec, x:del)", app.state.jobs.len());
-        let jobs_block = create_block(&jobs_block_title, app.state.active_panel == ActivePanel::Jobs && app.state.input_mode == InputMode::Normal);
+
+        // Right Panel: Jobs
+        let jobs_panel_title_string = format!("Jobs ({}) (Ctrl+E: Exec, x:del)", app.state.jobs.len());
+        let jobs_block = create_block(jobs_panel_title_string, app.state.active_panel == ActivePanel::Jobs && app.state.input_mode == InputMode::Normal);
         let job_items: Vec<ListItem> = app.state.jobs.iter().map(|job| {
             let action_str = match &job.action {
                 ActionType::Keep => "KEEP".to_string(),

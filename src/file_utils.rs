@@ -1,11 +1,9 @@
 use std::collections::HashMap;
-use std::fs;
-use std::io;
+use std::fs::{self, File};
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
-use std::file::File;
-use std::io::{BufRead, BufReader};
 
 use anyhow::Result;
 use indicatif::{ProgressBar, ProgressStyle};
