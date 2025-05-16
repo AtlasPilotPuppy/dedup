@@ -230,6 +230,51 @@ The Settings screen (Ctrl+S) allows you to configure:
 - **Large Directories**: Use filter patterns to narrow down the scan
 - **Initial Scan**: The first scan may take longer, especially on network drives
 
+## Configuration File
+
+`dedup` supports configuration through a `.deduprc` file in your home directory. This allows you to set default values that will be used when options are not explicitly specified on the command line.
+
+### Location
+
+The configuration file is located at:
+- Linux/macOS: `~/.deduprc`
+- Windows: `C:\Users\<username>\.deduprc`
+
+### Format
+
+The configuration file uses TOML format:
+
+```toml
+# Default hashing algorithm
+algorithm = "blake3"
+
+# Default number of parallel threads (leave empty for auto-detection)
+parallel = 4
+
+# Default selection strategy for delete/move operations
+mode = "newest_modified"
+
+# Default output format
+format = "json"
+
+# Whether to show progress by default
+progress = true
+
+# Default sorting options
+sort_by = "modifiedat"
+sort_order = "descending"
+
+# Default file patterns to include
+include = ["*.jpg", "*.png", "*.mp4"]
+
+# Default file patterns to exclude
+exclude = ["*tmp*", "*.log"]
+```
+
+### Usage
+
+The application will automatically create a default configuration file if one doesn't exist. Options specified on the command line will always take precedence over the configuration file.
+
 ## Contributing
 
 Contributions are welcome! Here's how you can help:

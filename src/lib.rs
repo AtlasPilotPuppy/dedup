@@ -8,6 +8,9 @@ pub mod file_utils;
 // If tui_app is a module (e.g., src/tui_app.rs or src/tui_app/mod.rs)
 pub mod tui_app;
 
+// Add the new config module
+pub mod config;
+
 // To make Cli accessible, you'll need to move its definition from main.rs to lib.rs
 // or re-export it from main.rs if main.rs uses this lib.rs as a library.
 // For a typical binary project that also wants to expose a library for testing/other uses:
@@ -27,6 +30,7 @@ use clap::Parser;
 use std::path::PathBuf;
 // Ensure these are correctly pathed if they are part of file_utils module
 use crate::file_utils::{SortCriterion, SortOrder};
+use crate::config::DedupConfig;
 
 #[derive(Parser, Debug, Clone)]
 #[clap(author, version, about, long_about = None)]
@@ -106,15 +110,95 @@ pub struct Cli {
     #[clap(long, help = "Show progress during TUI scan (enabled by default for TUI mode)")]
     pub progress_tui: bool,
 
-    #[clap(long, value_parser = SortCriterion::from_str, default_value = "modifiedat", help = "Sort files by criterion [name|size|created|modified|path]")]
+    #[clap(long, value_parser = SortCriterion::from_str, default_value_t = SortCriterion::ModifiedAt, help = "Sort files by criterion [name|size|created|modified|path]")]
     pub sort_by: SortCriterion,
 
-    #[clap(long, value_parser = SortOrder::from_str, default_value = "descending", help = "Sort order [asc|desc]")]
+    #[clap(long, value_parser = SortOrder::from_str, default_value_t = SortOrder::Descending, help = "Sort order [asc|desc]")]
     pub sort_order: SortOrder,
 
     /// Display file sizes in raw bytes instead of human-readable format.
     #[clap(long, help = "Display file sizes in raw bytes instead of human-readable format")]
     pub raw_sizes: bool,
+}
+
+impl Cli {
+    /// Apply configuration values from .deduprc to CLI arguments
+    pub fn with_config() -> anyhow::Result<Self> {
+        // Parse CLI arguments first
+        let mut cli = Self::parse();
+        
+        // Load configuration
+        let config = DedupConfig::load()?;
+        
+        // Apply config values for any unspecified CLI arguments
+        cli.apply_config(config);
+        
+        // Create default config file if it doesn't exist
+        let _ = DedupConfig::create_default_if_not_exists();
+        
+        Ok(cli)
+    }
+    
+    /// Apply config values to CLI arguments that weren't explicitly provided
+    fn apply_config(&mut self, config: DedupConfig) {
+        // Only apply config values for arguments that weren't specified on the command line
+        
+        if self.algorithm.is_empty() {
+            self.algorithm = config.algorithm;
+        }
+        
+        if self.parallel.is_none() {
+            self.parallel = config.parallel;
+        }
+        
+        if self.mode.is_empty() {
+            self.mode = config.mode;
+        }
+        
+        if self.format.is_empty() {
+            self.format = config.format;
+        }
+        
+        if !self.progress && config.progress {
+            self.progress = config.progress;
+        }
+        
+        // Only apply include/exclude patterns if none were specified on the command line
+        if self.include.is_empty() && !config.include.is_empty() {
+            self.include = config.include;
+        }
+        
+        if self.exclude.is_empty() && !config.exclude.is_empty() {
+            self.exclude = config.exclude;
+        }
+        
+        // Apply sort_by and sort_order only if they match their default values
+        // This requires special handling since they're not String types
+        if self.sort_by == SortCriterion::ModifiedAt && !config.sort_by.is_empty() {
+            if let Ok(sort_by) = SortCriterion::from_str(&config.sort_by) {
+                self.sort_by = sort_by;
+            }
+        }
+        
+        if self.sort_order == SortOrder::Descending && !config.sort_order.is_empty() {
+            if let Ok(sort_order) = SortOrder::from_str(&config.sort_order) {
+                self.sort_order = sort_order;
+            }
+        }
+        
+        // Ensure we always have defaults for required fields that might be empty
+        if self.algorithm.is_empty() {
+            self.algorithm = "blake3".to_string();
+        }
+        
+        if self.format.is_empty() {
+            self.format = "json".to_string();
+        }
+        
+        if self.mode.is_empty() {
+            self.mode = "newest_modified".to_string();
+        }
+    }
 }
 
 // If your Cli struct is already in main.rs and you want to keep it there for now (less ideal for testing library parts),

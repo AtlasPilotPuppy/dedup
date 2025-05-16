@@ -2,7 +2,6 @@
 // mod tui_app;
 
 use std::path::Path;
-use clap::Parser;
 use simplelog::LevelFilter;
 use anyhow::Result;
 use humansize::{format_size, DECIMAL};
@@ -11,6 +10,7 @@ use env_logger;
 use dedup_tui::Cli;
 use dedup_tui::file_utils;
 use dedup_tui::tui_app;
+use dedup_tui::config::DedupConfig;
 
 fn setup_logger(verbosity: u8, log_file: Option<&Path>) -> Result<()> {
     let level = match verbosity {
@@ -34,7 +34,8 @@ fn setup_logger(verbosity: u8, log_file: Option<&Path>) -> Result<()> {
 }
 
 fn main() -> Result<()> {
-    let cli = Cli::parse();
+    // Load CLI args with config from .deduprc
+    let cli = Cli::with_config()?;
 
     let dedup_tui_log = std::path::PathBuf::from("dedup_tui.log");
     let dedup_log = std::path::PathBuf::from("dedup.log");
@@ -49,6 +50,19 @@ fn main() -> Result<()> {
 
     log::info!("Logger initialized. Application starting.");
     log::debug!("CLI args: {:#?}", cli);
+    
+    // Log config file path for debugging
+    match DedupConfig::get_config_path() {
+        Ok(path) => {
+            log::debug!("Config file path: {:?}", path);
+            if path.exists() {
+                log::debug!("Using configuration from {:?}", path);
+            } else {
+                log::debug!("No config file found at {:?}, using defaults", path);
+            }
+        },
+        Err(e) => log::warn!("Could not determine config file path: {}", e),
+    }
 
     // Check if directories exist
     for dir in &cli.directories {

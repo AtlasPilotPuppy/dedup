@@ -37,6 +37,19 @@ impl SortCriterion {
     }
 }
 
+// Implement ToString for SortCriterion
+impl std::fmt::Display for SortCriterion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::FileName => write!(f, "name"),
+            Self::FileSize => write!(f, "size"),
+            Self::CreatedAt => write!(f, "createdat"),
+            Self::ModifiedAt => write!(f, "modifiedat"),
+            Self::PathLength => write!(f, "path"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortOrder {
     Ascending,
@@ -49,6 +62,16 @@ impl SortOrder {
             "asc" | "ascending" => Ok(Self::Ascending),
             "desc" | "descending" => Ok(Self::Descending),
             _ => Err(anyhow::anyhow!("Invalid sort order: {}", s)),
+        }
+    }
+}
+
+// Implement ToString for SortOrder
+impl std::fmt::Display for SortOrder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Ascending => write!(f, "ascending"),
+            Self::Descending => write!(f, "descending"),
         }
     }
 }
