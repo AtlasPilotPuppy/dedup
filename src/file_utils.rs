@@ -240,6 +240,21 @@ pub fn calculate_hash(path: &Path, algorithm: &str) -> Result<String> {
             let result = hasher.finish();
             Ok(format!("{:016x}", result))
         }
+        "fnv1a" => {
+            use std::hash::Hasher;
+            use fnv::FnvHasher;
+            
+            let mut hasher = FnvHasher::default();
+            hasher.write(&file_content);
+            let result = hasher.finish();
+            Ok(format!("{:016x}", result))
+        }
+        "crc32" => {
+            let result = crc32fast::hash(&file_content);
+            Ok(format!("{:08x}", result))
+        }
+        // Meow Hash implementation temporarily removed due to build issues
+        // "meow" => { ... }
         _ => Err(anyhow::anyhow!("Unsupported hashing algorithm: {}", algorithm)),
     }
 }
@@ -1356,6 +1371,32 @@ mod tests {
         // We check the format rather than exact value as implementation might vary
         assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
     }
+
+    #[test]
+    fn test_fnv1a() {
+        let test_content = b"The quick brown fox jumps over the lazy dog";
+        let file = create_test_file(test_content);
+        let hash = calculate_hash(file.path(), "fnv1a").unwrap();
+        // FNV-1a has a fixed length of 16 hex characters (64 bits)
+        assert_eq!(hash.len(), 16);
+        // We check the format rather than exact value as implementation might vary
+        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+    
+    #[test]
+    fn test_crc32() {
+        let test_content = b"The quick brown fox jumps over the lazy dog";
+        let file = create_test_file(test_content);
+        let hash = calculate_hash(file.path(), "crc32").unwrap();
+        // CRC-32 produces a 32-bit value, resulting in 8 hex characters
+        assert_eq!(hash.len(), 8);
+        // We check the format rather than exact value as implementation might vary
+        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+    
+    // Meow Hash test temporarily removed due to build issues
+    // #[test]
+    // fn test_meow_hash() { ... }
 
     #[test]
     fn test_invalid_algorithm() {

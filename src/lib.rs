@@ -72,7 +72,7 @@ pub struct Cli {
     pub format: String,
 
     /// Hashing algorithm to use for comparing files.
-    #[clap(short, long, value_parser = clap::builder::PossibleValuesParser::new(["md5", "sha1", "sha256", "blake3", "xxhash", "gxhash"]), default_value = "xxhash", help = "Hashing algorithm [md5|sha1|sha256|blake3|xxhash|gxhash]")]
+    #[clap(short, long, value_parser = clap::builder::PossibleValuesParser::new(["md5", "sha1", "sha256", "blake3", "xxhash", "gxhash", "fnv1a", "crc32"]), default_value = "xxhash", help = "Hashing algorithm [md5|sha1|sha256|blake3|xxhash|gxhash|fnv1a|crc32]")]
     pub algorithm: String,
 
     /// Number of parallel threads to use for hashing. Defaults to auto-detected number of cores.
