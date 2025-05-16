@@ -45,7 +45,7 @@ jobs:
             artifact_name: dedups-macos-x86_64-ssh
             binary_name: dedups
             features: "all"
-            features_flag: "--features all"
+            features_flag: "--features ssh"
           
           # macOS ARM builds - standard and SSH
           - os: macos-latest
