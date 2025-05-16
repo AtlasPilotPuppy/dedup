@@ -30,6 +30,13 @@ pub struct DuplicateSet {
     pub hash: String,
 }
 
+// New struct for the output log format
+#[derive(serde::Serialize, Debug)] // Added Debug for logging if needed
+struct HashEntryContent {
+    size: u64,
+    files: Vec<PathBuf>,
+}
+
 #[derive(Debug, Default)]
 pub struct FilterRules {
     includes: Vec<Pattern>,
@@ -441,37 +448,56 @@ pub fn output_duplicates(
     format: &str,
 ) -> Result<()> {
     log::info!(
-        "Writing {} duplicate sets to {:?} in {} format",
+        "Preparing to write {} duplicate sets to {:?} in {} format",
         duplicate_sets.len(),
         output_path,
         format
     );
 
+    let mut output_map: HashMap<String, HashEntryContent> = HashMap::new();
+
+    for set in duplicate_sets {
+        if set.files.len() >= 2 { // Only include actual duplicate sets
+            let file_paths: Vec<PathBuf> = set.files.iter().map(|f| f.path.clone()).collect();
+            output_map.insert(
+                set.hash.clone(),
+                HashEntryContent {
+                    size: set.size,
+                    files: file_paths,
+                },
+            );
+        }
+    }
+
+    if output_map.is_empty() {
+        log::info!("No duplicate sets with 2 or more files to output.");
+        // Optionally, write an empty map or a message to the file, or just do nothing.
+        // For now, if the map is empty, we won't create/overwrite the output file.
+        // If an empty file is desired, uncomment below:
+        // fs::write(output_path, "")?;
+        return Ok(());
+    }
+
+    let output_content = match format {
+        "json" => serde_json::to_string_pretty(&output_map)?,
+        "toml" => toml::to_string_pretty(&output_map)?,
+        _ => {
+            return Err(anyhow::anyhow!(
+                "Unsupported output format: {}. Supported formats are json, toml.",
+                format
+            ));
+        }
+    };
+
     if let Some(parent) = output_path.parent() {
         if !parent.exists() {
             fs::create_dir_all(parent)?;
-            log::debug!("Created parent directory: {:?}", parent);
+            log::info!("Created parent directory for output file: {:?}", parent);
         }
     }
 
-    let output_file = fs::File::create(output_path)?;
-
-    match format {
-        "json" => {
-            serde_json::to_writer_pretty(output_file, duplicate_sets)?;
-        }
-        "toml" => {
-            // TOML does not support writing an array as the root element directly to a writer easily.
-            // It's better to wrap it in a struct or use a string.
-            let toml_string = toml::to_string_pretty(duplicate_sets)?;
-            fs::write(output_path, toml_string)?;
-        }
-        _ => {
-            return Err(anyhow::anyhow!("Unsupported output format: {}", format));
-        }
-    }
-
-    log::info!("Successfully wrote duplicates to {:?}", output_path);
+    fs::write(output_path, output_content)?;
+    log::info!("Successfully wrote duplicate information to {:?}", output_path);
     Ok(())
 }
 

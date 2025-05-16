@@ -10,6 +10,7 @@ use std::io::{stdout, Stdout};
 use std::time::{Duration, Instant};
 use std::sync::mpsc as std_mpsc; // Alias to avoid conflict if crate::mpsc is used elsewhere
 use std::thread as std_thread; // Alias for clarity
+use num_cpus; // For displaying actual core count in auto mode
 
 use crate::Cli;
 use crate::file_utils::{self, DuplicateSet, FileInfo, SelectionStrategy, delete_files, move_files}; // Added delete_files, move_files
@@ -948,7 +949,12 @@ fn ui(frame: &mut Frame, app: &mut App) {
             Line::from(Span::styled(format!("2. Hashing Algorithm: {}", app.state.current_algorithm), algo_style)),
             Line::from(Span::styled(format!("   (m:md5, a:sha256, b:blake3)"), algo_style)),
             Line::from(Span::raw("")),
-            Line::from(Span::styled(format!("3. Parallel Cores: {}", app.state.current_parallel.map_or("Auto".to_string(), |c| c.to_string())), parallel_style)),
+            Line::from(Span::styled(format!("3. Parallel Cores: {}", 
+                app.state.current_parallel.map_or_else(
+                    || format!("Auto ({} cores)", num_cpus::get()), 
+                    |c| c.to_string()
+                )
+            ), parallel_style)),
             Line::from(Span::styled(format!("   (0 for auto, 1-N for specific count. Use +/- or numbers)"), parallel_style)),
             Line::from(Span::raw("")),
             Line::from(Span::raw(if app.state.rescan_needed {
