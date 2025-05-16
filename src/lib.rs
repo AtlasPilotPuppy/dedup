@@ -82,7 +82,7 @@ pub struct Cli {
     pub move_to: Option<PathBuf>,
 
     /// Write actions and errors to a log file.
-    #[clap(short, long, help = "Enable logging to a file (default: dedup.log)")]
+    #[clap(short, long, help = "Enable logging to a file (default: dedups.log)")]
     pub log: bool,
 
     /// Specify a custom log file path.
@@ -171,7 +171,7 @@ pub struct Cli {
     pub raw_sizes: bool,
 
     /// Path to a custom config file. If provided, overrides the default ~/.deduprc file.
-    #[clap(long, help = "Path to a custom config file")]
+    #[clap(long, help = "Path to a custom config file (overrides the default ~/.deduprc for dedups)")]
     pub config_file: Option<PathBuf>,
 
     /// Run in dry run mode - simulate actions without making actual changes.
@@ -366,5 +366,4 @@ impl Cli {
 // If Cli is in main.rs, and main.rs becomes a binary that uses this library,
 // then main.rs would use `use dedup::Cli;` (if Cli is made public in lib.rs).
 
-// Simplest path for now: Define Cli in a new module within the library, e.g. `src/cli_definition.rs`
-// then `pub mod cli_definition;` and `pub use cli_definition::Cli;` here.
+// Simplest path for now: Define Cli in a new module within the library, e.g. `

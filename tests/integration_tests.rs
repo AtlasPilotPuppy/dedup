@@ -9,11 +9,11 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-// Assuming your crate's main library functions are accessible via `dedup::`
-use dedup::file_utils::{self, FileInfo, SelectionStrategy, SortCriterion, SortOrder};
-use dedup::media_dedup::MediaDedupOptions;
-use dedup::Cli; // Assuming Cli is public or pub(crate) and accessible // Import MediaDedupOptions directly
-                // use dedup::tui_app::AppState; // Remove unused import
+// Assuming your crate's main library functions are accessible via `dedups::`
+use dedups::file_utils::{self, FileInfo, SelectionStrategy, SortCriterion, SortOrder};
+use dedups::media_dedup::MediaDedupOptions;
+use dedups::Cli; // Assuming Cli is public or pub(crate) and accessible // Import MediaDedupOptions directly
+                // use dedups::tui_app::AppState; // Remove unused import
 
 // --- Test Constants ---
 // const TEST_BASE_DIR_NAME: &str = "dedup_integration_tests"; // Remove unused constant
@@ -238,14 +238,14 @@ impl Drop for TestEnv {
 mod integration {
     use super::*;
     // Make sure this path is correct for your project structure
-    // For example, if file_utils is in lib.rs: `use dedup::file_utils;`
+    // For example, if file_utils is in lib.rs: `use dedups::file_utils;`
     // If it's a submodule: `use crate::file_utils;` (if tests/ is seen as part of crate)
-    // Or `use dedup::file_utils;` if dedup is the crate name.
+    // Or `use dedups::file_utils;` if dedups is the crate name.
     // Assuming file_utils is at the root of the crate or lib.rs exposes it via `pub mod file_utils;`
     // and main.rs might have `mod file_utils;` if it's a binary crate.
     // If Cli is defined in main.rs, you might need to move it to lib.rs or make it accessible.
     // For tests, it's common to access items via `crate_name::module::item`.
-    // Let's assume `dedup` is the crate name as specified in Cargo.toml
+    // Let's assume `dedups` is the crate name as specified in Cargo.toml
 
     #[test]
     fn test_environment_setup_cleanup() -> Result<()> {

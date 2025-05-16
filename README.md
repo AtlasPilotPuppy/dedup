@@ -1,6 +1,6 @@
-# dedup
+# dedups
 
-A high-performance duplicate file finder and manager written in Rust. `dedup` efficiently identifies duplicate files using parallel processing and provides both a command-line interface and an interactive Terminal User Interface (TUI) for managing the results.
+A high-performance duplicate file finder and manager written in Rust. `dedups` efficiently identifies duplicate files using parallel processing and provides both a command-line interface and an interactive Terminal User Interface (TUI) for managing the results.
 
 [![Tests](https://github.com/AtlasPilotPuppy/dedup/actions/workflows/tests.yml/badge.svg)](https://github.com/AtlasPilotPuppy/dedup/actions/workflows/tests.yml)
 
@@ -26,6 +26,25 @@ A high-performance duplicate file finder and manager written in Rust. `dedup` ef
 
 ## Installation
 
+### Quick Install (Bash)
+
+```bash
+# Download and install the latest release
+curl -sSL https://raw.githubusercontent.com/AtlasPilotPuppy/dedup/main/install.sh | bash
+```
+
+Or run this one-liner to install manually:
+
+```bash
+curl -sSL https://raw.githubusercontent.com/AtlasPilotPuppy/dedup/main/install.sh > install.sh && chmod +x install.sh && ./install.sh
+```
+
+The script will:
+1. Detect your operating system and architecture
+2. Download the appropriate binary from the latest release
+3. Install it to `/usr/local/bin` (or `~/.local/bin` if no sudo access)
+4. Make it executable
+
 ### From Cargo
 
 ```bash
@@ -47,9 +66,9 @@ cargo build --release
 
 ### Windows Limitations
 
-When using `dedup` on Windows, please note the following limitations:
+When using `dedups` on Windows, please note the following limitations:
 
-1. **Path Length**: Windows has a default path length limit of 260 characters. While `dedup` can handle longer paths, you may need to enable long path support in Windows:
+1. **Path Length**: Windows has a default path length limit of 260 characters. While `dedups` can handle longer paths, you may need to enable long path support in Windows:
    - Run `git config --system core.longpaths true` if using Git
    - Enable long paths in Windows registry or group policy
    - Use the `\\?\` prefix for paths longer than 260 characters
@@ -79,41 +98,41 @@ When using `dedup` on Windows, please note the following limitations:
 
 ```bash
 # Find duplicates in the current directory using the TUI
-dedup -i
+dedups -i
 
 # Find duplicates in a specific directory
-dedup /path/to/directory
+dedups /path/to/directory
 
 # Find and delete duplicates (non-interactive)
-dedup /path/to/directory --delete --mode newest_modified
+dedups /path/to/directory --delete --mode newest_modified
 
 # Use a custom config file
-dedup /path/to/directory --config-file /path/to/my-config.toml
+dedups /path/to/directory --config-file /path/to/my-config.toml
 ```
 
 ### Multi-Directory Operations
 
 ```bash
 # Copy missing files from source to target directory
-dedup /source/directory /target/directory
+dedups /source/directory /target/directory
 
 # Explicitly specify a target directory (can be useful with multiple source directories)
-dedup /source/dir1 /source/dir2 --target /target/directory
+dedups /source/dir1 /source/dir2 --target /target/directory
 
 # Deduplicate between directories and copy missing files
-dedup /source/directory /target/directory --deduplicate
+dedups /source/directory /target/directory --deduplicate
 
 # Find duplicates in both source and target (without copying)
 # and save the results to a file
-dedup /source/directory /target/directory --deduplicate -o duplicates.json
+dedups /source/directory /target/directory --deduplicate -o duplicates.json
 
 # Copy missing files from multiple source directories to a target
-dedup /source/dir1 /source/dir2 /source/dir3 /target/directory
+dedups /source/dir1 /source/dir2 /source/dir3 /target/directory
 
 # First deduplicate the target, then copy unique files from source
 # (run as separate commands)
-dedup /target/directory --delete --mode newest_modified
-dedup /source/directory /target/directory
+dedups /target/directory --delete --mode newest_modified
+dedups /source/directory /target/directory
 ```
 
 ## Media Deduplication
@@ -136,35 +155,35 @@ The media deduplication feature can detect similar images, videos, and audio fil
 
 ```bash
 # Enable media deduplication mode
-dedup /path/to/media --media-mode
+dedups /path/to/media --media-mode
 
 # Set resolution preference (highest, lowest, or custom resolution)
-dedup /path/to/media --media-mode --media-resolution highest
-dedup /path/to/media --media-mode --media-resolution lowest
-dedup /path/to/media --media-mode --media-resolution 1280x720
+dedups /path/to/media --media-mode --media-resolution highest
+dedups /path/to/media --media-mode --media-resolution lowest
+dedups /path/to/media --media-mode --media-resolution 1280x720
 
 # Set format preferences (comma-separated, highest priority first)
-dedup /path/to/media --media-mode --media-formats raw,png,jpg
+dedups /path/to/media --media-mode --media-formats raw,png,jpg
 
 # Adjust similarity threshold (0-100, default: 90)
-dedup /path/to/media --media-mode --media-similarity 85
+dedups /path/to/media --media-mode --media-similarity 85
 ```
 
 ### Recommended Settings for Different Use Cases
 
 - **Professional Photography**:
   ```bash
-  dedup /path/to/photos --media-mode --media-resolution highest --media-formats raw,tiff,png,jpg
+  dedups /path/to/photos --media-mode --media-resolution highest --media-formats raw,tiff,png,jpg
   ```
 
 - **Web/Mobile Optimization**:
   ```bash
-  dedup /path/to/images --media-mode --media-resolution 1920x1080 --media-formats webp,jpg,png
+  dedups /path/to/images --media-mode --media-resolution 1920x1080 --media-formats webp,jpg,png
   ```
 
 - **Audio Collection**:
   ```bash
-  dedup /path/to/audio --media-mode --media-formats flac,mp3,ogg
+  dedups /path/to/audio --media-mode --media-formats flac,mp3,ogg
   ```
 
 ### Sample Media Script
@@ -179,10 +198,10 @@ chmod +x sample_media.sh
 ./sample_media.sh
 
 # Test media deduplication on the sample files (interactive mode)
-dedup -i demo --media-mode
+dedups -i demo --media-mode
 
 # For CLI mode with specific options
-dedup --dry-run demo --media-mode --media-resolution highest --media-formats png,jpg,mp4
+dedups --dry-run demo --media-mode --media-resolution highest --media-formats png,jpg,mp4
 ```
 
 The script creates the following directory structure:
@@ -206,47 +225,47 @@ Dependencies for the sample script:
 
 ```bash
 # Find and list duplicates only
-dedup /path/to/photos
+dedups /path/to/photos
 
 # Find and immediately delete duplicates, keeping newest files
-dedup /path/to/photos --delete --mode newest_modified
+dedups /path/to/photos --delete --mode newest_modified
 
 # Move duplicates to a separate folder instead of deleting
-dedup /path/to/photos --move-to /path/to/duplicates --mode shortest_path
+dedups /path/to/photos --move-to /path/to/duplicates --mode shortest_path
 
 # Export a report of duplicates for review
-dedup /path/to/photos -o duplicates.json
+dedups /path/to/photos -o duplicates.json
 
 # Use file caching for faster repeated scans
-dedup /path/to/photos --cache-location ~/.dedup_cache --fast-mode
+dedups /path/to/photos --cache-location ~/.dedup_cache --fast-mode
 ```
 
 #### Synchronizing Directories
 
 ```bash
 # Scenario 1: Safely copy missing files from source to target
-dedup /source/photos /target/backup
+dedups /source/photos /target/backup
 
 # Scenario 2: Full synchronization with deduplication
 # Step 1: Clean duplicates in the target directory
-dedup /target/backup --delete --mode newest_modified
+dedups /target/backup --delete --mode newest_modified
 # Step 2: Clean duplicates in the source directory
-dedup /source/photos --delete --mode newest_modified
+dedups /source/photos --delete --mode newest_modified
 # Step 3: Copy missing files from source to target
-dedup /source/photos /target/backup
+dedups /source/photos /target/backup
 
 # Scenario 3: One-step operation to deduplicate between directories
-dedup /source/photos /target/backup --deduplicate
+dedups /source/photos /target/backup --deduplicate
 
 # Scenario 4: Multiple source directories to one target
-dedup /photos/2020 /photos/2021 /photos/2022 /backup/all_photos
+dedups /photos/2020 /photos/2021 /photos/2022 /backup/all_photos
 ```
 
 ### Available Options
 
 ```
 USAGE:
-    dedup [OPTIONS] [directory]
+    dedups [OPTIONS] [directory]
 
 ARGS:
     <directory>    The directory to scan for duplicate files [default: .]
@@ -384,7 +403,7 @@ The Settings screen (Ctrl+S) allows you to configure:
 
 ## Configuration File
 
-`dedup` supports configuration through a `.deduprc` file in your home directory. This allows you to set default values that will be used when options are not explicitly specified on the command line.
+`dedups` supports configuration through a `.deduprc` file in your home directory. This allows you to set default values that will be used when options are not explicitly specified on the command line.
 
 ### Location
 
@@ -394,109 +413,5 @@ The configuration file is located at:
 
 You can also specify a custom configuration file using the `--config-file` option:
 ```bash
-dedup --config-file /path/to/my-config.toml /path/to/directory
+dedups --config-file /path/to/my-config.toml /path/to/directory
 ```
-
-### Format
-
-The configuration file uses TOML format:
-
-```toml
-# Default hashing algorithm
-algorithm = "blake3"
-
-# Default number of parallel threads (leave empty for auto-detection)
-parallel = 4
-
-# Default selection strategy for delete/move operations
-mode = "newest_modified"
-
-# Default output format
-format = "json"
-
-# Whether to show progress by default
-progress = true
-
-# Default sorting options
-sort_by = "modifiedat"
-sort_order = "descending"
-
-# Default file patterns to include
-include = ["*.jpg", "*.png", "*.mp4"]
-
-# Default file patterns to exclude
-exclude = ["*tmp*", "*.log"]
-
-# File hash cache settings
-cache_location = "/path/to/cache"  # Optional: Path to store hash cache
-fast_mode = false                  # Whether to use cache by default
-
-# Media deduplication settings
-[media_dedup]
-enabled = true
-resolution_preference = "highest"  # highest, lowest, or WIDTHxHEIGHT
-similarity_threshold = 90          # 0-100, where 100 is exact match
-
-# Format preferences (ordered by preference, highest first)
-formats = [
-  "raw",
-  "png",
-  "jpg",
-  "mp4",
-  "flac",
-  "mp3"
-]
-```
-
-### Usage
-
-The application will automatically create a default configuration file if one doesn't exist. Options specified on the command line will always take precedence over the configuration file.
-
-If you specify a custom configuration file with `--config-file`, the default `.deduprc` file will be ignored, and no default file will be created if it doesn't exist.
-
-## Contributing
-
-Contributions are welcome! Here's how you can help:
-
-1. **Fork the repository**
-2. **Create a feature branch**:
-   ```bash
-   git checkout -b feature/amazing-feature
-   ```
-3. **Make your changes**
-4. **Run the tests**:
-   ```bash
-   cargo test
-   ```
-5. **Commit your changes**:
-   ```bash
-   git commit -m 'Add some amazing feature'
-   ```
-6. **Push to the branch**:
-   ```bash
-   git push origin feature/amazing-feature
-   ```
-7. **Open a Pull Request**
-
-### Development Setup
-
-To set up the development environment:
-
-```bash
-# Clone the repository
-git clone https://github.com/yourusername/dedup.git
-cd dedup
-
-# Install development dependencies
-cargo install cargo-watch cargo-tarpaulin
-
-# Run tests in watch mode
-cargo watch -x test
-
-# Generate test coverage
-cargo tarpaulin --out Html
-```
-
-## License
-
-This project is licensed under the MIT License - see the LICENSE file for details. 

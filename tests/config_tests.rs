@@ -1,7 +1,7 @@
 #![cfg_attr(feature = "test_mode", allow(unused_imports))]
 
-use dedup::config::DedupConfig;
-use dedup::Cli;
+use dedups::config::DedupConfig;
+use dedups::Cli;
 use std::fs;
 use tempfile::tempdir;
 
@@ -92,7 +92,7 @@ fn test_create_default_if_not_exists() -> anyhow::Result<()> {
     println!("Test config path: {:?}", test_config_path);
 
     // Force the use of our specific path for this test
-    dedup::config::set_test_config_path(Some(test_config_path.clone()));
+    dedups::config::set_test_config_path(Some(test_config_path.clone()));
 
     // Double-check what config path we'll be using
     let config_path_before = DedupConfig::get_config_path()?;
@@ -145,7 +145,7 @@ fn test_create_default_if_not_exists() -> anyhow::Result<()> {
     );
 
     // Reset the test config path to not affect other tests
-    dedup::config::set_test_config_path(None);
+    dedups::config::set_test_config_path(None);
 
     Ok(())
 }

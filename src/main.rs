@@ -7,10 +7,10 @@ use simplelog::LevelFilter;
 use std::path::Path;
 use std::str::FromStr;
 
-use dedup::config::DedupConfig;
-use dedup::file_utils;
-use dedup::tui_app;
-use dedup::Cli;
+use dedups::config::DedupConfig;
+use dedups::file_utils;
+use dedups::tui_app;
+use dedups::Cli;
 
 fn setup_logger(verbosity: u8, log_file: Option<&Path>) -> Result<()> {
     let level = match verbosity {
@@ -40,14 +40,14 @@ fn main() -> Result<()> {
     // Configure logging based on mode
     if cli.interactive {
         // For interactive mode, use a file
-        let log_file = Some(Path::new("dedup.log"));
+        let log_file = Some(Path::new("dedups.log"));
         setup_logger(cli.verbose, log_file)?;
     } else if cli.log || cli.log_file.is_some() {
         // User enabled logging
         let log_path = if let Some(path) = &cli.log_file {
             path.as_path()
         } else {
-            Path::new("dedup.log")
+            Path::new("dedups.log")
         };
         setup_logger(cli.verbose, Some(log_path))?;
     } else if cli.progress {
