@@ -38,10 +38,10 @@ jobs:
       run: cargo fmt -- --check
     
     - name: Clippy
-      run: RUSTFLAGS="-C target-cpu=native" cargo clippy -- -D warnings
+      run: cargo clippy -- -D warnings
     
     - name: Run tests
-      run: RUSTFLAGS="-C target-cpu=native" cargo test --all-features
+      run: cargo test --all-features
     
     - name: Run integration tests
-      run: RUSTFLAGS="-C target-cpu=native" cargo test --test '*' 
+      run: cargo test --test '*' 
