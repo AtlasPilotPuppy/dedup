@@ -463,34 +463,64 @@ impl App {
                 };
                 self.state.status_message = Some(status.to_string());
                 self.state.log_messages.push(status.to_string());
+                
+                // Add more information about dry run mode when enabled
+                if self.state.dry_run {
+                    self.state.log_messages.push(
+                        "In dry run mode, all operations are simulated and logged but no actual changes are made to files.".to_string()
+                    );
+                    if !self.state.jobs.is_empty() {
+                        self.state.log_messages.push(
+                            format!("Current job queue contains {} operations that will be simulated when executed.",
+                                   self.state.jobs.len())
+                        );
+                    }
+                }
+                
                 log::info!("{}", status);
             }
             KeyCode::Char('a') => {
-                // Toggle keep/delete for all files in all sets in all folders (global toggle)
-                let files_to_process: Vec<_> = self.state.grouped_data.iter()
-                    .flat_map(|group| group.sets.iter().flat_map(|set| set.files.clone()))
-                    .collect();
-                let all_kept = files_to_process.iter().all(|file| {
-                    self.state.jobs.iter().any(|job| job.file_info.path == file.path && job.action == ActionType::Keep)
-                });
-                let _all_deleted = files_to_process.iter().all(|file| {
-                    self.state.jobs.iter().any(|job| job.file_info.path == file.path && job.action == ActionType::Delete)
-                });
-                let paths: Vec<_> = files_to_process.iter().map(|f| f.path.clone()).collect();
-                self.state.jobs.retain(|job| !paths.contains(&job.file_info.path));
-                let action = if all_kept { ActionType::Delete } else { ActionType::Keep };
-                for file in files_to_process {
-                    self.state.jobs.push(Job {
-                        action: action.clone(),
-                        file_info: file,
-                    });
-                }
-                self.state.status_message = Some(if all_kept {
-                    "All files marked for delete".to_string()
+                // Global toggle between deleting ALL files or KEEPING all (no explicit jobs).
+                // To avoid huge memory spikes we only create Delete jobs when needed and
+                // never generate explicit Keep jobs (no job = Keep).
+
+                // 1. Count total files across all duplicate sets.
+                let total_files: usize = self.state.grouped_data
+                    .iter()
+                    .map(|g| g.sets.iter().map(|s| s.files.len()).sum::<usize>())
+                    .sum();
+
+                // 2. Count current Delete jobs.
+                let current_delete_jobs = self.state.jobs.iter()
+                    .filter(|j| matches!(j.action, ActionType::Delete))
+                    .count();
+
+                let currently_all_deleted = current_delete_jobs == total_files && total_files > 0;
+
+                if currently_all_deleted {
+                    // Toggle to KEEP all: simply clear the job list.
+                    self.state.jobs.clear();
+                    self.state.status_message = Some("All delete jobs cleared. All files kept.".to_string());
+                    self.state.log_messages.push("Toggled: KEEP all files (cleared delete jobs)".to_string());
                 } else {
-                    "All files marked to keep".to_string()
-                });
-                self.state.log_messages.push(self.state.status_message.clone().unwrap_or_default());
+                    // Toggle to DELETE all: rebuild jobs list with Delete actions for every file.
+                    self.state.jobs.clear();
+
+                    // Iterate over grouped_data without cloning large intermediate Vec.
+                    for group in &self.state.grouped_data {
+                        for set in &group.sets {
+                            for file in &set.files {
+                                self.state.jobs.push(Job {
+                                    action: ActionType::Delete,
+                                    file_info: file.clone(),
+                                });
+                            }
+                        }
+                    }
+
+                    self.state.status_message = Some(format!("All {} files marked for delete", total_files));
+                    self.state.log_messages.push(format!("Toggled: DELETE all {} files", total_files));
+                }
             }
             KeyCode::Char('d') => {
                 // Mark all files in the selected set or folder for delete
@@ -1156,8 +1186,20 @@ impl App {
                 }
                 ActionType::Move(ref target_dir) => {
                     match move_files(&[job.file_info.clone()], target_dir, dry_run_mode) {
-                        Ok(1) => Ok(()),
-                        Ok(count) => Err(anyhow::anyhow!("Move action affected {} files, expected 1.", count)),
+                        Ok((1, logs)) => {
+                            // Add logs from move_files to our log messages
+                            for log in logs {
+                                self.state.log_messages.push(log);
+                            }
+                            Ok(())
+                        },
+                        Ok((count, logs)) => {
+                            // Add logs anyway even when count is unexpected
+                            for log in logs {
+                                self.state.log_messages.push(log);
+                            }
+                            Err(anyhow::anyhow!("Move action affected {} files, expected 1.", count))
+                        },
                         Err(e) => Err(e),
                     }
                 }
@@ -1167,13 +1209,36 @@ impl App {
                     if dry_run_mode {
                         self.state.log_messages.push(format!("[DRY RUN] Would copy {} to {}", 
                             job.file_info.path.display(), target_dir.display()));
+                        
+                        // Add more detailed logs similar to delete_files and move_files
+                        if !target_dir.exists() {
+                            self.state.log_messages.push(format!(
+                                "[DRY RUN] Would create target directory: {}", target_dir.display()));
+                        }
+                        
+                        // Check for potential destination conflicts (even in dry run mode)
+                        let file_name = job.file_info.path.file_name().unwrap_or_default();
+                        let dest_path = target_dir.join(file_name);
+                        if dest_path.exists() {
+                            self.state.log_messages.push(format!(
+                                "[DRY RUN] Note: Destination {} exists. Would be renamed with _copy suffix", 
+                                dest_path.display()));
+                        }
+                        
+                        self.state.log_messages.push(format!(
+                            "[DRY RUN] File size: {} bytes", job.file_info.size));
+                        
                         Ok(())
                     } else {
                         if !target_dir.exists() {
                             if let Err(e) = std::fs::create_dir_all(&target_dir) {
+                                let error_msg = format!("Failed to create target directory {}: {}", 
+                                                      target_dir.display(), e);
+                                self.state.log_messages.push(error_msg);
                                 log::error!("Failed to create target directory {:?} for copy: {}", target_dir, e);
                                 return Err(e.into());
                             }
+                            self.state.log_messages.push(format!("Created directory: {}", target_dir.display()));
                         }
                         let file_name = job.file_info.path.file_name().unwrap_or_default();
                         let mut dest_path = target_dir.join(file_name);
@@ -1190,8 +1255,16 @@ impl App {
                             counter += 1;
                         }
                         std::fs::copy(&job.file_info.path, &dest_path)
-                            .map(|_| ()) 
+                            .map(|size| {
+                                self.state.log_messages.push(format!(
+                                    "Copied: {} -> {} ({} bytes)", 
+                                    job.file_info.path.display(), dest_path.display(), size));
+                                ()
+                            })
                             .map_err(|e| {
+                                let error_msg = format!("Failed to copy {}: {}", 
+                                                      job.file_info.path.display(), e);
+                                self.state.log_messages.push(error_msg);
                                 log::error!("Failed to copy {:?} to {:?}: {}", job.file_info.path, dest_path, e);
                                 anyhow::Error::from(e)
                             })

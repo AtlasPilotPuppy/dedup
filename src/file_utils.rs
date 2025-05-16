@@ -380,6 +380,8 @@ pub fn find_duplicate_files_with_progress(
         .filter(|(_, paths)| paths.len() > 1)
         .collect();
 
+    let _potential_duplicate_count = potential_duplicates.len();
+    
     if potential_duplicates.is_empty() {
         send_status(3, "Scan complete. No potential duplicates found.".to_string());
         log::info!("[ScanThread] No potential duplicates found after size grouping.");
@@ -643,7 +645,7 @@ pub fn find_duplicate_files(
         .filter(|(_, paths)| paths.len() > 1)
         .collect();
 
-    let potential_duplicate_count = potential_duplicates.len();
+    let _potential_duplicate_count = potential_duplicates.len();
     
     if potential_duplicates.is_empty() {
         pb_stage1.finish_and_clear();
@@ -934,31 +936,33 @@ pub fn delete_files(files_to_delete: &[FileInfo], dry_run: bool) -> Result<(usiz
     Ok((count, logs))
 }
 
-pub fn move_files(files_to_move: &[FileInfo], target_dir: &Path, dry_run: bool) -> Result<usize> {
+pub fn move_files(files_to_move: &[FileInfo], target_dir: &Path, dry_run: bool) -> Result<(usize, Vec<String>)> {
     let mut count = 0;
+    let mut logs = Vec::new();
+    
     if !target_dir.exists() {
         if dry_run {
+            logs.push(format!("[DRY RUN] Target directory {} does not exist. Would create it.", target_dir.display()));
             log::info!("[DRY RUN] Target directory {:?} does not exist. Would attempt to create it.", target_dir);
-            println!("[DRY RUN] Target directory {} does not exist. Would create it.", target_dir.display());
         } else {
             log::info!("Target directory {:?} does not exist. Creating it.", target_dir);
             fs::create_dir_all(target_dir)?;
-            println!("Created target directory: {}", target_dir.display());
+            logs.push(format!("Created target directory: {}", target_dir.display()));
         }
     } else if !target_dir.is_dir() {
         return Err(anyhow::anyhow!("Target move path {:?} exists but is not a directory.", target_dir));
     }
 
     if dry_run {
-        log::info!("[DRY RUN] Would move the following files to {:?}:", target_dir);
+        logs.push(format!("[DRY RUN] Would move the following files to {}:", target_dir.display()));
         for file_info in files_to_move {
             let target_path = target_dir.join(file_info.path.file_name().unwrap_or_else(|| file_info.path.as_os_str()));
+            logs.push(format!("[DRY RUN]    - {} -> {}", file_info.path.display(), target_path.display()));
             log::info!("[DRY RUN]    - {:?} -> {:?}", file_info.path, target_path);
-            println!("[DRY RUN] Would move {} to {}", file_info.path.display(), target_path.display());
             count += 1;
         }
     } else {
-        log::info!("Moving the following files to {:?}:", target_dir);
+        logs.push(format!("Moving the following files to {}:", target_dir.display()));
         for file_info in files_to_move {
             let file_name = file_info.path.file_name().unwrap_or_else(|| file_info.path.as_os_str());
             let mut target_path = target_dir.join(file_name);
@@ -968,9 +972,8 @@ pub fn move_files(files_to_move: &[FileInfo], target_dir: &Path, dry_run: bool) 
             while target_path.exists() {
                 let stem = target_path.file_stem().unwrap_or_default().to_string_lossy();
                 let ext = target_path.extension().unwrap_or_default().to_string_lossy();
-                let new_name = format!("{}_{}({}){}{}", 
-                                      stem.trim_end_matches(&format!("({})", counter -1 )),
-                                      "copy",
+                let new_name = format!("{}_copy({}){}{}", 
+                                      stem.trim_end_matches(&format!("_copy({})", counter -1 )).trim_end_matches("_copy"),
                                       counter, 
                                       if ext.is_empty() { "" } else { "." }, 
                                       ext);
@@ -980,19 +983,19 @@ pub fn move_files(files_to_move: &[FileInfo], target_dir: &Path, dry_run: bool) 
 
             match fs::rename(&file_info.path, &target_path) { // Using rename for move
                 Ok(_) => {
+                    logs.push(format!("Moved: {} -> {}", file_info.path.display(), target_path.display()));
                     log::info!("    Moved: {:?} -> {:?}", file_info.path, target_path);
-                    println!("Moved {} to {}", file_info.path.display(), target_path.display());
                     count += 1;
                 }
                 Err(e) => {
+                    let error_msg = format!("Error moving {}: {}", file_info.path.display(), e);
+                    logs.push(error_msg);
                     log::error!("Failed to move {:?} to {:?}: {}", file_info.path, target_path, e);
-                    eprintln!("Error moving {}: {}", file_info.path.display(), e);
-                    // Decide if we should stop or continue
                 }
             }
         }
     }
-    Ok(count)
+    Ok((count, logs))
 }
 
 // Helper function to sort a Vec<FileInfo>
@@ -1212,22 +1215,27 @@ fn scan_directory(cli: &Cli, directory: &Path) -> Result<Vec<FileInfo>> {
 }
 
 // Copy missing files to target directory
-pub fn copy_missing_files(missing_files: &[FileInfo], target_dir: &Path, dry_run: bool) -> Result<usize> {
+pub fn copy_missing_files(missing_files: &[FileInfo], target_dir: &Path, dry_run: bool) -> Result<(usize, Vec<String>)> {
     let mut count = 0;
+    let mut logs = Vec::new();
     
     if !target_dir.exists() {
         if dry_run {
-            log::info!("[DRY RUN] Target directory {:?} does not exist. Would create it.", target_dir);
+            let msg = format!("[DRY RUN] Target directory {} does not exist. Would create it.", target_dir.display());
+            log::info!("{}", msg);
+            logs.push(msg);
         } else {
             log::info!("Target directory {:?} does not exist. Creating it.", target_dir);
             fs::create_dir_all(target_dir)?;
+            logs.push(format!("Created target directory: {}", target_dir.display()));
         }
     } else if !target_dir.is_dir() {
         return Err(anyhow::anyhow!("Target path {:?} exists but is not a directory.", target_dir));
     }
     
     if dry_run {
-        log::info!("[DRY RUN] Would copy {} missing files to {:?}", missing_files.len(), target_dir);
+        logs.push(format!("[DRY RUN] Would copy {} missing files to {}", missing_files.len(), target_dir.display()));
+        
         for file in missing_files {
             let relative_path = match file.path.strip_prefix(file.path.parent().unwrap().parent().unwrap()) {
                 Ok(rel) => rel.to_path_buf(),
@@ -1239,11 +1247,12 @@ pub fn copy_missing_files(missing_files: &[FileInfo], target_dir: &Path, dry_run
             
             let target_path = target_dir.join(relative_path);
             
+            logs.push(format!("[DRY RUN] Would copy {} to {}", file.path.display(), target_path.display()));
             log::info!("[DRY RUN] Would copy {:?} to {:?}", file.path, target_path);
             count += 1;
         }
     } else {
-        log::info!("Copying {} missing files to {:?}", missing_files.len(), target_dir);
+        logs.push(format!("Copying {} missing files to {}", missing_files.len(), target_dir.display()));
         
         for file in missing_files {
             let relative_path = match file.path.strip_prefix(file.path.parent().unwrap().parent().unwrap()) {
@@ -1260,24 +1269,30 @@ pub fn copy_missing_files(missing_files: &[FileInfo], target_dir: &Path, dry_run
             if let Some(parent) = target_path.parent() {
                 if !parent.exists() {
                     fs::create_dir_all(parent)?;
-                    log::debug!("Created parent directory: {:?}", parent);
+                    let msg = format!("Created parent directory: {}", parent.display());
+                    logs.push(msg.clone());
+                    log::debug!("{}", msg);
                 }
             }
             
             match fs::copy(&file.path, &target_path) {
                 Ok(_) => {
-                    log::info!("Copied: {:?} -> {:?}", file.path, target_path);
+                    let msg = format!("Copied: {} -> {}", file.path.display(), target_path.display());
+                    logs.push(msg.clone());
+                    log::info!("{}", msg);
                     count += 1;
                 }
                 Err(e) => {
-                    log::error!("Failed to copy {:?} to {:?}: {}", file.path, target_path, e);
-                    // Decide whether to continue or return an error
+                    let error_msg = format!("Failed to copy {} to {}: {}", file.path.display(), target_path.display(), e);
+                    logs.push(error_msg.clone());
+                    log::error!("{}", error_msg);
+                    // Continue with other files
                 }
             }
         }
     }
     
-    Ok(count)
+    Ok((count, logs))
 }
 
 // Add this new function for counting files in a directory

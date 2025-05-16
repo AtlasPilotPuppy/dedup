@@ -120,6 +120,12 @@ fn handle_multi_directory_mode(cli: &Cli) -> Result<()> {
     log::info!("Multi-directory mode: Comparing directories");
     println!("Comparing directories for missing files or duplicates...");
 
+    // If in dry run mode, show banner
+    if cli.dry_run {
+        log::info!("Running in DRY RUN mode - no files will be modified");
+        println!("\n===== DRY RUN MODE - NO FILES WILL BE MODIFIED =====\n");
+    }
+
     let target_dir = file_utils::determine_target_directory(cli)?;
     let source_dirs = file_utils::get_source_directories(cli, &target_dir);
     
@@ -144,13 +150,30 @@ fn handle_multi_directory_mode(cli: &Cli) -> Result<()> {
         }
         
         // Copy missing files to target directory
-        let copy_count = file_utils::copy_missing_files(
+        match file_utils::copy_missing_files(
             &comparison_result.missing_in_target, 
             &target_dir, 
-            false // Not dry run
-        )?;
-        
-        println!("Successfully copied {} files to target directory.", copy_count);
+            cli.dry_run
+        ) {
+            Ok((count, logs)) => {
+                // Display all log messages
+                for log_msg in logs {
+                    // Only log to file what hasn't already been logged in the function
+                    if !log_msg.starts_with("[DRY RUN]") {
+                        log::info!("{}", log_msg);
+                    }
+                    println!("{}", log_msg);
+                }
+                
+                // Adjust the summary message based on dry run mode
+                let action_prefix = if cli.dry_run { "[DRY RUN] Would have copied" } else { "Successfully copied" };
+                println!("\n{} {} files to target directory.", action_prefix, count);
+            },
+            Err(e) => {
+                log::error!("Failed to copy files: {}", e);
+                eprintln!("Error copying files: {}", e);
+            }
+        }
     } else {
         println!("No missing files found in target directory.");
     }
@@ -164,6 +187,13 @@ fn handle_multi_directory_mode(cli: &Cli) -> Result<()> {
         handle_duplicate_sets(cli, &comparison_result.duplicates)?;
     } else if cli.deduplicate {
         println!("No duplicate files found across source and target directories.");
+    }
+    
+    // Add final reminder if in dry run mode
+    if cli.dry_run {
+        println!("\nThis was a dry run. No files were actually modified.");
+        println!("Run without --dry-run to perform actual operations.");
+        log::info!("Dry run completed - no files were modified");
     }
     
     Ok(())
@@ -198,6 +228,12 @@ fn handle_duplicate_sets(cli: &Cli, duplicate_sets: &[file_utils::DuplicateSet])
     }
     
     if cli.delete || cli.move_to.is_some() {
+        // Log dry run mode status at the beginning
+        if cli.dry_run {
+            log::info!("Running in DRY RUN mode - no files will be modified");
+            println!("\n===== DRY RUN MODE - NO FILES WILL BE MODIFIED =====\n");
+        }
+        
         let strategy = file_utils::SelectionStrategy::from_str(&cli.mode)?;
         let mut total_deleted = 0;
         let mut total_moved = 0;
@@ -213,29 +249,63 @@ fn handle_duplicate_sets(cli: &Cli, duplicate_sets: &[file_utils::DuplicateSet])
                     println!("Keeping: {}", kept_file.path.display());
 
                     if cli.delete {
-                        match file_utils::delete_files(&files_to_action, cli.progress) {
-                            Ok((count, _logs)) => total_deleted += count,
-                            Err(e) => log::error!("Error during deletion batch: {}", e),
+                        match file_utils::delete_files(&files_to_action, cli.dry_run) {
+                            Ok((count, logs)) => {
+                                total_deleted += count;
+                                // Print and log all messages
+                                for log_msg in logs {
+                                    log::info!("{}", log_msg);
+                                    println!("{}", log_msg);
+                                }
+                            },
+                            Err(e) => {
+                                log::error!("Error during deletion batch: {}", e);
+                                eprintln!("Error: {}", e);
+                            },
                         }
                     } else if let Some(ref target_move_dir) = cli.move_to {
-                        match file_utils::move_files(&files_to_action, target_move_dir, cli.progress) {
-                            Ok(count) => total_moved += count,
-                            Err(e) => log::error!("Error during move batch: {}", e),
+                        match file_utils::move_files(&files_to_action, target_move_dir, cli.dry_run) {
+                            Ok((count, logs)) => {
+                                total_moved += count;
+                                // Print and log all messages
+                                for log_msg in logs {
+                                    log::info!("{}", log_msg);
+                                    println!("{}", log_msg);
+                                }
+                            },
+                            Err(e) => {
+                                log::error!("Error during move batch: {}", e);
+                                eprintln!("Error: {}", e);
+                            },
                         }
                     }
                 }
                 Err(e) => {
                     log::error!("Could not determine action targets for a set: {}", e);
+                    eprintln!("Error: Could not determine which files to keep/delete: {}", e);
                 }
             }
         }
+        
+        // Add appropriate prefix based on dry run mode
+        let action_prefix = if cli.dry_run { "[DRY RUN] Would have " } else { "" };
+        
         if cli.delete {
-            log::info!("Total files deleted: {}", total_deleted);
-            println!("Total files deleted: {}", total_deleted);
+            let msg = format!("{}deleted {} files", action_prefix, total_deleted);
+            log::info!("{}", msg);
+            println!("\n{}", msg);
         }
         if cli.move_to.is_some() {
-            log::info!("Total files moved: {}", total_moved);
-            println!("Total files moved: {}", total_moved);
+            let msg = format!("{}moved {} files", action_prefix, total_moved);
+            log::info!("{}", msg);
+            println!("\n{}", msg);
+        }
+        
+        // Add final reminder if in dry run mode
+        if cli.dry_run {
+            println!("\nThis was a dry run. No files were actually modified.");
+            println!("Run without --dry-run to perform actual operations.");
+            log::info!("Dry run completed - no files were modified");
         }
     } else {
         log::info!("No action flags (--delete or --move-to) specified. Listing duplicates only.");
