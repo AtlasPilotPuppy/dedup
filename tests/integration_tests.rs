@@ -13,7 +13,7 @@ use std::time::{Duration, SystemTime};
 use dedups::file_utils::{self, FileInfo, SelectionStrategy, SortCriterion, SortOrder};
 use dedups::media_dedup::MediaDedupOptions;
 use dedups::Cli; // Assuming Cli is public or pub(crate) and accessible // Import MediaDedupOptions directly
-                // use dedups::tui_app::AppState; // Remove unused import
+                 // use dedups::tui_app::AppState; // Remove unused import
 
 // --- Test Constants ---
 // const TEST_BASE_DIR_NAME: &str = "dedup_integration_tests"; // Remove unused constant

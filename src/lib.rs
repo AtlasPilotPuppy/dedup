@@ -171,7 +171,10 @@ pub struct Cli {
     pub raw_sizes: bool,
 
     /// Path to a custom config file. If provided, overrides the default ~/.deduprc file.
-    #[clap(long, help = "Path to a custom config file (overrides the default ~/.deduprc for dedups)")]
+    #[clap(
+        long,
+        help = "Path to a custom config file (overrides the default ~/.deduprc for dedups)"
+    )]
     pub config_file: Option<PathBuf>,
 
     /// Run in dry run mode - simulate actions without making actual changes.
