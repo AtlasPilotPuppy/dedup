@@ -46,7 +46,7 @@ pub enum ActivePanel {
 pub enum InputMode {
     Normal,
     CopyDestination,
-    // Could add MoveDestination later if needed
+    SettingsMenu,
 }
 
 #[derive(Debug)]
@@ -66,7 +66,7 @@ pub struct AppState {
     // Fields for TUI loading progress
     pub is_loading: bool,
     pub loading_message: String, 
-    // pub loading_progress_percent: Option<f32>, // For a gauge, if we can get good percentages
+    pub settings_menu_selection: usize, // For navigating settings menu
 }
 
 // Channel for messages from scan thread to TUI thread
@@ -109,6 +109,7 @@ impl App {
             file_for_copy_move: None,
             is_loading: if cli_args.progress { true } else { false }, // Control initial loading state display
             loading_message: initial_status,
+            settings_menu_selection: 0,
         };
 
         let (tx, rx) = std_mpsc::channel::<ScanMessage>();
@@ -223,7 +224,12 @@ impl App {
             return;
         }
 
-        // Ctrl+E to Execute jobs
+        if key_code == KeyCode::Char('s') && modifiers == KeyModifiers::CONTROL {
+            self.state.input_mode = InputMode::SettingsMenu;
+            self.state.settings_menu_selection = 0;
+            return;
+        }
+
         if key_code == KeyCode::Char('e') && modifiers == KeyModifiers::CONTROL {
             if let Err(e) = self.process_pending_jobs() {
                 self.state.status_message = Some(format!("Error processing jobs: {}", e));
@@ -234,6 +240,7 @@ impl App {
         match self.state.input_mode {
             InputMode::Normal => self.handle_normal_mode_key(key_event),
             InputMode::CopyDestination => self.handle_copy_dest_input_key(key_event),
+            InputMode::SettingsMenu => self.handle_settings_menu_key(key_event),
         }
         self.validate_selection_indices();
     }
@@ -250,6 +257,11 @@ impl App {
             self.cycle_active_panel();
             return;
         }
+        if key_code == KeyCode::Char('s') && modifiers == KeyModifiers::CONTROL {
+            self.state.input_mode = InputMode::SettingsMenu;
+            self.state.settings_menu_selection = 0;
+            return;
+        }
         if key_code == KeyCode::Char('e') && modifiers == KeyModifiers::CONTROL {
             if let Err(e) = self.process_pending_jobs() {
                 self.state.status_message = Some(format!("Error processing jobs: {}", e));
@@ -262,6 +274,7 @@ impl App {
                 KeyCode::Down | KeyCode::Char('j') => self.select_next_set(),
                 KeyCode::Up | KeyCode::Char('k') => self.select_previous_set(),
                 KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => self.focus_files_panel(),
+                KeyCode::Char('d') => self.delete_current_set(),
                 _ => {}
             },
             ActivePanel::Files => match key_code {
@@ -582,6 +595,76 @@ impl App {
             self.state.status_message = Some("No job selected to remove or jobs list empty.".to_string());
         }
     }
+
+    fn handle_settings_menu_key(&mut self, key_event: KeyEvent) {
+        match key_event.code {
+            KeyCode::Esc => {
+                self.state.input_mode = InputMode::Normal;
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.state.settings_menu_selection = (self.state.settings_menu_selection + 1) % 4; // 4 settings options
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.state.settings_menu_selection = if self.state.settings_menu_selection > 0 {
+                    self.state.settings_menu_selection - 1
+                } else {
+                    3
+                };
+            }
+            KeyCode::Enter => {
+                match self.state.settings_menu_selection {
+                    0 => {
+                        // Selection Strategy
+                        self.state.default_selection_strategy = match self.state.default_selection_strategy {
+                            SelectionStrategy::NewestModified => SelectionStrategy::OldestModified,
+                            SelectionStrategy::OldestModified => SelectionStrategy::ShortestPath,
+                            SelectionStrategy::ShortestPath => SelectionStrategy::LongestPath,
+                            SelectionStrategy::LongestPath => SelectionStrategy::NewestModified,
+                        };
+                        self.state.status_message = Some(format!("Selection strategy set to: {:?}", self.state.default_selection_strategy));
+                    }
+                    1 => {
+                        // Number of cores
+                        let current_cores = num_cpus::get();
+                        let new_cores = if current_cores > 1 { current_cores - 1 } else { current_cores };
+                        // TODO: Implement core count setting
+                        self.state.status_message = Some(format!("Core count set to: {}", new_cores));
+                    }
+                    2 => {
+                        // Hashing algorithm
+                        // TODO: Implement algorithm selection
+                        self.state.status_message = Some("Algorithm selection not yet implemented".to_string());
+                    }
+                    3 => {
+                        // Progress display
+                        // TODO: Implement progress toggle
+                        self.state.status_message = Some("Progress display toggle not yet implemented".to_string());
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn delete_current_set(&mut self) {
+        if let Some(set) = self.current_selected_set() {
+            let strategy = self.state.default_selection_strategy;
+            if let Ok((kept_file, files_to_delete)) = file_utils::determine_action_targets(set, strategy) {
+                // Mark the kept file
+                self.state.jobs.retain(|job| job.file_info.path != kept_file.path);
+                self.state.jobs.push(Job { action: ActionType::Keep, file_info: kept_file.clone() });
+                
+                // Mark all other files for deletion
+                for file in files_to_delete {
+                    self.state.jobs.retain(|job| job.file_info.path != file.path);
+                    self.state.jobs.push(Job { action: ActionType::Delete, file_info: file.clone() });
+                }
+                
+                self.state.status_message = Some(format!("Marked set for deletion, keeping: {}", kept_file.path.display()));
+            }
+        }
+    }
 }
 
 type TerminalBackend = CrosstermBackend<Stdout>;
@@ -695,154 +778,204 @@ fn ui(frame: &mut Frame, app: &mut App) {
         frame.render_widget(Clear, area); // Clear the area for the centered text
         frame.render_widget(text.block(loading_block), area);
     } else {
-        // Main UI (3 panels + status bar)
-        let (content_chunk, status_chunk) = {
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Min(0), 
-                    Constraint::Length(if app.state.input_mode == InputMode::Normal { 1 } else { 3 }), 
-                ])
-                .split(frame.size());
-            (chunks[0], chunks[1])
-        };
-
-        let main_chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Percentage(33), 
-                Constraint::Percentage(34), 
-                Constraint::Percentage(33), 
-            ].as_ref())
-            .split(content_chunk); 
-
-        // Helper to create a block with a title and border, highlighting if active
-        let create_block = |title_string: String, is_active: bool| {
-            let base_style = if is_active { Style::default().fg(Color::Yellow) } else { Style::default().fg(Color::White) };
-            Block::default()
-                .borders(Borders::ALL)
-                .title(Span::styled(title_string, base_style))
-                .border_style(base_style)
-        };
-
-        // Left Panel: Duplicate Sets
-        let sets_panel_title_string = format!("Duplicate Sets ({}/{}) (Tab)", app.state.selected_set_index.saturating_add(1).min(app.state.duplicate_sets.len()), app.state.duplicate_sets.len());
-        let sets_block = create_block(sets_panel_title_string, app.state.active_panel == ActivePanel::Sets && app.state.input_mode == InputMode::Normal);
-        let set_items: Vec<ListItem> = app.state.duplicate_sets.iter().map(|set| {
-            let content = Line::from(Span::styled(
-                format!("Hash: {}... ({} files, {})",
-                    set.hash.chars().take(8).collect::<String>(),
-                    set.files.len(),
-                    format_size(set.size, DECIMAL)),
-                Style::default(),
-            ));
-            ListItem::new(content)
-        }).collect();
-        let sets_list = List::new(set_items)
-            .block(sets_block)
-            .highlight_style(Style::default().add_modifier(Modifier::BOLD).bg(Color::Blue))
-            .highlight_symbol(">> ");
-        let mut sets_list_state = ListState::default();
-        if !app.state.duplicate_sets.is_empty() {
-            sets_list_state.select(Some(app.state.selected_set_index));
-        }
-        frame.render_stateful_widget(sets_list, main_chunks[0], &mut sets_list_state);
-
-        // Middle Panel: Files in Selected Set
-        let (files_panel_title_string, file_items) = 
-            if let Some(selected_set) = app.current_selected_set() {
-                let title = format!("Files ({}/{}) (s:keep d:del c:copy i:ign h:back)", 
-                                    app.state.selected_file_index_in_set.saturating_add(1).min(selected_set.files.len()), 
-                                    selected_set.files.len());
-                let items: Vec<ListItem> = selected_set.files.iter().map(|file_info| {
-                    let mut style = Style::default();
-                    let mut prefix = "   ";
-                    if let Some(job) = app.state.jobs.iter().find(|j| j.file_info.path == file_info.path) {
-                        match job.action {
-                            ActionType::Keep => { style = style.fg(Color::Green).add_modifier(Modifier::BOLD); prefix = "[K]"; }
-                            ActionType::Delete => { style = style.fg(Color::Red).add_modifier(Modifier::CROSSED_OUT); prefix = "[D]"; }
-                            ActionType::Copy(_) => { style = style.fg(Color::Cyan); prefix = "[C]"; }
-                            ActionType::Move(_) => { style = style.fg(Color::Magenta); prefix = "[M]"; }
-                            ActionType::Ignore => { style = style.fg(Color::DarkGray); prefix = "[I]"; }
-                        }
-                    } else {
-                        if let Ok((default_kept, _)) = file_utils::determine_action_targets(selected_set, app.state.default_selection_strategy) {
-                            if default_kept.path == file_info.path {
-                                style = style.fg(Color::Green);
-                                prefix = "[k]";
-                            }
-                        }
-                    }
-                    ListItem::new(Line::from(vec![
-                        Span::styled(format!("{} ", prefix), style),
-                        Span::styled(file_info.path.display().to_string(), style)
-                    ]))
-                }).collect();
-                (title, items)
-            } else {
-                ("Files (0/0)".to_string(), vec![ListItem::new("No set selected or set is empty")])
-            };
-        let files_block = create_block(files_panel_title_string, app.state.active_panel == ActivePanel::Files && app.state.input_mode == InputMode::Normal);
-        let files_list = List::new(file_items)
-            .block(files_block)
-            .highlight_style(Style::default().add_modifier(Modifier::BOLD).bg(Color::DarkGray))
-            .highlight_symbol("> ");
-
-        let mut files_list_state = ListState::default();
-        if app.current_selected_set().map_or(false, |s| !s.files.is_empty()) {
-            files_list_state.select(Some(app.state.selected_file_index_in_set));
-        }
-        frame.render_stateful_widget(files_list, main_chunks[1], &mut files_list_state);
-
-        // Right Panel: Jobs
-        let jobs_panel_title_string = format!("Jobs ({}) (Ctrl+E: Exec, x:del)", app.state.jobs.len());
-        let jobs_block = create_block(jobs_panel_title_string, app.state.active_panel == ActivePanel::Jobs && app.state.input_mode == InputMode::Normal);
-        let job_items: Vec<ListItem> = app.state.jobs.iter().map(|job| {
-            let action_str = match &job.action {
-                ActionType::Keep => "KEEP".to_string(),
-                ActionType::Delete => "DELETE".to_string(),
-                ActionType::Move(dest) => format!("MOVE to {}", dest.display()),
-                ActionType::Copy(dest) => format!("COPY to {}", dest.display()),
-                ActionType::Ignore => "IGNORE".to_string(),
-            };
-            let content = Line::from(Span::raw(format!("{} - {:?}", action_str, job.file_info.path.file_name().unwrap_or_default())));
-            ListItem::new(content)
-        }).collect();
-        let jobs_list_widget = List::new(job_items)
-            .block(jobs_block)
-            .highlight_style(Style::default().add_modifier(Modifier::BOLD).bg(Color::Magenta))
-            .highlight_symbol(">> ");
-        let mut jobs_list_state = ListState::default();
-        if !app.state.jobs.is_empty() {
-            jobs_list_state.select(Some(app.state.selected_job_index));
-        }
-        frame.render_stateful_widget(jobs_list_widget, main_chunks[2], &mut jobs_list_state);
-
-        // Status Bar / Input Area
         match app.state.input_mode {
-            InputMode::Normal => {
-                let status_text = app.state.status_message.as_deref().unwrap_or("q:quit | Tab:cycle | Arrows/jk:nav | s:keep d:del c:copy i:ign | Ctrl+E:exec | x:del job");
-                let status_bar = Paragraph::new(status_text)
-                    .style(Style::default().fg(Color::LightCyan))
-                    .alignment(Alignment::Left);
-                frame.render_widget(status_bar, status_chunk);
-            }
-            InputMode::CopyDestination => { 
-                let input_chunks = Layout::default()
+            InputMode::SettingsMenu => {
+                let chunks = Layout::default()
                     .direction(Direction::Vertical)
-                    .constraints([Constraint::Length(1), Constraint::Length(1)]).split(status_chunk);
-                let prompt_text = app.state.status_message.as_deref().unwrap_or("Enter destination path for copy (Enter:confirm, Esc:cancel):");
-                let prompt_p = Paragraph::new(prompt_text).fg(Color::Yellow);
-                frame.render_widget(prompt_p, input_chunks[0]);
-                let input_field = Paragraph::new(app.state.current_input.value())
-                    .block(Block::default().borders(Borders::TOP).title("Path").border_style(Style::default().fg(Color::Yellow)))
-                    .fg(Color::White);
-                frame.render_widget(input_field, input_chunks[1]);
-                frame.set_cursor(
-                    input_chunks[1].x + app.state.current_input.visual_cursor() as u16 + 1, 
-                    input_chunks[1].y + 1 
-                );
-             }
+                    .constraints([
+                        Constraint::Percentage(40),
+                        Constraint::Length(10),
+                        Constraint::Percentage(40),
+                    ])
+                    .split(frame.size());
+
+                let settings_block = Block::default()
+                    .title("Settings (Esc to exit)")
+                    .borders(Borders::ALL);
+
+                let settings_items = vec![
+                    format!("Selection Strategy: {:?}", app.state.default_selection_strategy),
+                    String::from("Number of Cores (TODO)"),
+                    String::from("Hashing Algorithm (TODO)"),
+                    String::from("Progress Display (TODO)"),
+                ];
+
+                let settings_list = List::new(
+                    settings_items
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, item)| {
+                            let style = if i == app.state.settings_menu_selection {
+                                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                            } else {
+                                Style::default()
+                            };
+                            ListItem::new(item).style(style)
+                        })
+                        .collect::<Vec<_>>(),
+                )
+                .block(settings_block)
+                .highlight_style(Style::default().add_modifier(Modifier::BOLD).bg(Color::Blue))
+                .highlight_symbol(">> ");
+
+                let mut list_state = ListState::default();
+                list_state.select(Some(app.state.settings_menu_selection));
+                frame.render_stateful_widget(settings_list, chunks[1], &mut list_state);
+            }
+            _ => {
+                // Main UI (3 panels + status bar)
+                let (content_chunk, status_chunk) = {
+                    let chunks = Layout::default()
+                        .direction(Direction::Vertical)
+                        .constraints([
+                            Constraint::Min(0), 
+                            Constraint::Length(if app.state.input_mode == InputMode::Normal { 1 } else { 3 }), 
+                        ])
+                        .split(frame.size());
+                    (chunks[0], chunks[1])
+                };
+
+                let main_chunks = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([
+                        Constraint::Percentage(33), 
+                        Constraint::Percentage(34), 
+                        Constraint::Percentage(33), 
+                    ].as_ref())
+                    .split(content_chunk); 
+
+                // Helper to create a block with a title and border, highlighting if active
+                let create_block = |title_string: String, is_active: bool| {
+                    let base_style = if is_active { Style::default().fg(Color::Yellow) } else { Style::default().fg(Color::White) };
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(Span::styled(title_string, base_style))
+                        .border_style(base_style)
+                };
+
+                // Left Panel: Duplicate Sets
+                let sets_panel_title_string = format!("Duplicate Sets ({}/{}) (Tab)", app.state.selected_set_index.saturating_add(1).min(app.state.duplicate_sets.len()), app.state.duplicate_sets.len());
+                let sets_block = create_block(sets_panel_title_string, app.state.active_panel == ActivePanel::Sets && app.state.input_mode == InputMode::Normal);
+                let set_items: Vec<ListItem> = app.state.duplicate_sets.iter().map(|set| {
+                    let content = Line::from(Span::styled(
+                        format!("Hash: {}... ({} files, {})",
+                            set.hash.chars().take(8).collect::<String>(),
+                            set.files.len(),
+                            format_size(set.size, DECIMAL)),
+                        Style::default(),
+                    ));
+                    ListItem::new(content)
+                }).collect();
+                let sets_list = List::new(set_items)
+                    .block(sets_block)
+                    .highlight_style(Style::default().add_modifier(Modifier::BOLD).bg(Color::Blue))
+                    .highlight_symbol(">> ");
+                let mut sets_list_state = ListState::default();
+                if !app.state.duplicate_sets.is_empty() {
+                    sets_list_state.select(Some(app.state.selected_set_index));
+                }
+                frame.render_stateful_widget(sets_list, main_chunks[0], &mut sets_list_state);
+
+                // Middle Panel: Files in Selected Set
+                let (files_panel_title_string, file_items) = 
+                    if let Some(selected_set) = app.current_selected_set() {
+                        let title = format!("Files ({}/{}) (s:keep d:del c:copy i:ign h:back)", 
+                                            app.state.selected_file_index_in_set.saturating_add(1).min(selected_set.files.len()), 
+                                            selected_set.files.len());
+                        let items: Vec<ListItem> = selected_set.files.iter().map(|file_info| {
+                            let mut style = Style::default();
+                            let mut prefix = "   ";
+                            if let Some(job) = app.state.jobs.iter().find(|j| j.file_info.path == file_info.path) {
+                                match job.action {
+                                    ActionType::Keep => { style = style.fg(Color::Green).add_modifier(Modifier::BOLD); prefix = "[K]"; }
+                                    ActionType::Delete => { style = style.fg(Color::Red).add_modifier(Modifier::CROSSED_OUT); prefix = "[D]"; }
+                                    ActionType::Copy(_) => { style = style.fg(Color::Cyan); prefix = "[C]"; }
+                                    ActionType::Move(_) => { style = style.fg(Color::Magenta); prefix = "[M]"; }
+                                    ActionType::Ignore => { style = style.fg(Color::DarkGray); prefix = "[I]"; }
+                                }
+                            } else {
+                                if let Ok((default_kept, _)) = file_utils::determine_action_targets(selected_set, app.state.default_selection_strategy) {
+                                    if default_kept.path == file_info.path {
+                                        style = style.fg(Color::Green);
+                                        prefix = "[k]";
+                                    }
+                                }
+                            }
+                            ListItem::new(Line::from(vec![
+                                Span::styled(format!("{} ", prefix), style),
+                                Span::styled(file_info.path.display().to_string(), style)
+                            ]))
+                        }).collect();
+                        (title, items)
+                    } else {
+                        ("Files (0/0)".to_string(), vec![ListItem::new("No set selected or set is empty")])
+                    };
+                let files_block = create_block(files_panel_title_string, app.state.active_panel == ActivePanel::Files && app.state.input_mode == InputMode::Normal);
+                let files_list = List::new(file_items)
+                    .block(files_block)
+                    .highlight_style(Style::default().add_modifier(Modifier::BOLD).bg(Color::DarkGray))
+                    .highlight_symbol("> ");
+
+                let mut files_list_state = ListState::default();
+                if app.current_selected_set().map_or(false, |s| !s.files.is_empty()) {
+                    files_list_state.select(Some(app.state.selected_file_index_in_set));
+                }
+                frame.render_stateful_widget(files_list, main_chunks[1], &mut files_list_state);
+
+                // Right Panel: Jobs
+                let jobs_panel_title_string = format!("Jobs ({}) (Ctrl+E: Exec, x:del)", app.state.jobs.len());
+                let jobs_block = create_block(jobs_panel_title_string, app.state.active_panel == ActivePanel::Jobs && app.state.input_mode == InputMode::Normal);
+                let job_items: Vec<ListItem> = app.state.jobs.iter().map(|job| {
+                    let action_str = match &job.action {
+                        ActionType::Keep => "KEEP".to_string(),
+                        ActionType::Delete => "DELETE".to_string(),
+                        ActionType::Move(dest) => format!("MOVE to {}", dest.display()),
+                        ActionType::Copy(dest) => format!("COPY to {}", dest.display()),
+                        ActionType::Ignore => "IGNORE".to_string(),
+                    };
+                    let content = Line::from(Span::raw(format!("{} - {:?}", action_str, job.file_info.path.file_name().unwrap_or_default())));
+                    ListItem::new(content)
+                }).collect();
+                let jobs_list_widget = List::new(job_items)
+                    .block(jobs_block)
+                    .highlight_style(Style::default().add_modifier(Modifier::BOLD).bg(Color::Magenta))
+                    .highlight_symbol(">> ");
+                let mut jobs_list_state = ListState::default();
+                if !app.state.jobs.is_empty() {
+                    jobs_list_state.select(Some(app.state.selected_job_index));
+                }
+                frame.render_stateful_widget(jobs_list_widget, main_chunks[2], &mut jobs_list_state);
+
+                // Status Bar / Input Area
+                match app.state.input_mode {
+                    InputMode::Normal => {
+                        let status_text = app.state.status_message.as_deref().unwrap_or(&String::from("q:quit | Tab:cycle | Arrows/jk:nav | s:keep d:del c:copy i:ign | Ctrl+E:exec | x:del job | Ctrl+S:settings")).to_string();
+                        let status_bar = Paragraph::new(status_text)
+                            .style(Style::default().fg(Color::LightCyan))
+                            .alignment(Alignment::Left);
+                        frame.render_widget(status_bar, status_chunk);
+                    }
+                    InputMode::CopyDestination => { 
+                        let input_chunks = Layout::default()
+                            .direction(Direction::Vertical)
+                            .constraints([Constraint::Length(1), Constraint::Length(1)]).split(status_chunk);
+                        let prompt_text = app.state.status_message.as_deref().unwrap_or(&String::from("Enter destination path for copy (Enter:confirm, Esc:cancel):")).to_string();
+                        let prompt_p = Paragraph::new(prompt_text).fg(Color::Yellow);
+                        frame.render_widget(prompt_p, input_chunks[0]);
+                        let input_field = Paragraph::new(app.state.current_input.value())
+                            .block(Block::default().borders(Borders::TOP).title("Path").border_style(Style::default().fg(Color::Yellow)))
+                            .fg(Color::White);
+                        frame.render_widget(input_field, input_chunks[1]);
+                        frame.set_cursor(
+                            input_chunks[1].x + app.state.current_input.visual_cursor() as u16 + 1, 
+                            input_chunks[1].y + 1 
+                        );
+                     }
+                    InputMode::SettingsMenu => {
+                        // Settings menu is handled in the main UI match above
+                    }
+                }
+            }
         }
     }
 }
