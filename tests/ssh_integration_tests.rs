@@ -62,7 +62,7 @@ fn test_check_dedups_installed() -> Result<()> {
 #[ignore] // These tests require a configured SSH host and are ignored by default
 fn test_file_operations() -> Result<()> {
     // Create a test CLI configuration
-    let _cli = Cli::parse_from(&["dedups", "--use-sudo", "--allow-remote-install"]);
+    let _cli = Cli::parse_from(&["dedups", "--use-sudo", "--allow-remote-install", "/tmp"]);
     
     // Create a temporary local file
     let local_tempdir = tempfile::tempdir()?;
@@ -127,7 +127,7 @@ fn test_handle_directory() -> Result<()> {
 #[ignore] // These tests require a configured SSH host and are ignored by default
 fn test_remote_dedups_execution() -> Result<()> {
     // Create a test CLI configuration
-    let cli = Cli::parse_from(&["dedups", "--use-sudo", "--allow-remote-install"]);
+    let cli = Cli::parse_from(&["dedups", "--use-sudo", "--allow-remote-install", "/tmp"]);
     
     // Set up remote connection
     let remote = RemoteLocation::parse("ssh:test-dedups:/tmp")?;
@@ -182,7 +182,7 @@ fn test_remote_dedups_execution() -> Result<()> {
 #[ignore] // These tests require a configured SSH host and are ignored by default
 fn test_remote_dedups_path_handling() -> Result<()> {
     // Create a test CLI configuration
-    let cli = Cli::parse_from(&["dedups", "--use-sudo", "--allow-remote-install"]);
+    let cli = Cli::parse_from(&["dedups", "--use-sudo", "--allow-remote-install", "/tmp"]);
     
     // Set up remote connection
     let remote = RemoteLocation::parse("ssh:test-dedups:/tmp")?;
