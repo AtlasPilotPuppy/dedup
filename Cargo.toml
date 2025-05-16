@@ -59,3 +59,10 @@ predicates = "~3.1.0"
 tempfile = "3.5"
 rand = "0.8.5"
 filetime = "0.2.23"
+
+[profile.release]
+opt-level = "z"       # Optimize for minimal size ("s" or "z")
+lto = "fat"           # Aggressive link-time optimization
+codegen-units = 1     # Disable parallel codegen for better optimization
+strip = true          # Remove debug symbols
+panic = "abort"       # Skip panic unwinding code

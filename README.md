@@ -36,7 +36,7 @@ cargo install dedup
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/dedup.git
+git clone https://github.com/AtlasPilotPuppy/dedup
 cd dedup
 
 # Build in release mode
