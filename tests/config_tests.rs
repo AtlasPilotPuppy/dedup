@@ -76,24 +76,54 @@ fn test_nonexistent_config() -> anyhow::Result<()> {
 fn test_create_default_if_not_exists() -> anyhow::Result<()> {
     // Create a temporary directory for testing
     let temp_dir = tempdir()?;
+    let temp_path = temp_dir.path().to_string_lossy().to_string();
+
+    println!("Test temp dir: {}", temp_path);
 
     // Set up environment for cross-platform testing
-    std::env::set_var("HOME", temp_dir.path());
-    std::env::set_var("USERPROFILE", temp_dir.path());
+    std::env::set_var("HOME", &temp_path);
+    std::env::set_var("USERPROFILE", &temp_path);
 
-    // On Windows, also set up APPDATA for config_dir
+    // On Windows, create the config subdirectory structure explicitly
     #[cfg(target_family = "windows")]
-    std::env::set_var("APPDATA", temp_dir.path());
+    {
+        std::env::set_var("APPDATA", &temp_path);
+        let windows_config_dir = std::path::Path::new(&temp_path).join("dedup");
+        std::fs::create_dir_all(&windows_config_dir)?;
+        println!("Created Windows config dir: {:?}", windows_config_dir);
+    }
+
+    // Double-check what config path we'll be using
+    let config_path_before = DedupConfig::get_config_path()?;
+    println!("Expected config path: {:?}", config_path_before);
+    println!(
+        "Config path exists before test: {}",
+        config_path_before.exists()
+    );
 
     // Create default config
     let create_result = DedupConfig::create_default_if_not_exists();
+    println!("Create result: {:?}", create_result);
 
     // The function should succeed and return true (file was created)
-    assert!(create_result.is_ok());
-    assert!(create_result.unwrap());
+    assert!(
+        create_result.is_ok(),
+        "Config creation failed: {:?}",
+        create_result
+    );
+
+    let created = create_result.unwrap();
+    println!("Config file was created: {}", created);
+    assert!(
+        created,
+        "Config file already existed or couldn't be created"
+    );
 
     // Get the expected config path and verify the file exists
     let config_path = DedupConfig::get_config_path()?;
+    println!("Config path after creation: {:?}", config_path);
+    println!("Config path exists after test: {}", config_path.exists());
+
     assert!(
         config_path.exists(),
         "Config file was not created at expected path: {:?}",
@@ -102,8 +132,16 @@ fn test_create_default_if_not_exists() -> anyhow::Result<()> {
 
     // Second call should return false (file already exists)
     let second_result = DedupConfig::create_default_if_not_exists();
-    assert!(second_result.is_ok());
-    assert!(!second_result.unwrap());
+    println!("Second create result: {:?}", second_result);
+    assert!(
+        second_result.is_ok(),
+        "Second config check failed: {:?}",
+        second_result
+    );
+    assert!(
+        !second_result.unwrap(),
+        "Config file was unexpectedly created twice"
+    );
 
     Ok(())
 }

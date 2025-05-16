@@ -100,24 +100,67 @@ impl Default for DedupConfig {
 impl DedupConfig {
     /// Get the path to the user's config file
     pub fn get_config_path() -> Result<PathBuf> {
-        #[cfg(target_family = "unix")]
-        {
-            // Unix-style: ~/.deduprc
-            let home_dir = dirs::home_dir().context("Could not determine home directory")?;
-            Ok(home_dir.join(".deduprc"))
-        }
-
-        #[cfg(target_family = "windows")]
-        {
-            // Windows-style: %APPDATA%\dedup\config.toml or %USERPROFILE%\.deduprc as fallback
-            if let Some(config_dir) = dirs::config_dir() {
-                Ok(config_dir.join("dedup").join("config.toml"))
-            } else {
-                // Fallback to home directory if config_dir isn't available
+        let path = {
+            #[cfg(target_family = "unix")]
+            {
+                // Unix-style: ~/.deduprc
                 let home_dir = dirs::home_dir().context("Could not determine home directory")?;
-                Ok(home_dir.join(".deduprc"))
+                log::debug!("Unix config path. Home dir: {:?}", home_dir);
+                home_dir.join(".deduprc")
             }
-        }
+
+            #[cfg(target_family = "windows")]
+            {
+                // Windows-style: %APPDATA%\dedup\config.toml or %USERPROFILE%\.deduprc as fallback
+                let config_dir = dirs::config_dir();
+                log::debug!("Windows config dir: {:?}", config_dir);
+
+                if let Some(config_dir) = config_dir {
+                    let target_path = config_dir.join("dedup").join("config.toml");
+                    log::debug!("Windows target config path: {:?}", target_path);
+
+                    // Create parent directory if it doesn't exist already
+                    if let Some(parent) = target_path.parent() {
+                        log::debug!(
+                            "Windows config parent dir: {:?}, exists: {}",
+                            parent,
+                            parent.exists()
+                        );
+                        if !parent.exists() {
+                            log::debug!("Creating parent directory for Windows config");
+                            match fs::create_dir_all(parent) {
+                                Ok(_) => {}
+                                Err(e) => {
+                                    log::warn!(
+                                        "Failed to create Windows config dir {:?}: {}",
+                                        parent,
+                                        e
+                                    );
+                                    // On failure, fall back to home directory
+                                    let home_dir = dirs::home_dir()
+                                        .context("Could not determine home directory")?;
+                                    log::debug!("Falling back to Windows home dir: {:?}", home_dir);
+                                    return Ok(home_dir.join(".deduprc"));
+                                }
+                            }
+                        }
+                    }
+                    target_path
+                } else {
+                    // Fallback to home directory if config_dir isn't available
+                    let home_dir =
+                        dirs::home_dir().context("Could not determine home directory")?;
+                    log::debug!(
+                        "No Windows config dir available, using home: {:?}",
+                        home_dir
+                    );
+                    home_dir.join(".deduprc")
+                }
+            }
+        };
+
+        log::debug!("Final config path: {:?}, exists: {}", path, path.exists());
+        Ok(path)
     }
 
     /// Load configuration from the .deduprc file
