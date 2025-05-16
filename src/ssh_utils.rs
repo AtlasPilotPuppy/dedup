@@ -219,53 +219,111 @@ impl RemoteLocation {
     }
     
     /// Check if dedups is installed on the remote system
-    pub async fn check_dedups_installed(&self) -> Result<bool> {
+    pub async fn check_dedups_installed(&self) -> Result<Option<String>> {
         log::info!("Checking if dedups is installed on remote host '{}'...", self.host);
-        let output = self.run_command("which dedups 2>/dev/null || echo 'not found'")?;
-        let installed = !output.contains("not found");
-        if installed {
-            let path = output.trim();
-            log::info!("Found dedups on remote host '{}' at: {}", self.host, path);
-        } else {
-            log::info!("dedups not found on remote host '{}'", self.host);
+        
+        // Check common installation locations
+        let locations = vec![
+            "which dedups 2>/dev/null",
+            "test -x /usr/local/bin/dedups && echo /usr/local/bin/dedups",
+            "test -x ~/.local/bin/dedups && echo ~/.local/bin/dedups",
+            "test -x $HOME/.local/bin/dedups && echo $HOME/.local/bin/dedups"
+        ];
+        
+        for cmd in locations {
+            match self.run_command(cmd) {
+                Ok(output) => {
+                    let output = output.trim();
+                    if !output.is_empty() && output != "not found" {
+                        log::info!("Found dedups on remote host '{}' at: {}", self.host, output);
+                        return Ok(Some(output.to_string()));
+                    }
+                }
+                Err(e) => {
+                    log::debug!("Search in location failed: {}", e);
+                }
+            }
         }
-        Ok(installed)
+        
+        log::info!("dedups not found on remote host '{}'", self.host);
+        Ok(None)
     }
     
     /// Install dedups on the remote system
-    pub fn install_dedups(&self) -> Result<()> {
+    pub fn install_dedups(&self, cli: &crate::Cli) -> Result<()> {
         log::info!("Attempting to install dedups on remote host '{}'...", self.host);
         
-        // First check if we have sudo access
-        let has_sudo = self.run_command("sudo -n true 2>/dev/null && echo 'yes' || echo 'no'")?;
-        let install_dir = if has_sudo.trim() == "yes" {
-            log::info!("Sudo access available on remote host, will install to /usr/local/bin");
+        // First check if we want to use sudo and if it's available
+        let has_sudo = if cli.use_sudo {
+            match self.run_command("sudo -n true 2>/dev/null && echo 'yes' || echo 'no'") {
+                Ok(result) => result.trim() == "yes",
+                Err(_) => {
+                    log::info!("Sudo requires password, will prompt during installation");
+                    true // We'll try with sudo anyway since we're allowed to prompt
+                }
+            }
+        } else {
+            false
+        };
+
+        let install_dir = if has_sudo {
+            log::info!("Will install to /usr/local/bin using sudo");
             "/usr/local/bin"
         } else {
-            log::info!("No sudo access on remote host, will install to user's ~/.local/bin");
+            log::info!("Will install to user's ~/.local/bin");
             "~/.local/bin"
         };
         
         // Create install directory if it doesn't exist
-        let mkdir_cmd = format!("mkdir -p {}", install_dir);
+        let mkdir_cmd = if has_sudo {
+            format!("sudo mkdir -p {} && sudo chown $USER {}", install_dir, install_dir)
+        } else {
+            format!("mkdir -p {}", install_dir)
+        };
         log::debug!("Creating installation directory: {}", install_dir);
         self.run_command(&mkdir_cmd)?;
+        
+        // First ensure ~/.local/bin is in PATH if we're using it
+        if install_dir.contains("~/.local/bin") {
+            log::debug!("Ensuring ~/.local/bin is in PATH");
+            let path_cmd = r#"
+                echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc;
+                echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc 2>/dev/null || true;
+                export PATH="$HOME/.local/bin:$PATH"
+            "#;
+            if let Err(e) = self.run_command(path_cmd) {
+                log::warn!("Failed to update PATH in shell config: {}", e);
+            }
+        }
         
         // Download and install dedups
         let install_cmd = format!(
             "curl -sSL https://raw.githubusercontent.com/AtlasPilotPuppy/dedup/main/install.sh | {} bash -s -- --ssh",
-            if has_sudo.trim() == "yes" { "sudo" } else { "" }
+            if has_sudo { "sudo -S" } else { "" }
         );
         
         log::info!("Downloading and installing dedups on remote host...");
         match self.run_command(&install_cmd) {
             Ok(_) => {
-                // Verify installation
-                let verify_cmd = "which dedups";
-                match self.run_command(verify_cmd) {
+                // Verify installation with updated PATH
+                let verify_cmd = format!(
+                    "export PATH=\"$HOME/.local/bin:$PATH\"; {} which dedups",
+                    if has_sudo { "sudo" } else { "" }
+                );
+                match self.run_command(&verify_cmd) {
                     Ok(path) => {
                         log::info!("Successfully installed dedups on remote host '{}' at: {}", self.host, path.trim());
-                        Ok(())
+                        // Verify we can actually run it
+                        let test_cmd = format!(
+                            "export PATH=\"$HOME/.local/bin:$PATH\"; dedups --version"
+                        );
+                        match self.run_command(&test_cmd) {
+                            Ok(_) => Ok(()),
+                            Err(e) => {
+                                log::error!("dedups installed but failed to execute: {}", e);
+                                Err(anyhow::anyhow!("Installation verification failed: dedups installed but cannot be executed"))
+                            }
+                        }
                     }
                     Err(e) => {
                         log::error!("Installation appeared to succeed but dedups not found in PATH. Error: {}", e);

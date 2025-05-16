@@ -2009,7 +2009,7 @@ fn handle_remote_directory(cli: &crate::Cli, dir_path: &Path) -> Result<Vec<File
     } else {
         if !dedups_installed && cli.allow_remote_install {
             log::info!("dedups not found on remote, attempting installation");
-            if let Err(e) = remote.install_dedups() {
+            if let Err(e) = remote.install_dedups(cli) {
                 log::warn!("Failed to install dedups on remote: {}", e);
             }
         }

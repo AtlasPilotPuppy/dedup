@@ -481,6 +481,11 @@ When connecting to a remote system, dedups automatically:
 You can control this behavior with:
 - `--allow-remote-install=[true|false]` - Allow or prevent remote installation
 - `--use-remote-dedups=[true|false]` - Enable or disable using remote dedups
+- `--use-sudo` - Use sudo for installation (will prompt for password if needed)
+
+The installation location depends on sudo access:
+- With sudo: `/usr/local/bin` (system-wide installation)
+- Without sudo: `~/.local/bin` (user-specific installation)
 
 ### Remote File Operations
 

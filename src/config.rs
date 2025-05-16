@@ -91,6 +91,10 @@ pub struct SshConfig {
     #[serde(default = "default_use_remote_dedups")]
     pub use_remote_dedups: bool,
 
+    /// Whether to use sudo for installation (if available)
+    #[serde(default = "default_use_sudo")]
+    pub use_sudo: bool,
+
     /// Default SSH options
     #[serde(default)]
     pub ssh_options: Vec<String>,
@@ -131,11 +135,17 @@ fn default_use_remote_dedups() -> bool {
 }
 
 #[cfg(feature = "ssh")]
+fn default_use_sudo() -> bool {
+    false
+}
+
+#[cfg(feature = "ssh")]
 impl Default for SshConfig {
     fn default() -> Self {
         Self {
             allow_remote_install: default_allow_remote_install(),
             use_remote_dedups: default_use_remote_dedups(),
+            use_sudo: default_use_sudo(),
             ssh_options: Vec::new(),
             rsync_options: Vec::new(),
         }

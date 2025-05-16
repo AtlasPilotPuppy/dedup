@@ -247,6 +247,11 @@ pub struct Cli {
     #[cfg(feature = "ssh")]
     #[clap(long, default_value_t = true, help = "Use remote dedups instance if available")]
     pub use_remote_dedups: bool,
+
+    /// Whether to use sudo for remote installation (if available)
+    #[cfg(feature = "ssh")]
+    #[clap(long, help = "Use sudo for remote installation (will prompt for password)")]
+    pub use_sudo: bool,
 }
 
 impl Cli {

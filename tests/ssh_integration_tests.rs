@@ -60,6 +60,9 @@ fn test_check_dedups_installed() -> Result<()> {
 #[test]
 #[ignore] // These tests require a configured SSH host and are ignored by default
 fn test_file_operations() -> Result<()> {
+    // Create a test CLI configuration
+    let cli = Cli::parse_from(&["dedups", "--use-sudo", "--allow-remote-install"]);
+    
     // Create a temporary local file
     let local_tempdir = tempfile::tempdir()?;
     let local_file = local_tempdir.path().join("local_test_file.txt");
