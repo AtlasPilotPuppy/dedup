@@ -4,6 +4,8 @@ use std::fs;
 use std::io::ErrorKind;
 use anyhow::{Result, Context};
 
+use crate::media_dedup::{MediaDedupOptions, ResolutionPreference, FormatPreference};
+
 /// Configuration structure for .deduprc file
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct DedupConfig {
@@ -50,6 +52,10 @@ pub struct DedupConfig {
     /// Whether to use fast mode (use cached hashes for unchanged files)
     #[serde(default)]
     pub fast_mode: bool,
+    
+    /// Media deduplication options
+    #[serde(default)]
+    pub media_dedup: MediaDedupOptions,
 }
 
 fn default_algorithm() -> String {
@@ -86,6 +92,7 @@ impl Default for DedupConfig {
             exclude: Vec::new(),
             cache_location: None,
             fast_mode: false,
+            media_dedup: MediaDedupOptions::default(),
         }
     }
 }

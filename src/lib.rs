@@ -14,6 +14,15 @@ pub mod config;
 // Add the file cache module
 pub mod file_cache;
 
+// Add the media deduplication module
+pub mod media_dedup;
+
+// Add audio fingerprinting module
+pub mod audio_fingerprint;
+
+// Add video fingerprinting module
+pub mod video_fingerprint;
+
 // To make Cli accessible, you'll need to move its definition from main.rs to lib.rs
 // or re-export it from main.rs if main.rs uses this lib.rs as a library.
 // For a typical binary project that also wants to expose a library for testing/other uses:
@@ -34,6 +43,7 @@ use std::path::PathBuf;
 // Ensure these are correctly pathed if they are part of file_utils module
 use crate::file_utils::{SortCriterion, SortOrder};
 use crate::config::DedupConfig;
+use crate::media_dedup::{MediaDedupOptions, ResolutionPreference, FormatPreference};
 
 #[derive(Parser, Debug, Clone)]
 #[clap(author, version, about, long_about = None)]
@@ -138,6 +148,26 @@ pub struct Cli {
     /// Use cached hashes for files that haven't changed since last scan
     #[clap(long, help = "Use cached file hashes when available (requires cache-location)")]
     pub fast_mode: bool,
+    
+    /// Enable media deduplication (images, videos, audio)
+    #[clap(long, help = "Enable media deduplication for similar images/videos/audio")]
+    pub media_mode: bool,
+    
+    /// Resolution preference for media deduplication
+    #[clap(long, default_value = "highest", value_parser = ["highest", "lowest"], help = "Preferred resolution for media files [highest|lowest|WIDTHxHEIGHT]")]
+    pub media_resolution: String,
+    
+    /// Format preference for media files (comma-separated, highest priority first)
+    #[clap(long, value_delimiter = ',', help = "Preferred formats for media files (comma-separated, e.g., 'raw,png,jpg')")]
+    pub media_formats: Vec<String>,
+    
+    /// Similarity threshold for media deduplication (0-100)
+    #[clap(long, default_value = "90", help = "Similarity threshold percentage for media files (0-100)")]
+    pub media_similarity: u32,
+    
+    /// Media deduplication options (will be populated from above arguments)
+    #[clap(skip)]
+    pub media_dedup_options: MediaDedupOptions,
 }
 
 impl Cli {
@@ -145,6 +175,9 @@ impl Cli {
     pub fn with_config() -> anyhow::Result<Self> {
         // Parse CLI arguments first
         let mut cli = Self::parse();
+        
+        // Initialize media_dedup_options with defaults
+        cli.media_dedup_options = MediaDedupOptions::default();
         
         // Load configuration from specified file or default location
         let config = if let Some(config_path) = &cli.config_file {
@@ -155,6 +188,18 @@ impl Cli {
         
         // Apply config values for any unspecified CLI arguments
         cli.apply_config(config);
+        
+        // Apply media deduplication options based on CLI arguments
+        if cli.media_mode {
+            // If media mode is enabled via CLI, update options accordingly
+            crate::media_dedup::add_media_options_to_cli(
+                &mut cli.media_dedup_options,
+                cli.media_mode,
+                &cli.media_resolution,
+                &cli.media_formats,
+                cli.media_similarity,
+            );
+        }
         
         // Create default config file if it doesn't exist
         // Only do this if we're using the default config path
@@ -226,6 +271,14 @@ impl Cli {
         if self.fast_mode && self.cache_location.is_none() {
             log::warn!("Fast mode enabled but no cache location specified. Fast mode will be disabled.");
             self.fast_mode = false;
+        }
+        
+        // Apply media deduplication options
+        // CLI explicit flags take precedence over config file
+        if !self.media_mode && config.media_dedup.enabled {
+            // Apply from config if CLI didn't explicitly enable
+            self.media_mode = config.media_dedup.enabled;
+            self.media_dedup_options = config.media_dedup;
         }
         
         // Ensure we always have defaults for required fields that might be empty

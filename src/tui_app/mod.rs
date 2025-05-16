@@ -109,6 +109,12 @@ pub struct AppState {
     pub current_sort_order: SortOrder,         // New for sorting
     pub sort_settings_changed: bool,           // Flag if sorting needs re-application
 
+    // Media deduplication options
+    pub media_mode: bool,
+    pub media_resolution: String,
+    pub media_formats: Vec<String>,
+    pub media_similarity: u32,
+
     pub log_messages: Vec<String>, // For operation output
     pub log_scroll: usize,         // For scrolling the log
     pub log_focus: bool, // Whether log area is focused
@@ -166,6 +172,10 @@ impl App {
             current_sort_criterion: cli_args.sort_by,   // Initialize from Cli
             current_sort_order: cli_args.sort_order,    // Initialize from Cli
             sort_settings_changed: false, 
+            media_mode: cli_args.media_mode,
+            media_resolution: cli_args.media_resolution.clone(),
+            media_formats: cli_args.media_formats.clone(),
+            media_similarity: cli_args.media_similarity,
             log_messages: Vec::new(),
             log_scroll: 0,
             log_focus: false,
@@ -319,6 +329,27 @@ impl App {
         // Always enable progress for TUI mode
         current_cli_for_scan.progress = true;
         current_cli_for_scan.progress_tui = true;
+
+        // Apply media deduplication options
+        current_cli_for_scan.media_mode = self.state.media_mode;
+        current_cli_for_scan.media_resolution = self.state.media_resolution.clone();
+        current_cli_for_scan.media_formats = self.state.media_formats.clone();
+        current_cli_for_scan.media_similarity = self.state.media_similarity;
+        
+        // If media mode is enabled, set up the media_dedup_options
+        if current_cli_for_scan.media_mode {
+            // Clear any existing options first
+            current_cli_for_scan.media_dedup_options = crate::media_dedup::MediaDedupOptions::default();
+            
+            // Apply settings to media_dedup_options
+            crate::media_dedup::add_media_options_to_cli(
+                &mut current_cli_for_scan.media_dedup_options,
+                self.state.media_mode,
+                &self.state.media_resolution,
+                &self.state.media_formats,
+                self.state.media_similarity,
+            );
+        }
 
         // Note: We always use progress for TUI internal scans regardless of initial cli.progress
         // find_duplicate_files_with_progress requires a tx channel.
@@ -718,7 +749,7 @@ impl App {
                 self.state.selected_setting_category_index = self.state.selected_setting_category_index.saturating_sub(1);
             }
             KeyCode::Down => {
-                self.state.selected_setting_category_index = (self.state.selected_setting_category_index + 1).min(4); // Max index is 4 now
+                self.state.selected_setting_category_index = (self.state.selected_setting_category_index + 1).min(8); // Max index is 8 now including media options
             }
             // Strategy selection keys (n, o, s, l)
             KeyCode::Char('n') if self.state.selected_setting_category_index == 0 => { 
@@ -850,6 +881,75 @@ impl App {
                 self.state.current_sort_order = SortOrder::Descending;
                 self.state.sort_settings_changed = true;
                 self.state.status_message = Some("Sort Order: Descending (apply on exit)".to_string());
+            }
+            // Media Deduplication Toggle
+            KeyCode::Char('e') if self.state.selected_setting_category_index == 5 => {
+                self.state.media_mode = !self.state.media_mode;
+                self.state.rescan_needed = true;
+                if self.state.media_mode {
+                    // Check if ffmpeg is available
+                    if crate::media_dedup::is_ffmpeg_available() {
+                        self.state.status_message = Some("Media Mode: Enabled (Rescan needed)".to_string());
+                    } else {
+                        self.state.status_message = Some("Media Mode: Enabled - ffmpeg not found, video processing may be limited (Rescan needed)".to_string());
+                        self.state.log_messages.push("Warning: ffmpeg not found. Video deduplication will be limited.".to_string());
+                    }
+                } else {
+                    self.state.status_message = Some("Media Mode: Disabled (Rescan needed)".to_string());
+                }
+            }
+            // Resolution Preference
+            KeyCode::Char('h') if self.state.selected_setting_category_index == 6 => {
+                self.state.media_resolution = "highest".to_string();
+                self.state.rescan_needed = true;
+                self.state.status_message = Some("Media Resolution Preference: Highest (Rescan needed)".to_string());
+            }
+            KeyCode::Char('l') if self.state.selected_setting_category_index == 6 => {
+                self.state.media_resolution = "lowest".to_string();
+                self.state.rescan_needed = true;
+                self.state.status_message = Some("Media Resolution Preference: Lowest (Rescan needed)".to_string());
+            }
+            KeyCode::Char('c') if self.state.selected_setting_category_index == 6 => {
+                self.state.media_resolution = "1280x720".to_string(); // Default to 720p
+                self.state.rescan_needed = true;
+                self.state.status_message = Some("Media Resolution Preference: Custom (1280x720) (Rescan needed)".to_string());
+            }
+            // Format Preference
+            KeyCode::Char('r') if self.state.selected_setting_category_index == 7 => {
+                self.state.media_formats = vec!["raw".to_string(), "png".to_string(), "jpg".to_string(), "mp4".to_string(), "wav".to_string()];
+                self.state.rescan_needed = true;
+                self.state.status_message = Some("Media Format Preference: RAW > PNG > JPG (Rescan needed)".to_string());
+            }
+            KeyCode::Char('p') if self.state.selected_setting_category_index == 7 => {
+                self.state.media_formats = vec!["png".to_string(), "jpg".to_string(), "raw".to_string(), "mp4".to_string(), "wav".to_string()];
+                self.state.rescan_needed = true;
+                self.state.status_message = Some("Media Format Preference: PNG > JPG > RAW (Rescan needed)".to_string());
+            }
+            KeyCode::Char('j') if self.state.selected_setting_category_index == 7 => {
+                self.state.media_formats = vec!["jpg".to_string(), "raw".to_string(), "png".to_string(), "mp4".to_string(), "wav".to_string()];
+                self.state.rescan_needed = true;
+                self.state.status_message = Some("Media Format Preference: JPG > RAW > PNG (Rescan needed)".to_string());
+            }
+            // Similarity Threshold
+            KeyCode::Char('1') if self.state.selected_setting_category_index == 8 => {
+                self.state.media_similarity = 95;
+                self.state.rescan_needed = true;
+                self.state.status_message = Some("Media Similarity Threshold: 95% (Very strict) (Rescan needed)".to_string());
+            }
+            KeyCode::Char('2') if self.state.selected_setting_category_index == 8 => {
+                self.state.media_similarity = 90;
+                self.state.rescan_needed = true;
+                self.state.status_message = Some("Media Similarity Threshold: 90% (Default) (Rescan needed)".to_string());
+            }
+            KeyCode::Char('3') if self.state.selected_setting_category_index == 8 => {
+                self.state.media_similarity = 85;
+                self.state.rescan_needed = true;
+                self.state.status_message = Some("Media Similarity Threshold: 85% (Relaxed) (Rescan needed)".to_string());
+            }
+            KeyCode::Char('4') if self.state.selected_setting_category_index == 8 => {
+                self.state.media_similarity = 75;
+                self.state.rescan_needed = true;
+                self.state.status_message = Some("Media Similarity Threshold: 75% (Very relaxed) (Rescan needed)".to_string());
             }
             _ => {}
         }
@@ -1612,6 +1712,10 @@ fn ui(frame: &mut Frame, app: &mut App) {
         let mut parallel_style = Style::default();
         let mut sort_criterion_style = Style::default();
         let mut sort_order_style = Style::default();
+        let mut media_mode_style = Style::default();
+        let mut media_resolution_style = Style::default();
+        let mut media_format_style = Style::default();
+        let mut media_similarity_style = Style::default();
 
         match app.state.selected_setting_category_index {
             0 => strategy_style = strategy_style.fg(Color::Yellow).add_modifier(Modifier::BOLD),
@@ -1619,6 +1723,10 @@ fn ui(frame: &mut Frame, app: &mut App) {
             2 => parallel_style = parallel_style.fg(Color::Yellow).add_modifier(Modifier::BOLD),
             3 => sort_criterion_style = sort_criterion_style.fg(Color::Yellow).add_modifier(Modifier::BOLD),
             4 => sort_order_style = sort_order_style.fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            5 => media_mode_style = media_mode_style.fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            6 => media_resolution_style = media_resolution_style.fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            7 => media_format_style = media_format_style.fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            8 => media_similarity_style = media_similarity_style.fg(Color::Yellow).add_modifier(Modifier::BOLD),
             _ => {}
         }
 
@@ -1643,10 +1751,37 @@ fn ui(frame: &mut Frame, app: &mut App) {
             Line::from(Span::styled(format!("5. Sort Order: {:?}", app.state.current_sort_order), sort_order_style)),
             Line::from(Span::styled(format!("   (a:ascending, d:descending)"), sort_order_style)),
             Line::from(Span::raw("")),
+            
+            // Media deduplication options
+            Line::from(Span::styled("--- Media Deduplication ---", Style::default().add_modifier(Modifier::BOLD))),
+            Line::from(Span::raw("")),
+            Line::from(Span::styled(format!("6. Media Mode: {}", 
+                if app.state.media_mode {
+                    if crate::media_dedup::is_ffmpeg_available() {
+                        "Enabled"
+                    } else {
+                        "Enabled (ffmpeg not found, limited functionality)"
+                    }
+                } else {
+                    "Disabled"
+                }
+            ), media_mode_style)),
+            Line::from(Span::styled(format!("   (e:toggle, requires rescan)"), media_mode_style)),
+            Line::from(Span::raw("")),
+            Line::from(Span::styled(format!("7. Media Resolution Preference: {}", app.state.media_resolution), media_resolution_style)),
+            Line::from(Span::styled(format!("   (h:highest, l:lowest, c:custom, requires rescan)"), media_resolution_style)),
+            Line::from(Span::raw("")),
+            Line::from(Span::styled(format!("8. Media Format Preference: {}", 
+                app.state.media_formats.iter().take(3).cloned().collect::<Vec<_>>().join(" > ")), media_format_style)),
+            Line::from(Span::styled(format!("   (r:raw first, p:png first, j:jpg first, requires rescan)"), media_format_style)),
+            Line::from(Span::raw("")),
+            Line::from(Span::styled(format!("9. Media Similarity Threshold: {}%", app.state.media_similarity), media_similarity_style)),
+            Line::from(Span::styled(format!("   (1:95% strict, 2:90% default, 3:85% relaxed, 4:75% very relaxed, requires rescan)"), media_similarity_style)),
+            Line::from(Span::raw("")),
             Line::from(Span::raw(if app.state.rescan_needed && app.state.sort_settings_changed {
-                "[!] Algorithm/Parallelism and Sort settings changed. Ctrl+R to rescan, Sort applied on Esc."
+                "[!] Algorithm/Parallelism/Media and Sort settings changed. Ctrl+R to rescan, Sort applied on Esc."
             } else if app.state.rescan_needed {
-                "[!] Algorithm/Parallelism settings changed. Press Ctrl+R to rescan."
+                "[!] Algorithm/Parallelism/Media settings changed. Press Ctrl+R to rescan."
             } else if app.state.sort_settings_changed {
                 "[!] Sort settings changed. Applied on exiting settings (Esc)."
             } else {

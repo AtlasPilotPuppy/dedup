@@ -283,7 +283,9 @@ mod integration {
 
         let cli_args = env.default_cli_args();
 
-        let duplicate_sets = file_utils::find_duplicate_files(&cli_args)?;
+        // Create a dummy channel for the progress updates
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let duplicate_sets = file_utils::find_duplicate_files_with_progress(&cli_args, tx)?;
 
         let mut actual_duplicate_sets_found = 0;
         // let mut total_files_in_duplicate_sets = 0;

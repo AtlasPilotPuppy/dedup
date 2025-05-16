@@ -96,7 +96,17 @@ fn main() -> Result<()> {
     } else {
         // Single directory mode - find duplicates within one directory
         log::info!("Non-interactive mode selected for directory: {:?}", cli.directories[0]);
-        match file_utils::find_duplicate_files(&cli) {
+        // To get the right display for CLI
+        if cli.progress {
+            simplelog::TermLogger::init(LevelFilter::Info, simplelog::Config::default(), simplelog::TerminalMode::Mixed, simplelog::ColorChoice::Auto)?;
+        } else {
+            simplelog::SimpleLogger::init(LevelFilter::Info, simplelog::Config::default())?;
+        }
+        
+        // Since we're not in TUI mode, we need a channel to receive progress updates
+        let (tx, _rx) = std::sync::mpsc::channel();
+        
+        match file_utils::find_duplicate_files_with_progress(&cli, tx) {
             Ok(duplicate_sets) => {
                 if duplicate_sets.is_empty() {
                     log::info!("No duplicate files found.");

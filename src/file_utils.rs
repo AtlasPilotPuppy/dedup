@@ -3,7 +3,7 @@ use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
-
+use std::sync::{Arc, Mutex};
 use anyhow::Result;
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
@@ -259,10 +259,14 @@ pub fn calculate_hash(path: &Path, algorithm: &str) -> Result<String> {
     }
 }
 
+/// Find duplicate files with progress reporting (TUI mode)
 pub fn find_duplicate_files_with_progress(
     cli: &Cli,
     tx_progress: StdMpscSender<ScanMessage>,
 ) -> Result<Vec<DuplicateSet>> {
+    // Clone tx_progress before moving it into any closure
+    let tx_progress_for_media = tx_progress.clone();
+    
     log::info!("[ScanThread] Starting scan with progress updates for directory: {:?}", cli.directories[0]);
     let filter_rules = FilterRules::new(cli)?;
     
@@ -286,7 +290,7 @@ pub fn find_duplicate_files_with_progress(
     // Track cache hits using atomic
     let cache_hits = std::sync::atomic::AtomicUsize::new(0);
 
-    let send_status = |stage: u8, msg: String| {
+    let send_status = move |stage: u8, msg: String| {
         if tx_progress.send(ScanMessage::StatusUpdate(stage, msg)).is_err() {
             log::warn!("[ScanThread] Failed to send status update to TUI (channel closed).");
         }
@@ -405,6 +409,14 @@ pub fn find_duplicate_files_with_progress(
     if potential_duplicates.is_empty() {
         send_status(3, "Scan complete. No potential duplicates found.".to_string());
         log::info!("[ScanThread] No potential duplicates found after size grouping.");
+        
+        // No duplicates found, but if media mode is enabled, we should handle it separately
+        if cli.media_mode && cli.media_dedup_options.enabled {
+            // Clone before moving tx_progress into closure
+            let tx_clone = tx_progress_for_media.clone();
+            return find_similar_media_files_with_progress(cli, tx_clone);
+        }
+        
         return Ok(Vec::new());
     }
 
@@ -429,6 +441,9 @@ pub fn find_duplicate_files_with_progress(
     
     send_status(3, format!("Stage 3/3: 🔄 Hashing {} files across {} size groups (using {} threads)...", 
         total_files_to_hash, total_groups_to_hash, num_threads));
+
+    // Keep track of all collected FileInfos for possible media processing later
+    let mut all_file_infos = Vec::new();
 
     pool.install(|| {
         potential_duplicates
@@ -513,6 +528,11 @@ pub fn find_duplicate_files_with_progress(
         match local_rx.recv() { // This will block until a message is received
             Ok(Ok(hashed_group)) => {
                 for (hash, file_infos_vec) in hashed_group {
+                    // Keep all file infos for media processing if needed
+                    if cli.media_mode {
+                        all_file_infos.extend(file_infos_vec.iter().cloned());
+                    }
+                    
                     if file_infos_vec.len() > 1 {
                         actual_duplicate_sets += 1;
                         let first_file_size = file_infos_vec[0].size; // Get size before move
@@ -585,97 +605,44 @@ pub fn find_duplicate_files_with_progress(
     
     send_status(3, message);
     log::info!("[ScanThread] Found {} sets of duplicate files.", duplicate_sets.len());
+    
+    if cli.media_mode && cli.media_dedup_options.enabled {
+        // Logic for media mode handling will go here
+        // For now, just a placeholder
+        log::info!("Media mode is enabled but placeholder implementation");
+    }
+    
     Ok(duplicate_sets)
 }
 
-pub fn find_duplicate_files(
+/// Find similar media files with progress reporting
+fn find_similar_media_files_with_progress(
     cli: &Cli,
+    tx_progress: StdMpscSender<ScanMessage>,
 ) -> Result<Vec<DuplicateSet>> {
-    // This version is for non-TUI or TUI sync mode.
-    // It uses indicatif progress bars with distinct stages
-    log::info!("Scanning directory (sync): {:?}", cli.directories[0]);
+    // Helper to send status updates through the channel
+    let send_status = move |stage: u8, msg: String| {
+        if tx_progress.send(ScanMessage::StatusUpdate(stage, msg)).is_err() {
+            log::warn!("[ScanThread] Failed to send status update to TUI (channel closed).");
+        }
+    };
+    
+    send_status(4, format!("Starting media similarity detection..."));
+    
+    // First, collect all files recursively
     let filter_rules = FilterRules::new(cli)?;
     
-    // Initialize file cache if using fast mode
-    let file_cache = if cli.fast_mode && cli.cache_location.is_some() {
-        let cache_dir = cli.cache_location.as_ref().unwrap();
-        match crate::file_cache::FileCache::new(cache_dir, &cli.algorithm) {
-            Ok(cache) => {
-                log::info!("Using file cache at {:?} with {} entries", cache_dir, cache.len());
-                Some(std::sync::Arc::new(std::sync::Mutex::new(cache)))
-            },
-            Err(e) => {
-                log::warn!("Failed to initialize file cache: {}", e);
-                None
-            }
-        }
-    } else {
-        None
-    };
+    send_status(4, format!("Scanning directory for media files: {}", cli.directories[0].display()));
     
-    // Track cache hits using atomic
-    let cache_hits = std::sync::atomic::AtomicUsize::new(0);
-
-    // ========== STAGE 0: PRE-SCAN FOR TOTAL COUNT ==========
-    let pb_draw_target = if cli.progress { indicatif::ProgressDrawTarget::stderr() } else { indicatif::ProgressDrawTarget::hidden() };
-    
-    // Create a multi-progress container
-    let multi_progress = indicatif::MultiProgress::new();
-    multi_progress.set_draw_target(pb_draw_target);
-    
-    // Create a progress bar for pre-scan
-    let pb_pre_scan = multi_progress.add(ProgressBar::new_spinner());
-    if cli.progress {
-        pb_pre_scan.set_style(ProgressStyle::default_spinner()
-            .template("{spinner:.green} [0/3] Pre-scan: {msg:.dim} ({elapsed_precise})")?);
-        pb_pre_scan.enable_steady_tick(std::time::Duration::from_millis(100));
-        pb_pre_scan.set_message("Counting total files...");
-    }
-    
-    // Pre-scan to count total files
-    let total_files = if cli.progress {
-        let count = count_files_in_directory(&cli.directories[0], &filter_rules)?;
-        pb_pre_scan.finish_with_message(format!("Found {} total files", count));
-        count
-    } else {
-        0 // If no progress display, skip counting
-    };
-    
-    // Create a progress bar for Stage 1: File Discovery
-    let pb_stage1 = if cli.progress && total_files > 0 {
-        let pb = multi_progress.add(ProgressBar::new(total_files as u64));
-        pb.set_style(ProgressStyle::default_bar()
-            .template("{spinner:.green} [1/3] File Discovery: [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({percent}%) {msg:.dim}")?
-            .progress_chars("#=> "));
-        pb.enable_steady_tick(std::time::Duration::from_millis(200));
-        pb
-    } else {
-        // Fall back to spinner if no total count or progress not enabled
-        let pb = multi_progress.add(ProgressBar::new_spinner());
-        pb.set_style(ProgressStyle::default_spinner()
-            .template("{spinner:.green} [1/3] File Discovery: {msg:.dim} ({elapsed_precise})")?);
-        if cli.progress { 
-            pb.enable_steady_tick(std::time::Duration::from_millis(200)); 
-        }
-        pb
-    };
-    
-    pb_stage1.set_message("Scanning directory for files...");
-    
-    let mut files_by_size: HashMap<u64, Vec<PathBuf>> = HashMap::new();
+    let mut file_infos = Vec::new();
     let walker = WalkDir::new(&cli.directories[0]).into_iter();
     
-    let mut file_count = 0;
-    let mut size_count = 0;
-    let mut last_update_time = std::time::Instant::now();
-    let update_interval = std::time::Duration::from_millis(400); // Less frequent updates
-
     for entry_result in walker.filter_entry(|e| {
         if is_hidden(e) || is_symlink(e) { return false; }
         if let Some(path_str) = e.path().to_str() {
             filter_rules.is_match(path_str)
         } else {
-            log::warn!("Path {:?} is not valid UTF-8, excluding.", e.path());
+            log::warn!("[ScanThread] Path {:?} is not valid UTF-8, excluding.", e.path());
             false
         }
     }) {
@@ -683,258 +650,78 @@ pub fn find_duplicate_files(
             Ok(entry) => {
                 if entry.file_type().is_file() {
                     let path = entry.path().to_path_buf();
-                    file_count += 1;
-                    
-                    if cli.progress {
-                        pb_stage1.set_position(file_count as u64);
-                    }
-                    
-                    // Determine update frequency based on file count
-                    let should_update = if file_count < 100 {
-                        file_count % 10 == 0
-                    } else if file_count < 500 {
-                        file_count % 20 == 0
-                    } else if file_count < 1000 {
-                        file_count % 50 == 0
-                    } else if file_count < 5000 {
-                        file_count % 100 == 0
-                    } else if file_count < 10000 {
-                        file_count % 200 == 0
-                    } else if file_count < 50000 {
-                        file_count % 500 == 0
-                    } else {
-                        file_count % 1000 == 0
-                    };
-                    
-                    if should_update || last_update_time.elapsed() >= update_interval { 
-                        last_update_time = std::time::Instant::now();
-                        if total_files > 0 {
-                            let percent = (file_count as f64 / total_files as f64) * 100.0;
-                            pb_stage1.set_message(format!("Processed {:.1}% of files...", percent));
-                        } else {
-                            pb_stage1.set_message(format!("Found {} files...", file_count));
-                        }
-                    }
                     
                     match fs::metadata(&path) {
                         Ok(metadata) => {
                             if metadata.len() > 0 {
-                                files_by_size.entry(metadata.len()).or_default().push(path);
-                                size_count = files_by_size.len();
-                            }
-                        }
-                        Err(e) => log::warn!("Failed to get metadata for {:?}: {}", path, e),
-                    }
-                }
-            }
-            Err(e) => log::warn!("Error walking directory: {}", e),
-        }
-    }
-    
-    // Complete Stage 1
-    if total_files > 0 {
-        let percent_found = (file_count as f64 / total_files as f64) * 100.0;
-        pb_stage1.finish_with_message(format!("File discovery complete: {} files ({:.1}%) in {} size groups", 
-                                           file_count, percent_found, size_count));
-    } else {
-        pb_stage1.finish_with_message(format!("File discovery complete: {} files in {} size groups", 
-                                           file_count, size_count));
-    }
-
-    log::info!("Found {} files (sync) in {} unique size groups.", file_count, size_count);
-
-    let mut duplicate_sets: Vec<DuplicateSet> = Vec::new();
-    let potential_duplicates: Vec<_> = files_by_size
-        .into_iter()
-        .filter(|(_, paths)| paths.len() > 1)
-        .collect();
-
-    let _potential_duplicate_count = potential_duplicates.len();
-    
-    if potential_duplicates.is_empty() {
-        pb_stage1.finish_and_clear();
-        log::info!("No potential duplicates (sync) found after size grouping.");
-        return Ok(Vec::new());
-    }
-
-    // ========== STAGE 2: SIZE COMPARISON ==========
-    // We have potential duplicates by size, display stats
-    let pb_stage2 = multi_progress.add(ProgressBar::new(1));
-    pb_stage2.set_style(ProgressStyle::default_bar()
-        .template("{spinner:.green} [2/3] Size Analysis: {msg:.dim} ({elapsed_precise})")?);
-    if cli.progress { pb_stage2.enable_steady_tick(std::time::Duration::from_millis(200)); }
-    
-    // Size comparison is minimal in this implementation so just show the stats
-    let total_groups = potential_duplicates.len();
-    let total_potential_duplicates: usize = potential_duplicates.iter().map(|(_, paths)| paths.len()).sum();
-    
-    pb_stage2.set_message(format!("Found {} size groups with {} potential duplicate files", 
-                                 total_groups, total_potential_duplicates));
-    pb_stage2.inc(1);
-    pb_stage2.finish();
-    
-    log::info!("Found {} sizes (sync) with {} potential duplicate files. Calculating hashes...", 
-              total_groups, total_potential_duplicates);
-
-    // ========== STAGE 3: HASH CALCULATION ==========
-    let pb_stage3 = multi_progress.add(ProgressBar::new(potential_duplicates.len() as u64));
-    pb_stage3.set_style(ProgressStyle::default_bar()
-        .template("{spinner:.green} [3/3] Hash Calculation: [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({percent}%) {msg}")?
-        .progress_chars("#=> "));
-    if cli.progress { pb_stage3.enable_steady_tick(std::time::Duration::from_millis(200)); }
-    
-    pb_stage3.set_message(format!("Hashing files using {} algorithm with {} threads", 
-                                 cli.algorithm, cli.parallel.unwrap_or_else(num_cpus::get)));
-
-    let num_threads = cli.parallel.unwrap_or_else(num_cpus::get);
-    let pool = rayon::ThreadPoolBuilder::new().num_threads(num_threads).build()?;
-    log::info!("Using {} threads for hashing (sync).", num_threads);
-
-    let (local_tx, local_rx) = std::sync::mpsc::channel::<Result<HashMap<String, Vec<FileInfo>>>>();
-    let total_groups_to_hash = potential_duplicates.len();
-
-    pool.install(|| {
-        potential_duplicates
-            .into_par_iter()
-            .for_each_with(local_tx, |thread_local_tx, (size, paths)| {
-                let mut hashes_in_group: HashMap<String, Vec<FileInfo>> = HashMap::new();
-                
-                // Thread-local cache hits counter
-                let mut thread_cache_hits = 0;
-                
-                for path in paths {
-                    // Try to get hash from cache first if fast mode is enabled
-                    let mut hash_from_cache = None;
-                    if let Some(cache) = file_cache.as_ref() {
-                        if let Ok(cache_guard) = cache.lock() {
-                            hash_from_cache = cache_guard.get_file_info(&path);
-                            if hash_from_cache.is_some() {
-                                thread_cache_hits += 1;
-                            }
-                        }
-                    }
-                    
-                    match hash_from_cache {
-                        // Use cached hash if available
-                        Some(file_info) => {
-                            if let Some(hash_str) = &file_info.hash {
-                                hashes_in_group.entry(hash_str.clone()).or_default().push(file_info);
-                            }
-                        },
-                        // Calculate hash if not cached or cache miss
-                        None => match calculate_hash(&path, &cli.algorithm) {
-                            Ok(hash_str) => {
-                                let metadata = match fs::metadata(&path) {
-                                    Ok(m) => m,
-                                    Err(e) => {
-                                        log::warn!("Failed to get metadata for {:?}: {}", path, e);
-                                        continue;
-                                    }
-                                };
-                                let file_info = FileInfo { 
-                                    path: path.clone(), 
-                                    size, 
-                                    hash: Some(hash_str.clone()),
+                                let file_info = FileInfo {
+                                    path: path.clone(),
+                                    size: metadata.len(),
+                                    hash: None, // We don't need hash for media comparison
                                     modified_at: metadata.modified().ok(),
                                     created_at: metadata.created().ok(),
                                 };
                                 
-                                // Update cache if available
-                                if let Some(cache) = &file_cache {
-                                    if let Ok(mut cache_guard) = cache.lock() {
-                                        let _ = cache_guard.store(&file_info, &cli.algorithm);
-                                    }
-                                }
-                                
-                                hashes_in_group.entry(hash_str).or_default().push(file_info);
-                            }
-                            Err(e) => {
-                                log::warn!("Failed to hash {:?} (sync): {}", path, e);
-                                if thread_local_tx.send(Err(e)).is_err() { /* ... */ }
-                                return; 
+                                file_infos.push(file_info);
                             }
                         }
+                        Err(e) => log::warn!("[ScanThread] Failed to get metadata for {:?}: {}", path, e),
                     }
                 }
-                
-                // Update global cache hits
-                if thread_cache_hits > 0 {
-                    cache_hits.fetch_add(thread_cache_hits, std::sync::atomic::Ordering::Relaxed);
-                }
-                
-                if thread_local_tx.send(Ok(hashes_in_group)).is_err() { /* ... */ }
-            });
-    });
-
-    let mut actual_duplicate_count = 0;
-    let mut last_update_count = 0;
+            }
+            Err(e) => log::warn!("[ScanThread] Error walking directory: {}", e),
+        }
+    }
     
-    for i in 0..total_groups_to_hash {
-        match local_rx.recv() {
-            Ok(Ok(hashed_group)) => {
-                for (hash, file_infos_vec) in hashed_group {
-                    if file_infos_vec.len() > 1 {
-                        actual_duplicate_count += 1;
-                        let first_file_size = file_infos_vec[0].size; // Get size before move
-                        duplicate_sets.push(DuplicateSet { 
-                            files: file_infos_vec, // file_infos_vec is moved here
-                            size: first_file_size, 
-                            hash 
-                        });
-                    }
+    // Now process for media similarities
+    let mut media_files: Vec<crate::media_dedup::MediaFileInfo> = Vec::new();
+    let mut processed = 0;
+    let total_files = file_infos.len();
+    
+    for file_info in &file_infos {
+        let mut media_file = crate::media_dedup::MediaFileInfo::from(file_info.clone());
+        
+        // Only process media files
+        let media_kind = crate::media_dedup::detect_media_type(&file_info.path);
+        if media_kind != crate::media_dedup::MediaKind::Unknown {
+            media_file.metadata = match crate::media_dedup::extract_media_metadata(&file_info.path) {
+                Ok(metadata) => Some(metadata),
+                Err(e) => {
+                    log::warn!("[ScanThread] Failed to extract media metadata for {:?}: {}", file_info.path, e);
+                    None
                 }
-            }
-            Ok(Err(e)) => { log::error!("Error hashing a file group (sync): {}", e); }
-            Err(e) => { 
-                log::error!("Failed to receive all hash results (sync): {}. Processed {} of {}.", e, i, total_groups_to_hash);
-                return Err(anyhow::anyhow!("Hashing phase failed (sync): {}", e));
-            }
+            };
         }
-        pb_stage3.inc(1);
         
-        // Only update the message text periodically to avoid excessive repainting
-        // Determine update frequency for hash progress based on total size
-        let should_update = if total_groups_to_hash < 20 {
-            true // Always update for small hash groups
-        } else if total_groups_to_hash < 100 {
-            i % 5 == 0 || i == total_groups_to_hash - 1 || actual_duplicate_count != last_update_count
-        } else if total_groups_to_hash < 500 {
-            i % 10 == 0 || i == total_groups_to_hash - 1 || (actual_duplicate_count - last_update_count) >= 5
-        } else {
-            i % 20 == 0 || i == total_groups_to_hash - 1 || (actual_duplicate_count - last_update_count) >= 10
-        };
+        // Update progress
+        processed += 1;
+        send_status(4, format!("Processing media files: {}/{} ({:.1}%)", 
+            processed, total_files, (processed as f64 / total_files as f64) * 100.0));
         
-        if should_update {
-            pb_stage3.set_message(format!("Hashed {}/{} groups, found {} duplicate sets", 
-                                         i + 1, total_groups_to_hash, actual_duplicate_count));
-            last_update_count = actual_duplicate_count;
+        if media_file.metadata.is_some() {
+            media_files.push(media_file);
         }
     }
-
-    // Add cache information to the final message
-    let cache_msg = if cache_hits.load(std::sync::atomic::Ordering::Relaxed) > 0 {
-        format!(" ({} from cache)", cache_hits.load(std::sync::atomic::Ordering::Relaxed))
-    } else {
-        "".to_string()
-    };
-
-    // Save file cache if it was used
-    if let Some(cache) = &file_cache {
-        if let Ok(mut cache_guard) = cache.lock() {
-            if let Err(e) = cache_guard.save() {
-                log::warn!("Failed to save file cache: {}", e);
-            } else if cache_hits.load(std::sync::atomic::Ordering::Relaxed) > 0 {
-                log::info!("Saved cache with {} entries ({} cache hits during scan)",
-                           cache_guard.len(), cache_hits.load(std::sync::atomic::Ordering::Relaxed));
-            }
-        }
-    }
-
-    // Finish stage 3
-    pb_stage3.finish_with_message(format!("Hash calculation complete! Found {} sets of duplicate files{}.",
-                                        duplicate_sets.len(), cache_msg));
-
-    log::info!("Found {} sets of duplicate files (sync){}.", duplicate_sets.len(), cache_msg);
+    
+    log::info!("[ScanThread] Extracted metadata for {} media files", media_files.len());
+    
+    // Group by media type for more efficient comparison
+    let mut similar_groups: Vec<Vec<crate::media_dedup::MediaFileInfo>> = Vec::new();
+    
+    // Process media files to find similar groups
+    crate::media_dedup::process_media_type_similarity(
+        &media_files.iter().collect::<Vec<_>>(), 
+        &cli.media_dedup_options,
+        &mut similar_groups
+    )?;
+    
+    // Convert to duplicate sets
+    let duplicate_sets = crate::media_dedup::convert_to_duplicate_sets(&similar_groups, &cli.media_dedup_options);
+    
+    // Add media duplicates to regular duplicates
+    log::info!("[ScanThread] Found {} sets of similar media files.", duplicate_sets.len());
+    send_status(4, format!("Media analysis complete. Found {} sets of similar media files.", duplicate_sets.len()));
+    
     Ok(duplicate_sets)
 }
 
@@ -1288,7 +1075,11 @@ pub fn compare_directories(cli: &Cli) -> Result<DirectoryComparisonResult> {
         all_dirs_cli.directories = all_dirs;
         
         log::info!("Finding duplicates across all directories for deduplication");
-        let duplicates = find_duplicate_files(&all_dirs_cli)?;
+        
+        // Use find_duplicate_files_with_progress instead of find_duplicate_files
+        // Create a dummy channel for the progress updates
+        let (tx, _rx) = std::sync::mpsc::channel::<ScanMessage>();
+        let duplicates = find_duplicate_files_with_progress(&all_dirs_cli, tx)?;
         
         // Filter for duplicate sets that span across source and target
         let cross_dir_duplicates: Vec<DuplicateSet> = duplicates.into_iter()
