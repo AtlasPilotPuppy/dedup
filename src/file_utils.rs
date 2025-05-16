@@ -265,6 +265,26 @@ pub fn find_duplicate_files_with_progress(
 ) -> Result<Vec<DuplicateSet>> {
     log::info!("[ScanThread] Starting scan with progress updates for directory: {:?}", cli.directories[0]);
     let filter_rules = FilterRules::new(cli)?;
+    
+    // Initialize file cache if using fast mode
+    let file_cache = if cli.fast_mode && cli.cache_location.is_some() {
+        let cache_dir = cli.cache_location.as_ref().unwrap();
+        match crate::file_cache::FileCache::new(cache_dir, &cli.algorithm) {
+            Ok(cache) => {
+                log::info!("[ScanThread] Using file cache at {:?} with {} entries", cache_dir, cache.len());
+                Some(std::sync::Arc::new(std::sync::Mutex::new(cache)))
+            },
+            Err(e) => {
+                log::warn!("[ScanThread] Failed to initialize file cache: {}", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+    
+    // Track cache hits using atomic
+    let cache_hits = std::sync::atomic::AtomicUsize::new(0);
 
     let send_status = |stage: u8, msg: String| {
         if tx_progress.send(ScanMessage::StatusUpdate(stage, msg)).is_err() {
@@ -415,36 +435,74 @@ pub fn find_duplicate_files_with_progress(
             .into_par_iter()
             .for_each_with(local_tx, |thread_local_tx, (size, paths)| {
                 let mut hashes_in_group: HashMap<String, Vec<FileInfo>> = HashMap::new();
+                
+                // Thread-local cache hits counter
+                let mut thread_cache_hits = 0;
+                
                 for path in paths {
-                    match calculate_hash(&path, &cli.algorithm) {
-                        Ok(hash_str) => {
-                            let metadata = match fs::metadata(&path) {
-                                Ok(m) => m,
-                                Err(e) => {
-                                    log::warn!("Failed to get metadata for {:?}: {}", path, e);
-                                    continue;
-                                }
-                            };
-                            let file_info = FileInfo { 
-                                path: path.clone(), 
-                                size, 
-                                hash: Some(hash_str.clone()),
-                                modified_at: metadata.modified().ok(),
-                                created_at: metadata.created().ok(),
-                            };
-                            hashes_in_group.entry(hash_str).or_default().push(file_info);
-                        }
-                        Err(e) => {
-                            log::warn!("[ScanThread] Failed to hash {:?}: {}", path, e);
-                            if thread_local_tx.send(Err(e)).is_err() {
-                                log::error!("[ScanThread] Hashing thread failed to send error (channel closed).");
+                    // Try to get hash from cache first if fast mode is enabled
+                    let mut hash_from_cache = None;
+                    if let Some(cache) = file_cache.as_ref() {
+                        if let Ok(cache_guard) = cache.lock() {
+                            hash_from_cache = cache_guard.get_file_info(&path);
+                            if hash_from_cache.is_some() {
+                                thread_cache_hits += 1;
                             }
-                            return; 
+                        }
+                    }
+                    
+                    match hash_from_cache {
+                        // Use cached hash if available
+                        Some(file_info) => {
+                            if let Some(hash_str) = &file_info.hash {
+                                hashes_in_group.entry(hash_str.clone()).or_default().push(file_info);
+                            }
+                        },
+                        // Calculate hash if not cached or cache miss
+                        None => match calculate_hash(&path, &cli.algorithm) {
+                            Ok(hash_str) => {
+                                let metadata = match fs::metadata(&path) {
+                                    Ok(m) => m,
+                                    Err(e) => {
+                                        log::warn!("Failed to get metadata for {:?}: {}", path, e);
+                                        continue;
+                                    }
+                                };
+                                let file_info = FileInfo { 
+                                    path: path.clone(), 
+                                    size, 
+                                    hash: Some(hash_str.clone()),
+                                    modified_at: metadata.modified().ok(),
+                                    created_at: metadata.created().ok(),
+                                };
+                                
+                                // Update cache if available
+                                if let Some(cache) = &file_cache {
+                                    if let Ok(mut cache_guard) = cache.lock() {
+                                        let _ = cache_guard.store(&file_info, &cli.algorithm);
+                                    }
+                                }
+                                
+                                hashes_in_group.entry(hash_str).or_default().push(file_info);
+                            }
+                            Err(e) => {
+                                log::warn!("[ScanThread] Failed to hash {:?}: {}", path, e);
+                                if thread_local_tx.send(Err(e)).is_err() {
+                                    log::error!("[ScanThread] Hashing thread failed to send error (channel closed).");
+                                }
+                                return; 
+                            }
                         }
                     }
                 }
+                
+                // Update global cache hits
+                if thread_cache_hits > 0 {
+                    cache_hits.fetch_add(thread_cache_hits, std::sync::atomic::Ordering::Relaxed);
+                }
+                
                 if thread_local_tx.send(Ok(hashes_in_group)).is_err() {
-                     log::error!("[ScanThread] Hashing thread failed to send result (channel closed).");
+                    log::error!("[ScanThread] Hashing thread failed to send result (channel closed).");
                 }
             });
     });
@@ -494,12 +552,38 @@ pub fn find_duplicate_files_with_progress(
         if should_update || last_update_time.elapsed() >= update_interval {
             last_update_time = std::time::Instant::now();
             let progress_percent = (groups_hashed_count as f64 / total_groups_to_hash as f64) * 100.0;
-            send_status(3, format!("Stage 3/3: 🔄 Hashed {}/{} groups ({:.1}%)... Found {} duplicate sets", 
-                groups_hashed_count, total_groups_to_hash, progress_percent, actual_duplicate_sets));
+            
+            let cache_status = if cache_hits.load(std::sync::atomic::Ordering::Relaxed) > 0 {
+                format!(" ({} from cache)", cache_hits.load(std::sync::atomic::Ordering::Relaxed))
+            } else {
+                "".to_string()
+            };
+            
+            send_status(3, format!("Stage 3/3: 🔄 Hashed {}/{} groups ({:.1}%){}... Found {} duplicate sets", 
+                groups_hashed_count, total_groups_to_hash, progress_percent, cache_status, actual_duplicate_sets));
+        }
+    }
+    
+    // Save file cache if it was used
+    if let Some(cache) = &file_cache {
+        if let Ok(mut cache_guard) = cache.lock() {
+            if let Err(e) = cache_guard.save() {
+                log::warn!("[ScanThread] Failed to save file cache: {}", e);
+            } else if cache_hits.load(std::sync::atomic::Ordering::Relaxed) > 0 {
+                log::info!("[ScanThread] Saved cache with {} entries ({} cache hits during scan)",
+                           cache_guard.len(), cache_hits.load(std::sync::atomic::Ordering::Relaxed));
+            }
         }
     }
 
-    send_status(3, format!("All stages complete. Found {} sets of duplicate files.", duplicate_sets.len()));
+    let message = if cache_hits.load(std::sync::atomic::Ordering::Relaxed) > 0 {
+        format!("All stages complete. Found {} sets of duplicate files. Used {} cached hashes.", 
+               duplicate_sets.len(), cache_hits.load(std::sync::atomic::Ordering::Relaxed))
+    } else {
+        format!("All stages complete. Found {} sets of duplicate files.", duplicate_sets.len())
+    };
+    
+    send_status(3, message);
     log::info!("[ScanThread] Found {} sets of duplicate files.", duplicate_sets.len());
     Ok(duplicate_sets)
 }
@@ -511,6 +595,26 @@ pub fn find_duplicate_files(
     // It uses indicatif progress bars with distinct stages
     log::info!("Scanning directory (sync): {:?}", cli.directories[0]);
     let filter_rules = FilterRules::new(cli)?;
+    
+    // Initialize file cache if using fast mode
+    let file_cache = if cli.fast_mode && cli.cache_location.is_some() {
+        let cache_dir = cli.cache_location.as_ref().unwrap();
+        match crate::file_cache::FileCache::new(cache_dir, &cli.algorithm) {
+            Ok(cache) => {
+                log::info!("Using file cache at {:?} with {} entries", cache_dir, cache.len());
+                Some(std::sync::Arc::new(std::sync::Mutex::new(cache)))
+            },
+            Err(e) => {
+                log::warn!("Failed to initialize file cache: {}", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+    
+    // Track cache hits using atomic
+    let cache_hits = std::sync::atomic::AtomicUsize::new(0);
 
     // ========== STAGE 0: PRE-SCAN FOR TOTAL COUNT ==========
     let pb_draw_target = if cli.progress { indicatif::ProgressDrawTarget::stderr() } else { indicatif::ProgressDrawTarget::hidden() };
@@ -694,32 +798,70 @@ pub fn find_duplicate_files(
             .into_par_iter()
             .for_each_with(local_tx, |thread_local_tx, (size, paths)| {
                 let mut hashes_in_group: HashMap<String, Vec<FileInfo>> = HashMap::new();
+                
+                // Thread-local cache hits counter
+                let mut thread_cache_hits = 0;
+                
                 for path in paths {
-                    match calculate_hash(&path, &cli.algorithm) {
-                        Ok(hash_str) => {
-                            let metadata = match fs::metadata(&path) {
-                                Ok(m) => m,
-                                Err(e) => {
-                                    log::warn!("Failed to get metadata for {:?}: {}", path, e);
-                                    continue;
-                                }
-                            };
-                            let file_info = FileInfo { 
-                                path: path.clone(), 
-                                size, 
-                                hash: Some(hash_str.clone()),
-                                modified_at: metadata.modified().ok(),
-                                created_at: metadata.created().ok(),
-                            };
-                            hashes_in_group.entry(hash_str).or_default().push(file_info);
+                    // Try to get hash from cache first if fast mode is enabled
+                    let mut hash_from_cache = None;
+                    if let Some(cache) = file_cache.as_ref() {
+                        if let Ok(cache_guard) = cache.lock() {
+                            hash_from_cache = cache_guard.get_file_info(&path);
+                            if hash_from_cache.is_some() {
+                                thread_cache_hits += 1;
+                            }
                         }
-                        Err(e) => {
-                            log::warn!("Failed to hash {:?} (sync): {}", path, e);
-                            if thread_local_tx.send(Err(e)).is_err() { /* ... */ }
-                            return; 
+                    }
+                    
+                    match hash_from_cache {
+                        // Use cached hash if available
+                        Some(file_info) => {
+                            if let Some(hash_str) = &file_info.hash {
+                                hashes_in_group.entry(hash_str.clone()).or_default().push(file_info);
+                            }
+                        },
+                        // Calculate hash if not cached or cache miss
+                        None => match calculate_hash(&path, &cli.algorithm) {
+                            Ok(hash_str) => {
+                                let metadata = match fs::metadata(&path) {
+                                    Ok(m) => m,
+                                    Err(e) => {
+                                        log::warn!("Failed to get metadata for {:?}: {}", path, e);
+                                        continue;
+                                    }
+                                };
+                                let file_info = FileInfo { 
+                                    path: path.clone(), 
+                                    size, 
+                                    hash: Some(hash_str.clone()),
+                                    modified_at: metadata.modified().ok(),
+                                    created_at: metadata.created().ok(),
+                                };
+                                
+                                // Update cache if available
+                                if let Some(cache) = &file_cache {
+                                    if let Ok(mut cache_guard) = cache.lock() {
+                                        let _ = cache_guard.store(&file_info, &cli.algorithm);
+                                    }
+                                }
+                                
+                                hashes_in_group.entry(hash_str).or_default().push(file_info);
+                            }
+                            Err(e) => {
+                                log::warn!("Failed to hash {:?} (sync): {}", path, e);
+                                if thread_local_tx.send(Err(e)).is_err() { /* ... */ }
+                                return; 
+                            }
                         }
                     }
                 }
+                
+                // Update global cache hits
+                if thread_cache_hits > 0 {
+                    cache_hits.fetch_add(thread_cache_hits, std::sync::atomic::Ordering::Relaxed);
+                }
+                
                 if thread_local_tx.send(Ok(hashes_in_group)).is_err() { /* ... */ }
             });
     });
@@ -769,10 +911,30 @@ pub fn find_duplicate_files(
         }
     }
 
-    // Finish stage 3
-    pb_stage3.finish_with_message(format!("Hash calculation complete! Found {} sets of duplicate files.", duplicate_sets.len()));
+    // Add cache information to the final message
+    let cache_msg = if cache_hits.load(std::sync::atomic::Ordering::Relaxed) > 0 {
+        format!(" ({} from cache)", cache_hits.load(std::sync::atomic::Ordering::Relaxed))
+    } else {
+        "".to_string()
+    };
 
-    log::info!("Found {} sets of duplicate files (sync).", duplicate_sets.len());
+    // Save file cache if it was used
+    if let Some(cache) = &file_cache {
+        if let Ok(mut cache_guard) = cache.lock() {
+            if let Err(e) = cache_guard.save() {
+                log::warn!("Failed to save file cache: {}", e);
+            } else if cache_hits.load(std::sync::atomic::Ordering::Relaxed) > 0 {
+                log::info!("Saved cache with {} entries ({} cache hits during scan)",
+                           cache_guard.len(), cache_hits.load(std::sync::atomic::Ordering::Relaxed));
+            }
+        }
+    }
+
+    // Finish stage 3
+    pb_stage3.finish_with_message(format!("Hash calculation complete! Found {} sets of duplicate files{}.",
+                                        duplicate_sets.len(), cache_msg));
+
+    log::info!("Found {} sets of duplicate files (sync){}.", duplicate_sets.len(), cache_msg);
     Ok(duplicate_sets)
 }
 

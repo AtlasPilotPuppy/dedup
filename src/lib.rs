@@ -11,6 +11,9 @@ pub mod tui_app;
 // Add the new config module
 pub mod config;
 
+// Add the file cache module
+pub mod file_cache;
+
 // To make Cli accessible, you'll need to move its definition from main.rs to lib.rs
 // or re-export it from main.rs if main.rs uses this lib.rs as a library.
 // For a typical binary project that also wants to expose a library for testing/other uses:
@@ -127,6 +130,14 @@ pub struct Cli {
     /// Run in dry run mode - simulate actions without making actual changes.
     #[clap(long, help = "Perform a dry run without making any actual changes")]
     pub dry_run: bool,
+
+    /// Directory to store hash cache for faster scanning of previously scanned files
+    #[clap(long, help = "Directory to store file hash cache for faster rescans")]
+    pub cache_location: Option<PathBuf>,
+
+    /// Use cached hashes for files that haven't changed since last scan
+    #[clap(long, help = "Use cached file hashes when available (requires cache-location)")]
+    pub fast_mode: bool,
 }
 
 impl Cli {
@@ -199,6 +210,22 @@ impl Cli {
             if let Ok(sort_order) = SortOrder::from_str(&config.sort_order) {
                 self.sort_order = sort_order;
             }
+        }
+        
+        // Apply cache options from config if not specified on command line
+        if self.cache_location.is_none() {
+            self.cache_location = config.cache_location;
+        }
+        
+        // Only enable fast mode if either specified on command line or in config AND cache location is available
+        if !self.fast_mode && config.fast_mode {
+            self.fast_mode = config.fast_mode;
+        }
+        
+        // If fast mode is enabled but no cache location is specified, disable fast mode and warn
+        if self.fast_mode && self.cache_location.is_none() {
+            log::warn!("Fast mode enabled but no cache location specified. Fast mode will be disabled.");
+            self.fast_mode = false;
         }
         
         // Ensure we always have defaults for required fields that might be empty

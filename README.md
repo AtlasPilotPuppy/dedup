@@ -7,6 +7,7 @@ A high-performance duplicate file finder and manager written in Rust. `dedup` ef
 - **High Performance**: Uses multi-threading with Rayon for parallel hash calculation
 - **Multiple Hash Algorithms**: Choose between MD5, SHA1, SHA256, Blake3, xxHash (default), GxHash, FNV1a, or CRC32
 - **Interactive TUI**: Visually inspect and manage duplicate files
+- **File Cache**: Store and reuse file hash values to speed up repeated scans of unchanged files
 - **Selection Strategies**: Various automated selection strategies for keeping/removing duplicates
   - Shortest path: Keep files with the shortest paths
   - Longest path: Keep files with the longest paths
@@ -100,6 +101,9 @@ dedup_tui /path/to/photos --move-to /path/to/duplicates --mode shortest_path
 
 # Export a report of duplicates for review
 dedup_tui /path/to/photos -o duplicates.json
+
+# Use file caching for faster repeated scans
+dedup_tui /path/to/photos --cache-location ~/.dedup_cache --fast-mode
 ```
 
 #### Synchronizing Directories
@@ -155,6 +159,9 @@ OPTIONS:
         --config-file <config-file>
                                  Path to a custom config file
         --dry-run                Perform a dry run without making any actual changes
+        --cache-location <cache-location>
+                                 Directory to store file hash cache for faster rescans
+        --fast-mode              Use cached file hashes when available (requires cache-location)
     -h, --help                   Print help information
     -V, --version                Print version information
 ```
@@ -234,10 +241,14 @@ The Settings screen (Ctrl+S) allows you to configure:
 
 ## Performance Tips
 
-- **Hash Algorithm**: Blake3 (default) is the fastest, followed by MD5 then SHA256
+- **Hash Algorithm**: xxHash (default) offers the best balance of speed and collision resistance
 - **Parallelism**: Set to the number of physical cores for best performance
 - **Large Directories**: Use filter patterns to narrow down the scan
 - **Initial Scan**: The first scan may take longer, especially on network drives
+- **File Cache**: For repeated scans of similar directories:
+  - Enable `--cache-location` to store file hashes on disk
+  - Use `--fast-mode` to skip hash calculations for unchanged files
+  - This can dramatically speed up subsequent scans by 5-10x
 
 ## Configuration File
 
@@ -283,6 +294,10 @@ include = ["*.jpg", "*.png", "*.mp4"]
 
 # Default file patterns to exclude
 exclude = ["*tmp*", "*.log"]
+
+# File hash cache settings
+cache_location = "/path/to/cache"  # Optional: Path to store hash cache
+fast_mode = false                  # Whether to use cache by default
 ```
 
 ### Usage

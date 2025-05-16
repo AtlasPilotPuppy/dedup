@@ -42,6 +42,14 @@ pub struct DedupConfig {
     /// Default file exclude patterns
     #[serde(default)]
     pub exclude: Vec<String>,
+    
+    /// Location to store file hash cache
+    #[serde(default)]
+    pub cache_location: Option<PathBuf>,
+    
+    /// Whether to use fast mode (use cached hashes for unchanged files)
+    #[serde(default)]
+    pub fast_mode: bool,
 }
 
 fn default_algorithm() -> String {
@@ -76,6 +84,8 @@ impl Default for DedupConfig {
             sort_order: default_sort_order(),
             include: Vec::new(),
             exclude: Vec::new(),
+            cache_location: None,
+            fast_mode: false,
         }
     }
 }
