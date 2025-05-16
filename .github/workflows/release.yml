@@ -27,14 +27,14 @@ jobs:
 
     steps:
     - uses: actions/checkout@v3
-    
+
     - name: Install Rust
       uses: actions-rs/toolchain@v1
       with:
         toolchain: stable
         override: true
         target: ${{ matrix.target }}
-    
+
     - name: Cache dependencies
       uses: actions/cache@v3
       with:
@@ -43,12 +43,24 @@ jobs:
           ~/.cargo/git
           target
         key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-    
-    - name: Set RUSTFLAGS for gxhash
+
+    # Set RUSTFLAGS and build (OS-specific)
+    - name: Set RUSTFLAGS for gxhash (Linux only)
+      if: matrix.os == 'ubuntu-latest'
       run: echo "RUSTFLAGS=-C target-cpu=native" >> $GITHUB_ENV
-    - name: Build
+
+    - name: Build (Linux)
+      if: matrix.os == 'ubuntu-latest'
+      run: cargo build --release --target ${{ matrix.target }} --features linux
+
+    - name: Build (macOS)
+      if: matrix.os == 'macos-latest'
+      run: cargo build --release --target ${{ matrix.target }} --features linux
+
+    - name: Build (Windows)
+      if: matrix.os == 'windows-latest'
       run: cargo build --release --target ${{ matrix.target }}
-    
+
     - name: Package
       shell: bash
       run: |
@@ -58,7 +70,7 @@ jobs:
         else
           tar czf ../../${{ matrix.artifact_name }}.tar.gz ${{ matrix.artifact_name }}
         fi
-    
+
     - name: Upload artifact
       uses: actions/upload-artifact@v3
       with:
@@ -71,10 +83,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v3
-    
+
     - name: Download all artifacts
       uses: actions/download-artifact@v3
-    
+
     - name: Create Release
       id: create_release
       uses: actions/create-release@v1
@@ -85,7 +97,7 @@ jobs:
         release_name: Release ${{ github.ref }}
         draft: false
         prerelease: false
-    
+
     - name: Upload Release Assets
       uses: actions/upload-release-asset@v1
       env:

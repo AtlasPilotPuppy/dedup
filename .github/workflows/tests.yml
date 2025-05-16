@@ -40,8 +40,32 @@ jobs:
     - name: Clippy
       run: cargo clippy -- -D warnings
     
-    - name: Run tests
+    # Run tests (OS-specific)
+    - name: Run tests (Ubuntu)
+      if: matrix.os == 'ubuntu-latest'
+      run: cargo test --all-features --features linux
+      env:
+        RUSTFLAGS: "-C target-cpu=native"
+
+    - name: Run tests (macOS)
+      if: matrix.os == 'macos-latest'
+      run: cargo test --all-features --features linux
+
+    - name: Run tests (Windows)
+      if: matrix.os == 'windows-latest'
       run: cargo test --all-features
-    
-    - name: Run integration tests
+
+    # Run integration tests (OS-specific)
+    - name: Run integration tests (Ubuntu)
+      if: matrix.os == 'ubuntu-latest'
+      run: cargo test --test '*' --features linux
+      env:
+        RUSTFLAGS: "-C target-cpu=native"
+
+    - name: Run integration tests (macOS)
+      if: matrix.os == 'macos-latest'
+      run: cargo test --test '*' --features linux
+
+    - name: Run integration tests (Windows)
+      if: matrix.os == 'windows-latest'
       run: cargo test --test '*' 
