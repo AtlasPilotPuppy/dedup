@@ -108,6 +108,9 @@ pub struct AppState {
     pub current_sort_criterion: SortCriterion, // New for sorting
     pub current_sort_order: SortOrder,         // New for sorting
     pub sort_settings_changed: bool,           // Flag if sorting needs re-application
+
+    pub log_messages: Vec<String>, // For operation output
+    pub log_scroll: usize,         // For scrolling the log
 }
 
 // Channel for messages from scan thread to TUI thread
@@ -159,6 +162,8 @@ impl App {
             current_sort_criterion: cli_args.sort_by,   // Initialize from Cli
             current_sort_order: cli_args.sort_order,    // Initialize from Cli
             sort_settings_changed: false, 
+            log_messages: Vec::new(),
+            log_scroll: 0,
         };
 
         // Determine if initial scan is async or sync based on original cli.progress
@@ -521,8 +526,14 @@ impl App {
                 self.cycle_active_panel();
             }
             KeyCode::Char('e') => {
-                if let Err(e) = self.process_pending_jobs() {
-                    self.state.status_message = Some(format!("Error processing jobs: {}", e));
+                let result = self.process_pending_jobs();
+                match result {
+                    Ok(_) => {
+                        self.state.log_messages.push("Executed all pending jobs.".to_string());
+                    }
+                    Err(e) => {
+                        self.state.log_messages.push(format!("Error processing jobs: {}", e));
+                    }
                 }
             }
             KeyCode::Char('r') => {
@@ -559,8 +570,14 @@ impl App {
                 self.focus_files_panel();
             }
             KeyCode::Char('x') | KeyCode::Delete | KeyCode::Backspace => {
-                if self.state.active_panel == ActivePanel::Jobs {
-                    self.remove_selected_job();
+                // Remove selected job from any panel
+                let before = self.state.jobs.len();
+                self.remove_selected_job();
+                let after = self.state.jobs.len();
+                if after < before {
+                    self.state.log_messages.push("Job removed.".to_string());
+                } else {
+                    self.state.log_messages.push("No job selected to remove or jobs list empty.".to_string());
                 }
             }
             _ => {}
@@ -1236,6 +1253,7 @@ fn ui(frame: &mut Frame, app: &mut App) {
             Constraint::Length(3),  // Title
             Constraint::Length(3),  // Status
             Constraint::Min(0),     // Main content
+            Constraint::Length(5),  // Log area (fixed height for now)
             Constraint::Length(1),  // Progress bar (if any)
             Constraint::Length(1),  // Help bar (always visible)
         ])
@@ -1588,7 +1606,7 @@ fn ui(frame: &mut Frame, app: &mut App) {
                 .gauge_style(Style::default().fg(Color::Yellow).bg(Color::Black))
                 .label(label)
                 .ratio(percent);
-            frame.render_widget(gauge, chunks[3]);
+            frame.render_widget(gauge, chunks[4]);
         } else if !app.state.jobs.is_empty() && app.state.input_mode == InputMode::Normal {
             let total = app.state.jobs.len();
             let completed = 0; // You can track completed jobs if you add a field
@@ -1598,11 +1616,11 @@ fn ui(frame: &mut Frame, app: &mut App) {
                 .gauge_style(Style::default().fg(Color::Green).bg(Color::Black))
                 .label(format!("Pending jobs: {} | Ctrl+E: Execute, x: Remove job", total))
                 .ratio(percent);
-            frame.render_widget(gauge, chunks[3]);
+            frame.render_widget(gauge, chunks[4]);
         } else {
             // Draw an empty block if no progress
             let empty = Block::default();
-            frame.render_widget(empty, chunks[3]);
+            frame.render_widget(empty, chunks[4]);
         }
 
         // Draw help bar at the very bottom
@@ -1610,7 +1628,23 @@ fn ui(frame: &mut Frame, app: &mut App) {
         let help_bar = ratatui::widgets::Paragraph::new(help)
             .style(Style::default().fg(Color::DarkGray))
             .alignment(Alignment::Center);
-        frame.render_widget(help_bar, chunks[4]);
+        frame.render_widget(help_bar, chunks[5]);
+
+        // Draw log area (scrollable)
+        let log_height = 5;
+        let log_len = app.state.log_messages.len();
+        let scroll = app.state.log_scroll.min(log_len.saturating_sub(log_height));
+        let log_lines: Vec<ratatui::text::Line> = app.state.log_messages
+            .iter()
+            .skip(scroll)
+            .take(log_height)
+            .map(|msg| ratatui::text::Line::from(msg.clone()))
+            .collect();
+        let log_block = Block::default().borders(Borders::ALL).title("Log");
+        let log_paragraph = ratatui::widgets::Paragraph::new(log_lines)
+            .block(log_block)
+            .scroll((0, 0));
+        frame.render_widget(log_paragraph, chunks[3]);
     }
 }
 
