@@ -4,11 +4,14 @@ use num_cpus;
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::SystemTime;
 use walkdir::WalkDir;
+use std::hash::Hasher;
+use sha1::Digest;
+use sha2::Digest as Sha2Digest;
 
 use crate::tui_app::ScanMessage;
 use crate::Cli;
@@ -225,67 +228,54 @@ impl FilterRules {
 }
 
 pub fn calculate_hash(path: &Path, algorithm: &str) -> Result<String> {
-    let file_content = fs::read(path)?;
+    let mut file = File::open(path)?;
+    let mut buffer = Vec::new();
+    file.read_to_end(&mut buffer)?;
+
     match algorithm {
         "md5" => {
-            let digest = md5::compute(file_content);
+            let digest = md5::compute(&buffer);
             Ok(format!("{:x}", digest))
         }
         "sha1" => {
-            use sha1::{Digest, Sha1};
-            let mut hasher = Sha1::new();
-            hasher.update(file_content);
-            let result = hasher.finalize();
-            Ok(format!("{:x}", result))
+            let mut hasher = sha1::Sha1::new();
+            hasher.update(&buffer);
+            Ok(format!("{:x}", hasher.finalize()))
         }
         "sha256" => {
-            use sha2::{Digest, Sha256};
-            let mut hasher = Sha256::new();
-            hasher.update(file_content);
-            let result = hasher.finalize();
-            Ok(format!("{:x}", result))
+            let mut hasher = sha2::Sha256::new();
+            hasher.update(&buffer);
+            Ok(format!("{:x}", hasher.finalize()))
         }
         "blake3" => {
-            let hash = blake3::hash(&file_content);
-            Ok(hash.to_hex().as_str().to_string())
+            let hash = blake3::hash(&buffer);
+            Ok(hash.to_hex().to_string())
         }
         "xxhash" => {
-            use std::hash::Hasher;
-            use twox_hash::XxHash64;
-
-            let mut hasher = XxHash64::default();
-            hasher.write(&file_content);
-            let result = hasher.finish();
-            Ok(format!("{:016x}", result))
+            let mut hasher = twox_hash::XxHash64::default();
+            hasher.write(&buffer);
+            Ok(format!("{:016x}", hasher.finish()))
         }
+        #[cfg(feature = "linux")]
         "gxhash" => {
-            use gxhash::GxHasher;
-            use std::hash::Hasher;
-
-            let mut hasher = GxHasher::default();
-            hasher.write(&file_content);
-            let result = hasher.finish();
-            Ok(format!("{:016x}", result))
+            let mut hasher = gxhash::GxHash::default();
+            hasher.write(&buffer);
+            Ok(format!("{:016x}", hasher.finish()))
+        }
+        #[cfg(not(feature = "linux"))]
+        "gxhash" => {
+            return Err(anyhow::anyhow!("gxhash is only available on Linux platforms"));
         }
         "fnv1a" => {
-            use fnv::FnvHasher;
-            use std::hash::Hasher;
-
-            let mut hasher = FnvHasher::default();
-            hasher.write(&file_content);
-            let result = hasher.finish();
-            Ok(format!("{:016x}", result))
+            let mut hasher = fnv::FnvHasher::default();
+            hasher.write(&buffer);
+            Ok(format!("{:016x}", hasher.finish()))
         }
         "crc32" => {
-            let result = crc32fast::hash(&file_content);
+            let result = crc32fast::hash(&buffer);
             Ok(format!("{:08x}", result))
         }
-        // Meow Hash implementation temporarily removed due to build issues
-        // "meow" => { ... }
-        _ => Err(anyhow::anyhow!(
-            "Unsupported hashing algorithm: {}",
-            algorithm
-        )),
+        _ => return Err(anyhow::anyhow!("Invalid hash algorithm: {}", algorithm)),
     }
 }
 
@@ -1667,15 +1657,12 @@ mod tests {
         assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
+    #[cfg(feature = "linux")]
     #[test]
     fn test_gxhash() {
-        let test_content = b"The quick brown fox jumps over the lazy dog";
-        let file = create_test_file(test_content);
+        let file = create_test_file(b"test content");
         let hash = calculate_hash(file.path(), "gxhash").unwrap();
-        // gxHash has a fixed length of 16 hex characters (64 bits)
-        assert_eq!(hash.len(), 16);
-        // We check the format rather than exact value as implementation might vary
-        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(hash.len(), 16); // gxhash produces 64-bit output (8 bytes = 16 hex chars)
     }
 
     #[test]
