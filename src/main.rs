@@ -37,16 +37,42 @@ fn main() -> Result<()> {
     // Load CLI args with config from .deduprc
     let cli = Cli::with_config()?;
 
-    let dedup_tui_log = std::path::PathBuf::from("dedup_tui.log");
-    let dedup_log = std::path::PathBuf::from("dedup.log");
-    let log_file = if cli.interactive {
-        Some(dedup_tui_log.as_path())
-    } else if cli.log {
-        Some(dedup_log.as_path())
+    // Configure logging based on mode
+    if cli.interactive {
+        // For interactive mode, use a file
+        let log_file = Some(Path::new("dedup_tui.log"));
+        setup_logger(cli.verbose, log_file)?;
+    } else if cli.log || cli.log_file.is_some() {
+        // User enabled logging
+        let log_path = if let Some(path) = &cli.log_file {
+            path.as_path()
+        } else {
+            Path::new("dedup.log")
+        };
+        setup_logger(cli.verbose, Some(log_path))?;
+    } else if cli.progress {
+        // CLI progress display - use terminal logger
+        simplelog::TermLogger::init(
+            match cli.verbose {
+                0 => LevelFilter::Info,
+                1 => LevelFilter::Debug,
+                _ => LevelFilter::Trace,
+            },
+            simplelog::Config::default(),
+            simplelog::TerminalMode::Mixed,
+            simplelog::ColorChoice::Auto
+        )?;
     } else {
-        None
-    };
-    setup_logger(cli.verbose, log_file)?;
+        // No special requirements - use simple logger
+        simplelog::SimpleLogger::init(
+            match cli.verbose {
+                0 => LevelFilter::Info,
+                1 => LevelFilter::Debug,
+                _ => LevelFilter::Trace,
+            },
+            simplelog::Config::default()
+        )?;
+    }
 
     log::info!("Logger initialized. Application starting.");
     log::debug!("CLI args: {:#?}", cli);
@@ -96,12 +122,6 @@ fn main() -> Result<()> {
     } else {
         // Single directory mode - find duplicates within one directory
         log::info!("Non-interactive mode selected for directory: {:?}", cli.directories[0]);
-        // To get the right display for CLI
-        if cli.progress {
-            simplelog::TermLogger::init(LevelFilter::Info, simplelog::Config::default(), simplelog::TerminalMode::Mixed, simplelog::ColorChoice::Auto)?;
-        } else {
-            simplelog::SimpleLogger::init(LevelFilter::Info, simplelog::Config::default())?;
-        }
         
         // Since we're not in TUI mode, we need a channel to receive progress updates
         let (tx, _rx) = std::sync::mpsc::channel();

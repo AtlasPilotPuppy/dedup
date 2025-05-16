@@ -224,7 +224,8 @@ ARGS:
 OPTIONS:
     -d, --delete                 Delete duplicate files automatically based on selection strategy
     -M, --move-to <move-to>      Move duplicate files to a specified directory
-    -l, --log                    Log actions and errors to a file (dedup.log)
+    -l, --log                    Enable logging to a file (default: dedup.log)
+        --log-file <PATH>        Specify a custom log file path
     -o, --output <o>             Output duplicate sets to a file (e.g., duplicates.json)
     -f, --format <format>        Format for the output file [json|toml] [default: json]
     -a, --algorithm <algorithm>  Hashing algorithm [md5|sha1|sha256|blake3|xxhash|gxhash|fnv1a|crc32] [default: xxhash]

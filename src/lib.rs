@@ -72,9 +72,13 @@ pub struct Cli {
     #[clap(short = 'M', long, help = "Move duplicate files to a specified directory")]
     pub move_to: Option<PathBuf>,
 
-    /// Write a log file to the specified path.
-    #[clap(short, long, help = "Log actions and errors to a file (dedup.log)")]
+    /// Write actions and errors to a log file.
+    #[clap(short, long, help = "Enable logging to a file (default: dedup.log)")]
     pub log: bool,
+    
+    /// Specify a custom log file path.
+    #[clap(long, value_name = "PATH", help = "Specify a custom log file path")]
+    pub log_file: Option<PathBuf>,
 
     /// Write a file containing duplicate information.
     #[clap(short, long, help = "Output duplicate sets to a file (e.g., duplicates.json)")]
