@@ -24,24 +24,28 @@ jobs:
             target: x86_64-unknown-linux-gnu
             artifact_name: dedups-linux-x86_64
             binary_name: dedups
-            features: "all"
+            features: ""
+            features_flag: ""
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             artifact_name: dedups-linux-x86_64-ssh
             binary_name: dedups
             features: "all"
+            features_flag: "--features all"
           
           # macOS builds - standard and SSH
           - os: macos-latest
             target: x86_64-apple-darwin
             artifact_name: dedups-macos-x86_64
             binary_name: dedups
-            features: "all"
+            features: ""
+            features_flag: ""
           - os: macos-latest
             target: x86_64-apple-darwin
             artifact_name: dedups-macos-x86_64-ssh
             binary_name: dedups
             features: "all"
+            features_flag: "--features all"
           
           # macOS ARM builds - standard and SSH
           - os: macos-latest
@@ -49,11 +53,13 @@ jobs:
             artifact_name: dedups-macos-aarch64
             binary_name: dedups
             features: ""
+            features_flag: ""
           - os: macos-latest
             target: aarch64-apple-darwin
             artifact_name: dedups-macos-aarch64-ssh
             binary_name: dedups
             features: "ssh"
+            features_flag: "--features ssh"
           
           # Windows builds - standard and SSH
           - os: windows-latest
@@ -61,11 +67,13 @@ jobs:
             artifact_name: dedups-windows-x86_64.exe
             binary_name: dedups.exe
             features: ""
+            features_flag: ""
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             artifact_name: dedups-windows-x86_64-ssh.exe
             binary_name: dedups.exe
             features: "ssh"
+            features_flag: "--features ssh"
 
     steps:
       - uses: actions/checkout@v4
@@ -101,7 +109,7 @@ jobs:
       - name: Build (Linux)
         if: matrix.os == 'ubuntu-latest'
         run: |
-          cargo build --release --target ${{ matrix.target }} --features ${{ matrix.features }}
+          cargo build --release --target ${{ matrix.target }} ${{ matrix.features_flag }}
         env:
           RUSTFLAGS: "-C target-cpu=native"
       
@@ -109,7 +117,7 @@ jobs:
       - name: Build (macOS ARM)
         if: matrix.target == 'aarch64-apple-darwin'
         run: |
-          cargo build --release --target ${{ matrix.target }} --features ${{ matrix.features }}
+          cargo build --release --target ${{ matrix.target }} ${{ matrix.features_flag }}
         env:
           RUSTFLAGS: "-C target-feature=+aes,+neon"
       
@@ -117,7 +125,7 @@ jobs:
       - name: Build (Standard)
         if: matrix.os != 'ubuntu-latest' && matrix.target != 'aarch64-apple-darwin'
         run: |
-          cargo build --release --target ${{ matrix.target }} --features ${{ matrix.features }}
+          cargo build --release --target ${{ matrix.target }} ${{ matrix.features_flag }}
       
       # Prepare artifact on Linux/macOS
       - name: Prepare artifact
