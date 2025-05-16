@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use std::path::Path;
 use std::process::Command;
+use base64::Engine;
 
 /// Simple audio fingerprinting module using chromaprint/fpcalc if available
 /// or ffmpeg's ebur128 filter as a fallback
@@ -49,7 +50,7 @@ fn fingerprint_with_chromaprint(path: &Path) -> Result<Vec<u8>> {
     if let Some(fingerprint_str) = json["fingerprint"].as_str() {
         // Convert from base64 or hex string to bytes
         let fingerprint = hex::decode(fingerprint_str)
-            .or_else(|_| base64::decode(fingerprint_str))
+            .or_else(|_| base64::engine::general_purpose::STANDARD.decode(fingerprint_str))
             .context("Failed to decode fingerprint")?;
 
         Ok(fingerprint)

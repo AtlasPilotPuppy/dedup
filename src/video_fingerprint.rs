@@ -7,7 +7,6 @@ use img_hash::{HashAlg, HasherConfig};
 
 /// Video fingerprinting module using ffmpeg to extract keyframes
 /// and img_hash to generate perceptual hashes for those frames
-
 /// Extract a fingerprint from a video file
 pub fn fingerprint_video(path: &Path) -> Result<Vec<u8>> {
     if !crate::media_dedup::is_ffmpeg_available() {

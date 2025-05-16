@@ -438,11 +438,10 @@ impl App {
             log::info!("[ScanThread] Rescan finished.");
         });
 
-        let scan_join_handle = match scan_thread.thread().id() {
-            id => {
-                log::info!("Rescan thread started with ID: {:?}", id);
-                Some(scan_thread)
-            }
+        let id = scan_thread.thread().id();
+        let scan_join_handle = {
+            log::info!("Rescan thread started with ID: {:?}", id);
+            Some(scan_thread)
         };
 
         self.scan_thread_join_handle = scan_join_handle;
