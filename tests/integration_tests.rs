@@ -12,6 +12,7 @@ use rand::distributions::Alphanumeric;
 // Assuming your crate's main library functions are accessible via `dedup_tui::`
 use dedup_tui::file_utils::{self, FileInfo, SelectionStrategy, SortCriterion, SortOrder};
 use dedup_tui::Cli; // Assuming Cli is public or pub(crate) and accessible
+use dedup_tui::media_dedup::MediaDedupOptions; // Import MediaDedupOptions directly
 // use dedup_tui::tui_app::AppState; // Remove unused import
 
 // --- Test Constants ---
@@ -197,7 +198,7 @@ impl TestEnv {
             format: "json".to_string(),
             algorithm: "blake3".to_string(), // Fast algorithm for tests
             parallel: Some(1), // Controlled parallelism for predictable testing
-            mode: "newest".to_string(),
+            mode: "newest_modified".to_string(),
             interactive: false,
             verbose: 0,
             include: Vec::new(),
@@ -208,6 +209,15 @@ impl TestEnv {
             sort_by: SortCriterion::ModifiedAt, // Default, can be changed per test
             sort_order: SortOrder::Descending, // Default
             raw_sizes: false,
+            cache_location: None,
+            config_file: None,
+            dry_run: false,
+            fast_mode: false,
+            media_mode: false,
+            media_resolution: "highest".to_string(),
+            media_formats: Vec::new(),
+            media_similarity: 90,
+            media_dedup_options: MediaDedupOptions::default(),
         }
     }
 }
@@ -322,7 +332,10 @@ mod integration {
         cli_args.delete = true; // Enable deletion
         cli_args.mode = "shortest_path".to_string(); // Use a predictable strategy
 
-        let initial_duplicate_sets = file_utils::find_duplicate_files(&cli_args)?;
+        // Create a dummy channel for the progress updates
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let initial_duplicate_sets = file_utils::find_duplicate_files_with_progress(&cli_args, tx)?;
+        
         if initial_duplicate_sets.iter().filter(|s| s.files.len() >=2).count() < NUM_DUPLICATE_CONTENT_SETS && NUM_DUPLICATE_CONTENT_SETS > 0 {
              return Err(anyhow::anyhow!("Test setup warning: Not enough duplicate sets found ({}) for deletion test. Expected at least {}. Check TestEnv logic.", initial_duplicate_sets.len(), NUM_DUPLICATE_CONTENT_SETS));
         }
@@ -387,8 +400,11 @@ mod integration {
         cli_args.move_to = Some(target_move_dir.clone());
         cli_args.mode = "longest_path".to_string();
 
-        let initial_duplicate_sets = file_utils::find_duplicate_files(&cli_args)?;
-         if initial_duplicate_sets.iter().filter(|s| s.files.len() >=2).count() < NUM_DUPLICATE_CONTENT_SETS && NUM_DUPLICATE_CONTENT_SETS > 0 {
+        // Create a dummy channel for the progress updates
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let initial_duplicate_sets = file_utils::find_duplicate_files_with_progress(&cli_args, tx)?;
+        
+        if initial_duplicate_sets.iter().filter(|s| s.files.len() >=2).count() < NUM_DUPLICATE_CONTENT_SETS && NUM_DUPLICATE_CONTENT_SETS > 0 {
              return Err(anyhow::anyhow!("Test setup warning: Not enough duplicate sets found ({}) for move test. Expected at least {}. Check TestEnv logic.", initial_duplicate_sets.len(), NUM_DUPLICATE_CONTENT_SETS));
         }
 
@@ -422,7 +438,7 @@ mod integration {
             return Ok(());
         }
 
-        let move_count = file_utils::move_files(&files_to_move_info, &target_move_dir, false)?;
+        let (move_count, _logs) = file_utils::move_files(&files_to_move_info, &target_move_dir, false)?;
         assert_eq!(move_count, files_to_be_moved_original_paths.len(), "Mismatch in number of moved files.");
 
         // Verify files were moved and kept files still exist
@@ -456,7 +472,10 @@ mod integration {
         let env = TestEnv::new();
         let mut cli_args = env.default_cli_args();
 
-        let duplicate_sets = file_utils::find_duplicate_files(&cli_args)?;
+        // Create a dummy channel for the progress updates
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let duplicate_sets = file_utils::find_duplicate_files_with_progress(&cli_args, tx)?;
+        
         let actionable_duplicate_sets_count = duplicate_sets.iter().filter(|s| s.files.len() >= 2).count();
 
         if actionable_duplicate_sets_count < NUM_DUPLICATE_CONTENT_SETS && NUM_DUPLICATE_CONTENT_SETS > 0 {
@@ -538,7 +557,9 @@ mod integration {
         cli_args.deduplicate = false;
         
         // Run the operation
-        let _duplicate_sets = file_utils::find_duplicate_files(&cli_args)?;
+        // Create a dummy channel for the progress updates
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let _duplicate_sets = file_utils::find_duplicate_files_with_progress(&cli_args, tx)?;
         
         // Find missing files in target compared to source
         let comparison_result = file_utils::compare_directories(&cli_args)?;
@@ -606,7 +627,9 @@ mod integration {
         cli_args.deduplicate = true;
         
         // Find duplicate sets across both directories
-        let duplicate_sets = file_utils::find_duplicate_files(&cli_args)?;
+        // Create a dummy channel for the progress updates
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let duplicate_sets = file_utils::find_duplicate_files_with_progress(&cli_args, tx)?;
         
         // We should find 3 duplicate sets:
         // 1. source_duplicate (source_dup1.txt and source_dup2.txt)
@@ -725,7 +748,9 @@ mod integration {
         source_dedup_cli.mode = "newest_modified".to_string();
         
         // Get duplicate sets in source
-        let source_duplicate_sets = file_utils::find_duplicate_files(&source_dedup_cli)?;
+        // Create a dummy channel for the progress updates
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let source_duplicate_sets = file_utils::find_duplicate_files_with_progress(&source_dedup_cli, tx)?;
         
         // Count duplicate sets with at least 2 files
         let actionable_sets = source_duplicate_sets.iter()

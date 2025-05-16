@@ -6,7 +6,7 @@ use tempfile::tempdir;
 fn test_config_defaults() {
     let config = DedupConfig::default();
     
-    assert_eq!(config.algorithm, "blake3");
+    assert_eq!(config.algorithm, "xxhash");
     assert_eq!(config.mode, "newest_modified");
     assert_eq!(config.format, "json");
     assert_eq!(config.sort_by, "modifiedat");
@@ -65,7 +65,7 @@ fn test_nonexistent_config() -> anyhow::Result<()> {
     let config = DedupConfig::load_from_path(&nonexistent_path)?;
     
     // Check default values
-    assert_eq!(config.algorithm, "blake3");
+    assert_eq!(config.algorithm, "xxhash");
     assert_eq!(config.mode, "newest_modified");
     
     Ok(())
