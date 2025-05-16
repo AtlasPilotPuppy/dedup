@@ -262,11 +262,9 @@ pub fn calculate_hash(path: &Path, algorithm: &str) -> Result<String> {
             Ok(format!("{:016x}", hasher.finish()))
         }
         #[cfg(not(feature = "linux"))]
-        "gxhash" => {
-            Err(anyhow::anyhow!(
-                "gxhash is only available on Linux platforms"
-            ))
-        }
+        "gxhash" => Err(anyhow::anyhow!(
+            "gxhash is only available on Linux platforms"
+        )),
         "fnv1a" => {
             let mut hasher = fnv::FnvHasher::default();
             hasher.write(&buffer);
