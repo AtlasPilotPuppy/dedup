@@ -84,11 +84,12 @@ jobs:
 
     - name: Download all artifacts
       uses: actions/download-artifact@v4
-        # This will download all artifacts into subfolders named after the artifact
+      with:
+        path: artifacts
 
     - name: Move all artifacts to root
       run: |
-        find . -type f -name "dedups-*" -exec mv {} . \;
+        find artifacts -type f -exec mv {} . \;
 
     - name: List downloaded artifacts
       run: ls -la
