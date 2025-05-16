@@ -2,8 +2,11 @@ name: Release
 
 on:
   push:
+    branches:
+      - main
     tags:
       - 'v*'
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -56,7 +59,15 @@ jobs:
       shell: bash
       run: |
         mkdir -p artifacts
-        cp target/${{ matrix.target }}/release/${{ matrix.binary_name }} artifacts/${{ matrix.artifact_name }}
+        if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+          cp target/${{ matrix.target }}/release/dedups.exe artifacts/dedups-windows-x86_64.exe
+        elif [[ "${{ matrix.os }}" == "macos-latest" && "${{ matrix.target }}" == "aarch64-apple-darwin" ]]; then
+          cp target/${{ matrix.target }}/release/dedups artifacts/dedups-macos-aarch64
+        elif [[ "${{ matrix.os }}" == "macos-latest" ]]; then
+          cp target/${{ matrix.target }}/release/dedups artifacts/dedups-macos-x86_64
+        else
+          cp target/${{ matrix.target }}/release/dedups artifacts/dedups-linux-x86_64
+        fi
 
     - name: Upload artifact
       uses: actions/upload-artifact@v4
