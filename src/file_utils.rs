@@ -208,11 +208,13 @@ pub fn find_duplicate_files_with_progress(
             log::warn!("[ScanThread] Failed to send status update to TUI (channel closed).");
         }
     };
-    send_status(format!("Scanning files in {:?}...", cli.directory));
+    send_status(format!("Starting scan in {}", cli.directory.display()));
 
     let mut files_by_size: HashMap<u64, Vec<PathBuf>> = HashMap::new();
     let walker = WalkDir::new(&cli.directory).into_iter();
     let mut files_scanned_count = 0;
+    let mut last_update_time = std::time::Instant::now();
+    let update_interval = std::time::Duration::from_millis(250); // Update UI at most 4 times per second
 
     for entry_result in walker.filter_entry(|e| {
         if is_hidden(e) || is_symlink(e) { return false; }
@@ -228,8 +230,10 @@ pub fn find_duplicate_files_with_progress(
                 if entry.file_type().is_file() {
                     let path = entry.path().to_path_buf();
                     files_scanned_count +=1;
-                    if files_scanned_count % 100 == 0 { // Update status periodically
-                        send_status(format!("Scanned {} files... Processing {:?}", files_scanned_count, path.file_name().unwrap_or_default()));
+                    if files_scanned_count % 100 == 0 || last_update_time.elapsed() >= update_interval { 
+                        last_update_time = std::time::Instant::now();
+                        let file_name = path.file_name().unwrap_or_default().to_string_lossy();
+                        send_status(format!("Scanning: {} files found... (current: {})", files_scanned_count, file_name));
                     }
                     match fs::metadata(&path) {
                         Ok(metadata) => {
@@ -244,7 +248,9 @@ pub fn find_duplicate_files_with_progress(
             Err(e) => log::warn!("[ScanThread] Error walking directory: {}", e),
         }
     }
-    send_status(format!("File scan complete. Found {} files matching criteria.", files_scanned_count));
+    send_status(format!("File scan complete. Found {} files in {} size groups.", 
+        files_by_size.values().map(|v| v.len()).sum::<usize>(), 
+        files_by_size.len()));
     log::info!("[ScanThread] Found {} files matching criteria, grouped into {} unique file sizes.", 
         files_by_size.values().map(|v| v.len()).sum::<usize>(), 
         files_by_size.len());
@@ -256,12 +262,12 @@ pub fn find_duplicate_files_with_progress(
         .collect();
 
     if potential_duplicates.is_empty() {
-        send_status("No potential duplicates after size grouping.".to_string());
+        send_status("Scan complete. No potential duplicates found.".to_string());
         log::info!("[ScanThread] No potential duplicates found after size grouping.");
         return Ok(Vec::new());
     }
 
-    send_status(format!("Hashing {} groups of potential duplicates...", potential_duplicates.len()));
+    send_status(format!("Found {} size groups with potential duplicates. Starting hash calculation...", potential_duplicates.len()));
     log::info!("[ScanThread] Found {} sizes with potential duplicates. Calculating hashes...", potential_duplicates.len());
 
     let num_threads = cli.parallel.unwrap_or_else(num_cpus::get);
@@ -272,6 +278,9 @@ pub fn find_duplicate_files_with_progress(
     let (local_tx, local_rx) = std::sync::mpsc::channel::<Result<HashMap<String, Vec<FileInfo>>>>(); 
     let total_groups_to_hash = potential_duplicates.len();
     let mut groups_hashed_count = 0;
+    let mut total_files_to_hash = potential_duplicates.iter().map(|(_, paths)| paths.len()).sum::<usize>();
+    send_status(format!("Hashing {} files across {} size groups (using {} threads)...", 
+        total_files_to_hash, total_groups_to_hash, num_threads));
 
     potential_duplicates
         .into_par_iter()
@@ -340,12 +349,16 @@ pub fn find_duplicate_files_with_progress(
             }
         }
         groups_hashed_count += 1;
-        if groups_hashed_count % 10 == 0 || groups_hashed_count == total_groups_to_hash {
-             send_status(format!("Hashed {}/{} groups...", groups_hashed_count, total_groups_to_hash));
+        if groups_hashed_count == 1 || groups_hashed_count == total_groups_to_hash || 
+           groups_hashed_count % 5 == 0 || last_update_time.elapsed() >= update_interval {
+            last_update_time = std::time::Instant::now();
+            send_status(format!("Hashed {}/{} groups ({:.1}%)...", 
+                groups_hashed_count, total_groups_to_hash,
+                (groups_hashed_count as f64 / total_groups_to_hash as f64) * 100.0));
         }
     }
 
-    send_status("Hashing complete.".to_string());
+    send_status(format!("Hashing complete. Found {} sets of duplicate files.", duplicate_sets.len()));
     log::info!("[ScanThread] Found {} sets of duplicate files.", duplicate_sets.len());
     Ok(duplicate_sets)
 }
@@ -628,33 +641,30 @@ pub fn determine_action_targets(
     Ok((kept_file_info, files_to_process))
 }
 
-pub fn delete_files(files_to_delete: &[FileInfo], dry_run: bool) -> Result<usize> {
+pub fn delete_files(files_to_delete: &[FileInfo], dry_run: bool) -> Result<(usize, Vec<String>)> {
     let mut count = 0;
+    let mut logs = Vec::new();
     if dry_run {
-        log::info!("[DRY RUN] Would delete the following files:");
+        logs.push("[DRY RUN] Would delete the following files:".to_string());
         for file_info in files_to_delete {
-            log::info!("[DRY RUN]    - {:?}", file_info.path);
-            println!("[DRY RUN] Would delete: {}", file_info.path.display());
+            logs.push(format!("[DRY RUN]    - {}", file_info.path.display()));
             count += 1;
         }
     } else {
-        log::info!("Deleting the following files:");
+        logs.push("Deleting the following files:".to_string());
         for file_info in files_to_delete {
             match fs::remove_file(&file_info.path) {
                 Ok(_) => {
-                    log::info!("    Deleted: {:?}", file_info.path);
-                    println!("Deleted: {}", file_info.path.display());
+                    logs.push(format!("Deleted: {}", file_info.path.display()));
                     count += 1;
                 }
                 Err(e) => {
-                    log::error!("Failed to delete {:?}: {}", file_info.path, e);
-                    eprintln!("Error deleting {}: {}", file_info.path.display(), e);
-                    // Decide if we should stop or continue
+                    logs.push(format!("Error deleting {}: {}", file_info.path.display(), e));
                 }
             }
         }
     }
-    Ok(count)
+    Ok((count, logs))
 }
 
 pub fn move_files(files_to_move: &[FileInfo], target_dir: &Path, dry_run: bool) -> Result<usize> {

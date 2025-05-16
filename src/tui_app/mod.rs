@@ -111,6 +111,12 @@ pub struct AppState {
 
     pub log_messages: Vec<String>, // For operation output
     pub log_scroll: usize,         // For scrolling the log
+    pub log_focus: bool, // Whether log area is focused
+    pub log_filter: Option<String>, // For filtering (stub for now)
+
+    pub is_processing_jobs: bool,
+    pub job_processing_message: String,
+    pub job_progress: (usize, usize), // (done, total)
 }
 
 // Channel for messages from scan thread to TUI thread
@@ -134,13 +140,9 @@ pub struct App {
 impl App {
     pub fn new(cli_args: &Cli) -> Self {
         let strategy = SelectionStrategy::from_str(&cli_args.mode).unwrap_or(SelectionStrategy::NewestModified);
-        let initial_status = if cli_args.progress { // Check original progress flag for initial scan message
-            "Initializing scan...".to_string()
-        } else {
-            "Loading... (performing initial scan)".to_string()
-        };
+        let initial_status = "Preparing to scan for duplicates...";
 
-        let mut app_state = AppState {
+        let app_state = AppState {
             grouped_data: Vec::new(),
             display_list: Vec::new(),
             selected_display_list_index: 0,
@@ -154,7 +156,7 @@ impl App {
             current_input: Input::default(),
             file_for_copy_move: None,
             is_loading: true, // Always start in loading state, scan will update
-            loading_message: initial_status,
+            loading_message: initial_status.to_string(),
             current_algorithm: cli_args.algorithm.clone(),
             current_parallel: cli_args.parallel,
             rescan_needed: false,
@@ -164,69 +166,68 @@ impl App {
             sort_settings_changed: false, 
             log_messages: Vec::new(),
             log_scroll: 0,
+            log_focus: false,
+            log_filter: None,
+            is_processing_jobs: false,
+            job_processing_message: String::new(),
+            job_progress: (0, 0),
         };
 
-        // Determine if initial scan is async or sync based on original cli.progress
-        let perform_async_scan = cli_args.progress; 
-
+        // Always perform async scan for TUI
+        log::info!("Initializing TUI with directory: {:?}", cli_args.directory);
         let (tx, rx) = std_mpsc::channel::<ScanMessage>();
-        let scan_join_handle: Option<std_thread::JoinHandle<()>> = if perform_async_scan {
-            let mut current_cli_for_scan = cli_args.clone(); // Clone entire cli_args
-            // These are already set from cli_args, but ensure they are what scan thread uses
-            current_cli_for_scan.algorithm = app_state.current_algorithm.clone();
-            current_cli_for_scan.parallel = app_state.current_parallel;
-            current_cli_for_scan.sort_by = app_state.current_sort_criterion;
-            current_cli_for_scan.sort_order = app_state.current_sort_order;
-
-            let thread_tx = tx.clone();
-            let handle = std_thread::spawn(move || {
-                log::info!("[ScanThread] Starting initial duplicate scan...");
-                match file_utils::find_duplicate_files_with_progress(&current_cli_for_scan, thread_tx.clone()) {
-                    Ok(raw_sets) => {
-                        if thread_tx.send(ScanMessage::Completed(Ok(raw_sets))).is_err() {
-                            log::error!("[ScanThread] Failed to send completion message to TUI.");
-                        }
-                    }
-                    Err(e) => {
-                        if thread_tx.send(ScanMessage::Error(e.to_string())).is_err() {
-                            log::error!("[ScanThread] Failed to send error message to TUI.");
-                        }
-                    }
-                }
-                log::info!("[ScanThread] Initial scan finished.");
-            });
-            Some(handle)
-        } else {
-            // Synchronous scan if --progress is not set
-            log::info!("Performing synchronous scan as --progress is not set for TUI.");
-            match file_utils::find_duplicate_files(cli_args) {
+        
+        // Send an immediate status update to show we're properly initialized
+        tx.send(ScanMessage::StatusUpdate(format!("Starting scan of {}...", cli_args.directory.display())))
+            .unwrap_or_else(|e| log::error!("Failed to send initial status update: {}", e));
+        
+        let mut current_cli_for_scan = cli_args.clone();
+        current_cli_for_scan.algorithm = app_state.current_algorithm.clone();
+        current_cli_for_scan.parallel = app_state.current_parallel;
+        current_cli_for_scan.sort_by = app_state.current_sort_criterion;
+        current_cli_for_scan.sort_order = app_state.current_sort_order;
+        
+        log::info!("Starting scan thread with algorithm={}, parallel={:?}", 
+                  current_cli_for_scan.algorithm, current_cli_for_scan.parallel);
+        
+        let thread_tx = tx.clone();
+        let scan_thread = std_thread::spawn(move || {
+            log::info!("[ScanThread] Starting initial duplicate scan...");
+            thread_tx.send(ScanMessage::StatusUpdate("Scan thread initialized, starting file scan...".to_string()))
+                .unwrap_or_else(|e| log::error!("[ScanThread] Failed to send initialization message: {}", e));
+            
+            match file_utils::find_duplicate_files_with_progress(&current_cli_for_scan, thread_tx.clone()) {
                 Ok(raw_sets) => {
-                    let (grouped_data, display_list) = App::process_raw_sets_into_grouped_view(raw_sets, true); // Default expanded
-                    app_state.grouped_data = grouped_data;
-                    app_state.display_list = display_list;
-                    if app_state.display_list.is_empty() {
-                        app_state.status_message = Some("No duplicate sets found.".to_string());
+                    log::info!("[ScanThread] Scan completed successfully with {} sets", raw_sets.len());
+                    if thread_tx.send(ScanMessage::Completed(Ok(raw_sets))).is_err() {
+                        log::error!("[ScanThread] Failed to send completion message to TUI.");
                     }
                 }
                 Err(e) => {
-                    log::error!("Failed to find duplicates synchronously: {}", e);
-                    app_state.status_message = Some(format!("Error loading files: {}", e));
+                    log::error!("[ScanThread] Scan failed with error: {}", e);
+                    if thread_tx.send(ScanMessage::Error(e.to_string())).is_err() {
+                        log::error!("[ScanThread] Failed to send error message to TUI.");
+                    }
                 }
             }
-            None // No join handle for synchronous scan
+            log::info!("[ScanThread] Initial scan finished.");
+        });
+
+        // Wrap the thread in Some() with error handling
+        let scan_join_handle = match scan_thread.thread().id() {
+            id => {
+                log::info!("Scan thread started with ID: {:?}", id);
+                Some(scan_thread)
+            }
         };
-        
-        if app_state.selected_display_list_index >= app_state.display_list.len() && !app_state.display_list.is_empty() {
-            app_state.selected_display_list_index = app_state.display_list.len().saturating_sub(1);
-        }
 
         Self {
             state: app_state,
             should_quit: false,
             scan_thread_join_handle: scan_join_handle,
-            scan_rx: if cli_args.progress { Some(rx) } else { None },
-            scan_tx: if cli_args.progress { Some(tx) } else { None }, // Store sender only if async
-            cli_config: cli_args.clone(), // Store a clone of the initial Cli
+            scan_rx: Some(rx),
+            scan_tx: Some(tx),
+            cli_config: cli_args.clone(),
         }
     }
 
@@ -349,17 +350,19 @@ impl App {
     // Method to handle messages from the scan thread
     pub fn handle_scan_messages(&mut self) {
         if let Some(rx) = &self.scan_rx {
+            log::debug!("TUI attempting to check scan messages");
             while let Ok(message) = rx.try_recv() { // Use try_recv for non-blocking check
                 match message {
                     ScanMessage::StatusUpdate(status) => {
-                        log::debug!("TUI received scan status: {}", status);
+                        log::debug!("TUI received scan status update: {}", status);
                         self.state.loading_message = status;
                     }
                     ScanMessage::Completed(result) => {
-                        log::info!("TUI received scan completion.");
+                        log::info!("TUI received scan completion message");
                         self.state.is_loading = false;
                         match result {
                             Ok(raw_sets) => {
+                                log::debug!("TUI received {} sets of duplicate files", raw_sets.len());
                                 let (grouped_data, display_list) = App::process_raw_sets_into_grouped_view(raw_sets, true); // Default expanded
                                 self.state.grouped_data = grouped_data;
                                 self.state.display_list = display_list;
@@ -379,6 +382,7 @@ impl App {
                         break; // Process one completion, then redraw
                     }
                     ScanMessage::Error(err_msg) => {
+                        log::error!("TUI received scan error message: {}", err_msg);
                         self.state.is_loading = false; // Stop loading on error
                         self.state.loading_message = format!("Scan Error: {}", err_msg);
                         self.state.status_message = Some(format!("Scan failed: {}", err_msg));
@@ -387,6 +391,10 @@ impl App {
                     }
                 }
             }
+            // Add logging if no messages were received this time
+            log::trace!("TUI check for scan messages completed - none available at this time");
+        } else {
+            log::warn!("TUI tried to handle scan messages but no receiver available");
         }
     }
 
@@ -419,6 +427,9 @@ impl App {
                 let all_kept = files_to_process.iter().all(|file| {
                     self.state.jobs.iter().any(|job| job.file_info.path == file.path && job.action == ActionType::Keep)
                 });
+                let _all_deleted = files_to_process.iter().all(|file| {
+                    self.state.jobs.iter().any(|job| job.file_info.path == file.path && job.action == ActionType::Delete)
+                });
                 let paths: Vec<_> = files_to_process.iter().map(|f| f.path.clone()).collect();
                 self.state.jobs.retain(|job| !paths.contains(&job.file_info.path));
                 let action = if all_kept { ActionType::Delete } else { ActionType::Keep };
@@ -433,6 +444,7 @@ impl App {
                 } else {
                     "All files marked to keep".to_string()
                 });
+                self.state.log_messages.push(self.state.status_message.clone().unwrap_or_default());
             }
             KeyCode::Char('d') => {
                 // Mark all files in the selected set or folder for delete
@@ -579,6 +591,40 @@ impl App {
                 } else {
                     self.state.log_messages.push("No job selected to remove or jobs list empty.".to_string());
                 }
+            }
+            KeyCode::Char('g') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.state.log_focus = !self.state.log_focus;
+                self.state.status_message = Some(if self.state.log_focus { "Log focus ON (Up/Down/PgUp/PgDn, Ctrl+L: clear, /: filter, Esc: exit log)".to_string() } else { "Log focus OFF".to_string() });
+            }
+            KeyCode::Char('l') if key_event.modifiers.contains(KeyModifiers::CONTROL) && self.state.log_focus => {
+                self.state.log_messages.clear();
+                self.state.log_scroll = 0;
+                self.state.status_message = Some("Log cleared.".to_string());
+            }
+            KeyCode::Up if self.state.log_focus => {
+                if self.state.log_scroll > 0 { self.state.log_scroll -= 1; }
+            }
+            KeyCode::Down if self.state.log_focus => {
+                let log_height = 5;
+                let max_scroll = self.state.log_messages.len().saturating_sub(log_height);
+                if self.state.log_scroll < max_scroll { self.state.log_scroll += 1; }
+            }
+            KeyCode::PageUp if self.state.log_focus => {
+                let log_height = 5;
+                if self.state.log_scroll >= log_height { self.state.log_scroll -= log_height; } else { self.state.log_scroll = 0; }
+            }
+            KeyCode::PageDown if self.state.log_focus => {
+                let log_height = 5;
+                let max_scroll = self.state.log_messages.len().saturating_sub(log_height);
+                if self.state.log_scroll + log_height < max_scroll { self.state.log_scroll += log_height; } else { self.state.log_scroll = max_scroll; }
+            }
+            KeyCode::Esc if self.state.log_focus => {
+                self.state.log_focus = false;
+                self.state.status_message = Some("Exited log focus.".to_string());
+            }
+            KeyCode::Char('/') if self.state.log_focus => {
+                self.state.log_filter = Some(String::new());
+                self.state.status_message = Some("Log filter: (type to filter, Esc to clear)".to_string());
             }
             _ => {}
         }
@@ -1004,37 +1050,34 @@ impl App {
     fn process_pending_jobs(&mut self) -> Result<()> {
         if self.state.jobs.is_empty() {
             self.state.status_message = Some("No jobs to process.".to_string());
-            log::info!("No jobs to process.");
+            self.state.log_messages.push("No jobs to process.".to_string());
             return Ok(());
         }
-
-        log::info!("Processing {} pending jobs...", self.state.jobs.len());
+        self.state.is_processing_jobs = true;
+        self.state.job_processing_message = "Processing jobs...".to_string();
+        let total_jobs = self.state.jobs.len();
+        self.state.job_progress = (0, total_jobs);
         let mut success_count = 0;
         let mut fail_count = 0;
         let jobs_to_process = self.state.jobs.drain(..).collect::<Vec<_>>(); // Take ownership
-
-        for job in jobs_to_process {
-            if job.action == ActionType::Ignore || job.action == ActionType::Keep {
-                log::info!("Skipping file {:?} due to {:?} action.", job.file_info.path, job.action);
-                continue; 
-            }
-            log::info!("Executing job: {:?} for file {:?}", job.action, job.file_info.path);
+        for (idx, job) in jobs_to_process.into_iter().enumerate() {
+            self.state.job_progress = (idx + 1, total_jobs);
             let result: Result<(), anyhow::Error> = match job.action {
                 ActionType::Delete => {
-                    match delete_files(&[job.file_info.clone()], false) { 
-                        Ok(1) => Ok(()),
-                        Ok(count) => Err(anyhow::anyhow!("Delete action affected {} files, expected 1.", count)),
+                    match delete_files(&[job.file_info.clone()], false) {
+                        Ok((1, _logs)) => Ok(()),
+                        Ok((count, _logs)) => Err(anyhow::anyhow!("Delete action affected {} files, expected 1. Logs: {:?}", count, _logs)),
                         Err(e) => Err(e),
                     }
                 }
-                ActionType::Move(target_dir) => {
-                    match move_files(&[job.file_info.clone()], &target_dir, false) {
+                ActionType::Move(ref target_dir) => {
+                    match move_files(&[job.file_info.clone()], target_dir, false) {
                         Ok(1) => Ok(()),
                         Ok(count) => Err(anyhow::anyhow!("Move action affected {} files, expected 1.", count)),
                         Err(e) => Err(e),
                     }
                 }
-                ActionType::Copy(target_dir) => {
+                ActionType::Copy(ref target_dir) => {
                     log::debug!("Attempting to copy {:?} to {:?}", job.file_info.path, target_dir);
                     if !target_dir.exists() {
                         if let Err(e) = std::fs::create_dir_all(&target_dir) {
@@ -1063,26 +1106,21 @@ impl App {
                             anyhow::Error::from(e)
                         })
                 }
-                ActionType::Keep | ActionType::Ignore => {
-                    // This arm should ideally not be reached due to the check above.
-                    // If it is, it's an anomaly, but we treat it as a no-op for file system.
-                    log::warn!("Reached Keep/Ignore in match arm for file ops: {:?}", job.action);
-                    Ok(())
-                }
+                ActionType::Keep | ActionType::Ignore => Ok(()),
             };
-
             if result.is_ok() {
                 success_count += 1;
-                log::info!("Successfully processed job for {:?}", job.file_info.path);
+                self.state.log_messages.push(format!("Success: {:?} for {}", job.action, job.file_info.path.display()));
             } else {
                 fail_count += 1;
-                log::error!("Failed to process job for {:?}: {:?}", job.file_info.path, result.err());
-                // Optionally re-add failed jobs, or log them for manual review
+                self.state.log_messages.push(format!("Failed: {:?} for {}: {}", job.action, job.file_info.path.display(), result.err().unwrap()));
             }
         }
-        self.state.status_message = Some(format!("Jobs processed. Success: {}, Fail: {}", success_count, fail_count));
-        log::info!("Job processing complete. Success: {}, Fail: {}. Jobs list cleared.", success_count, fail_count);
-        self.state.selected_job_index = 0; // Reset selection
+        self.state.is_processing_jobs = false;
+        self.state.job_processing_message = format!("Jobs processed. Success: {}, Fail: {}", success_count, fail_count);
+        self.state.status_message = Some(self.state.job_processing_message.clone());
+        self.state.job_progress = (0, 0);
+        self.state.selected_job_index = 0;
         Ok(())
     }
 
@@ -1162,7 +1200,8 @@ pub fn run_tui_app(cli: &Cli) -> Result<()> {
     let mut app = App::new(cli);
     app.validate_selection_indices(); // Initial validation for sync loaded data if any
     
-    let res = run_main_loop(&mut terminal, &mut app, cli.progress); // Pass cli.progress
+    // Always enable progress for TUI mode regardless of cli.progress setting
+    let res = run_main_loop(&mut terminal, &mut app, true);
 
     // Restore terminal
     disable_raw_mode()?;
@@ -1207,6 +1246,11 @@ pub fn run_tui_app(cli: &Cli) -> Result<()> {
 fn run_main_loop(terminal: &mut Terminal<TerminalBackend>, app: &mut App, show_tui_progress: bool) -> Result<()> {
     let tick_rate = Duration::from_millis(100); // Faster tick rate for responsiveness with async msgs
     let mut last_tick = Instant::now();
+    
+    // Handle messages from scan thread immediately for the first frame
+    if show_tui_progress { 
+        app.handle_scan_messages();
+    }
 
     loop {
         // Handle messages from scan thread first
@@ -1260,11 +1304,13 @@ fn ui(frame: &mut Frame, app: &mut App) {
         .split(frame.size());
 
     if app.state.is_loading && app.scan_rx.is_some() {
+        // Show loading screen with loading message in the center
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Percentage(40),
                 Constraint::Length(3),
+                Constraint::Length(3), // Add space for progress bar
                 Constraint::Percentage(40),
             ])
             .split(frame.size());
@@ -1280,6 +1326,24 @@ fn ui(frame: &mut Frame, app: &mut App) {
 
         frame.render_widget(Clear, area); // Clear the area for the centered text
         frame.render_widget(text.block(loading_block), area);
+        
+        // Always show a progress bar during loading
+        let now = std::time::Instant::now();
+        let secs = now.elapsed().as_secs_f64();
+        let pulse = (secs % 2.0) / 2.0; // Pulse every 2 seconds
+        
+        let gauge = Gauge::default()
+            .block(Block::default().borders(Borders::ALL).title("Progress"))
+            .gauge_style(Style::default().fg(Color::Blue).bg(Color::Black))
+            .label(format!("Scanning: {}...", app.cli_config.directory.display()))
+            .ratio(pulse);
+            
+        let progress_area = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(20), Constraint::Percentage(60), Constraint::Percentage(20)])
+            .split(chunks[2])[1]; // Middle 60% of the progress bar area
+            
+        frame.render_widget(gauge, progress_area);
     } else if app.state.input_mode == InputMode::Settings {
         // Basic placeholder for settings UI
         let chunks = Layout::default()
@@ -1587,7 +1651,16 @@ fn ui(frame: &mut Frame, app: &mut App) {
 
         // Draw progress bar (if any) just above the help bar
         use ratatui::widgets::Gauge;
-        if app.state.is_loading {
+        if app.state.is_processing_jobs {
+            let (done, total) = app.state.job_progress;
+            let percent = if total > 0 { done as f64 / total as f64 } else { 0.0 };
+            let gauge = Gauge::default()
+                .block(Block::default().borders(Borders::ALL).title("Job Progress"))
+                .gauge_style(Style::default().fg(Color::Green).bg(Color::Black))
+                .label(format!("Processing jobs: {}/{}", done, total))
+                .ratio(percent);
+            frame.render_widget(gauge, chunks[4]);
+        } else if app.state.is_loading {
             // Try to extract a percentage from the loading_message, fallback to indeterminate
             let (label, percent) = if let Some((done, total)) = app.state.loading_message.split_once('/') {
                 let done = done.chars().rev().take_while(|c| c.is_digit(10)).collect::<String>().chars().rev().collect::<String>().parse::<u64>().ok();
@@ -1599,11 +1672,15 @@ fn ui(frame: &mut Frame, app: &mut App) {
                     (app.state.loading_message.clone(), 0.0)
                 }
             } else {
-                (app.state.loading_message.clone(), 0.0)
+                // Always animate the bar when we don't have a percentage
+                let now = std::time::Instant::now();
+                let secs = now.elapsed().as_secs() as f64;
+                let pulse = (secs % 3.0) / 3.0; // Cycles every 3 seconds (0.0 to 1.0)
+                (app.state.loading_message.clone(), pulse)
             };
             let gauge = Gauge::default()
                 .block(Block::default().borders(Borders::ALL).title("Progress"))
-                .gauge_style(Style::default().fg(Color::Yellow).bg(Color::Black))
+                .gauge_style(Style::default().fg(Color::Blue).bg(Color::Black))
                 .label(label)
                 .ratio(percent);
             frame.render_widget(gauge, chunks[4]);
@@ -1636,11 +1713,16 @@ fn ui(frame: &mut Frame, app: &mut App) {
         let scroll = app.state.log_scroll.min(log_len.saturating_sub(log_height));
         let log_lines: Vec<ratatui::text::Line> = app.state.log_messages
             .iter()
+            .filter(|msg| app.state.log_filter.as_ref().map_or(true, |f| msg.contains(f)))
             .skip(scroll)
             .take(log_height)
             .map(|msg| ratatui::text::Line::from(msg.clone()))
             .collect();
-        let log_block = Block::default().borders(Borders::ALL).title("Log");
+        let log_block = if app.state.log_focus {
+            Block::default().borders(Borders::ALL).title("Log (FOCUSED)")
+        } else {
+            Block::default().borders(Borders::ALL).title("Log")
+        };
         let log_paragraph = ratatui::widgets::Paragraph::new(log_lines)
             .block(log_block)
             .scroll((0, 0));
