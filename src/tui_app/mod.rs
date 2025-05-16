@@ -13,12 +13,11 @@ use std::thread as std_thread; // Alias for clarity
 use num_cpus; // For displaying actual core count in auto mode
 use std::collections::HashMap; // For grouping
 use std::path::{Path, PathBuf}; // Ensure Path is imported here
-use humansize::{format_size, DECIMAL}; // For displaying human-readable sizes
 use tui_input::backend::crossterm::EventHandler; // For tui-input
 use tui_input::Input;
 
 use crate::Cli;
-use crate::file_utils::{self, DuplicateSet, FileInfo, SelectionStrategy, delete_files, move_files}; // Added delete_files, move_files
+use crate::file_utils::{self, DuplicateSet, FileInfo, SelectionStrategy, delete_files, move_files, SortCriterion, SortOrder}; // Added SortCriterion, SortOrder
 
 // Application state
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)] // Added PartialEq, Eq
@@ -50,6 +49,7 @@ pub enum InputMode {
     CopyDestination,
     Settings, // New mode for settings
     RegexInput,
+    Help, // New mode for help screen
 }
 
 // ---- New structs for parent folder grouping ----
@@ -105,7 +105,10 @@ pub struct AppState {
     pub rescan_needed: bool, // Flag to indicate if settings changed and rescan is advised
 
     // Settings Menu State
-    pub selected_setting_category_index: usize, // 0: Strategy, 1: Algorithm, 2: Parallelism
+    pub selected_setting_category_index: usize, // 0: Strategy, 1: Algorithm, 2: Parallelism, 3: Sort Criterion, 4: Sort Order
+    pub current_sort_criterion: SortCriterion, // New for sorting
+    pub current_sort_order: SortOrder,         // New for sorting
+    pub sort_settings_changed: bool,           // Flag if sorting needs re-application
 }
 
 // Channel for messages from scan thread to TUI thread
@@ -129,10 +132,10 @@ pub struct App {
 impl App {
     pub fn new(cli_args: &Cli) -> Self {
         let strategy = SelectionStrategy::from_str(&cli_args.mode).unwrap_or(SelectionStrategy::NewestModified);
-        let initial_status = if cli_args.progress {
+        let initial_status = if cli_args.progress { // Check original progress flag for initial scan message
             "Initializing scan...".to_string()
         } else {
-            "Loading...".to_string() // Generic if progress not explicitly requested for TUI view
+            "Loading... (performing initial scan)".to_string()
         };
 
         let mut app_state = AppState {
@@ -148,19 +151,28 @@ impl App {
             input_mode: InputMode::Normal,
             current_input: Input::default(),
             file_for_copy_move: None,
-            is_loading: if cli_args.progress { true } else { false }, // Control initial loading state display
+            is_loading: true, // Always start in loading state, scan will update
             loading_message: initial_status,
-            current_algorithm: cli_args.algorithm.clone(), // Initialize from Cli
-            current_parallel: cli_args.parallel,        // Initialize from Cli
+            current_algorithm: cli_args.algorithm.clone(),
+            current_parallel: cli_args.parallel,
             rescan_needed: false,
-            selected_setting_category_index: 0, // Default to strategy
+            selected_setting_category_index: 0, 
+            current_sort_criterion: cli_args.sort_by,   // Initialize from Cli
+            current_sort_order: cli_args.sort_order,    // Initialize from Cli
+            sort_settings_changed: false, 
         };
 
+        // Determine if initial scan is async or sync based on original cli.progress
+        let perform_async_scan = cli_args.progress; 
+
         let (tx, rx) = std_mpsc::channel::<ScanMessage>();
-        let scan_join_handle: Option<std_thread::JoinHandle<()>> = if cli_args.progress {
-            let mut current_cli_for_scan = cli_args.clone();
+        let scan_join_handle: Option<std_thread::JoinHandle<()>> = if perform_async_scan {
+            let mut current_cli_for_scan = cli_args.clone(); // Clone entire cli_args
+            // These are already set from cli_args, but ensure they are what scan thread uses
             current_cli_for_scan.algorithm = app_state.current_algorithm.clone();
             current_cli_for_scan.parallel = app_state.current_parallel;
+            current_cli_for_scan.sort_by = app_state.current_sort_criterion;
+            current_cli_for_scan.sort_order = app_state.current_sort_order;
 
             let thread_tx = tx.clone();
             let handle = std_thread::spawn(move || {
@@ -383,6 +395,7 @@ impl App {
             InputMode::CopyDestination => self.handle_copy_dest_input_key(key_event),
             InputMode::Settings => self.handle_settings_mode_key(key_event),
             InputMode::RegexInput => self.handle_regex_input_key(key_event),
+            InputMode::Help => self.handle_help_mode_key(key_event),
         }
         self.validate_selection_indices(); // Ensure selections are valid after any action
     }
@@ -414,6 +427,11 @@ impl App {
             self.state.input_mode = InputMode::Settings;
             self.state.status_message = Some("Entered settings mode. Esc to exit.".to_string());
             // TODO: Initialize settings focus, e.g., self.state.selected_setting_index = 0;
+            return;
+        }
+        if key_code == KeyCode::Char('h') && modifiers == KeyModifiers::NONE { // 'h' for Help
+            self.state.input_mode = InputMode::Help;
+            self.state.status_message = Some("Displaying Help. Esc to exit.".to_string());
             return;
         }
 
@@ -451,16 +469,22 @@ impl App {
             KeyCode::Esc => {
                 self.state.input_mode = InputMode::Normal;
                 if self.state.rescan_needed {
-                    self.state.status_message = Some("Exited settings. Ctrl+R to apply changes.".to_string());
-                } else {
-                    self.state.status_message = Some("Exited settings mode.".to_string());
+                    self.state.status_message = Some("Exited settings. Ctrl+R to apply algo/parallel changes.".to_string());
                 }
+                if self.state.sort_settings_changed {
+                    self.apply_sort_settings(); // Apply sort changes immediately on exiting settings
+                    self.state.status_message = Some(self.state.status_message.clone().map_or("".to_string(), |s| s + " ") + "Sort settings applied.");
+                } 
+                if !self.state.rescan_needed && !self.state.sort_settings_changed { // access sort_settings_changed *after* it might have been reset by apply_sort_settings
+                     self.state.status_message = Some("Exited settings mode.".to_string());
+                }
+                self.state.sort_settings_changed = false; // Reset flag after processing
             }
             KeyCode::Up => {
                 self.state.selected_setting_category_index = self.state.selected_setting_category_index.saturating_sub(1);
             }
             KeyCode::Down => {
-                self.state.selected_setting_category_index = (self.state.selected_setting_category_index + 1).min(2); // 3 categories (0,1,2)
+                self.state.selected_setting_category_index = (self.state.selected_setting_category_index + 1).min(4); // Max index is 4 now
             }
             // Strategy selection keys (n, o, s, l)
             KeyCode::Char('n') if self.state.selected_setting_category_index == 0 => { 
@@ -535,6 +559,43 @@ impl App {
                     self.state.rescan_needed = true;
                     self.state.status_message = Some("Parallel Cores: Auto (Rescan needed)".to_string());
                 }
+            }
+            // Sort Criterion Keys (f, z, c, m, p) - for FileName, FileSize, CreatedAt, ModifiedAt, PathLength
+            KeyCode::Char('f') if self.state.selected_setting_category_index == 3 => {
+                self.state.current_sort_criterion = SortCriterion::FileName;
+                self.state.sort_settings_changed = true;
+                self.state.status_message = Some("Sort By: File Name (apply on exit)".to_string());
+            }
+            KeyCode::Char('z') if self.state.selected_setting_category_index == 3 => { // z for siZe
+                self.state.current_sort_criterion = SortCriterion::FileSize;
+                self.state.sort_settings_changed = true;
+                self.state.status_message = Some("Sort By: File Size (apply on exit)".to_string());
+            }
+            KeyCode::Char('c') if self.state.selected_setting_category_index == 3 => {
+                self.state.current_sort_criterion = SortCriterion::CreatedAt;
+                self.state.sort_settings_changed = true;
+                self.state.status_message = Some("Sort By: Created Date (apply on exit)".to_string());
+            }
+            KeyCode::Char('m') if self.state.selected_setting_category_index == 3 => { // m for modified
+                self.state.current_sort_criterion = SortCriterion::ModifiedAt;
+                self.state.sort_settings_changed = true;
+                self.state.status_message = Some("Sort By: Modified Date (apply on exit)".to_string());
+            }
+            KeyCode::Char('p') if self.state.selected_setting_category_index == 3 => {
+                self.state.current_sort_criterion = SortCriterion::PathLength;
+                self.state.sort_settings_changed = true;
+                self.state.status_message = Some("Sort By: Path Length (apply on exit)".to_string());
+            }
+            // Sort Order Keys (a, d) - for Ascending, Descending
+            KeyCode::Char('a') if self.state.selected_setting_category_index == 4 => {
+                self.state.current_sort_order = SortOrder::Ascending;
+                self.state.sort_settings_changed = true;
+                self.state.status_message = Some("Sort Order: Ascending (apply on exit)".to_string());
+            }
+            KeyCode::Char('d') if self.state.selected_setting_category_index == 4 => {
+                self.state.current_sort_order = SortOrder::Descending;
+                self.state.sort_settings_changed = true;
+                self.state.status_message = Some("Sort Order: Descending (apply on exit)".to_string());
             }
             _ => {}
         }
@@ -656,7 +717,7 @@ impl App {
 
     fn set_selected_file_as_kept(&mut self) {
         let file_index_in_set = self.state.selected_file_index_in_set;
-        let mut status_update: Option<String> = None;
+        let mut _status_update: Option<String> = None;
         let mut jobs_to_add: Vec<Job> = Vec::new();
         let mut paths_in_set_to_update_jobs_for: Vec<PathBuf> = Vec::new();
         let mut file_to_keep_path_option: Option<PathBuf> = None;
@@ -664,7 +725,7 @@ impl App {
         if let Some(current_duplicate_set_ref) = self.current_selected_set_from_display_list() {
             if let Some(file_to_keep_cloned) = current_duplicate_set_ref.files.get(file_index_in_set).cloned() {
                 log::info!("User designated {:?} as to be KEPT.", file_to_keep_cloned.path);
-                status_update = Some(format!("Marked {} to be KEPT.", file_to_keep_cloned.path.file_name().unwrap_or_default().to_string_lossy()));
+                _status_update = Some(format!("Marked {} to be KEPT.", file_to_keep_cloned.path.file_name().unwrap_or_default().to_string_lossy()));
 
                 file_to_keep_path_option = Some(file_to_keep_cloned.path.clone());
                 jobs_to_add.push(Job { action: ActionType::Keep, file_info: file_to_keep_cloned.clone() });
@@ -684,18 +745,18 @@ impl App {
                     }
                 }
             } else {
-                status_update = Some("No file selected in set, or set is empty.".to_string());
+                _status_update = Some("No file selected in set, or set is empty.".to_string());
             }
         } else {
-            status_update = Some("No duplicate set selected (or a folder is selected).".to_string());
+            _status_update = Some("No duplicate set selected (or a folder is selected).".to_string());
         }
 
         // Now, perform mutations to self.state *after* borrows from current_selected_set_from_display_list are dropped
-        if let Some(msg) = status_update {
+        if let Some(msg) = _status_update {
             self.state.status_message = Some(msg);
         }
 
-        if let Some(kept_path) = file_to_keep_path_option {
+        if let Some(_kept_path) = file_to_keep_path_option.take() {
             // Remove all existing jobs for any file in this specific set first
             // This is important to handle re-marking a different file as kept, or changing mind.
             if !paths_in_set_to_update_jobs_for.is_empty() {
@@ -937,15 +998,41 @@ impl App {
         }
     }
 
-    fn handle_regex_input_key(&mut self, key_event: KeyEvent) {
+    fn handle_regex_input_key(&mut self, _key_event: KeyEvent) {
         // Implementation of handle_regex_input_key method
         // This method is not provided in the original file or the new code block
         // It's assumed to exist as it's called in the on_key method
     }
 
+    fn handle_help_mode_key(&mut self, key_event: KeyEvent) {
+        match key_event.code {
+            KeyCode::Esc => {
+                self.state.input_mode = InputMode::Normal;
+                self.state.status_message = Some("Exited help screen.".to_string());
+            }
+            _ => {} // Other keys do nothing in help mode
+        }
+    }
+
     fn rebuild_display_list(&mut self) {
         self.state.display_list = App::build_display_list_from_grouped_data(&self.state.grouped_data);
         self.validate_selection_indices(); // Ensure selection is still valid
+    }
+
+    fn apply_sort_settings(&mut self) {
+        log::info!("Applying sort settings: {:?} {:?}", self.state.current_sort_criterion, self.state.current_sort_order);
+        for group in &mut self.state.grouped_data {
+            for set in &mut group.sets {
+                // Use the utility from file_utils, assuming it's public or in the same module 
+                // If not, we might need to replicate or expose it.
+                // For now, assuming file_utils::sort_file_infos is accessible.
+                // It needs to be `pub(crate)` or public in `file_utils`.
+                file_utils::sort_file_infos(&mut set.files, self.state.current_sort_criterion, self.state.current_sort_order);
+            }
+        }
+        self.rebuild_display_list(); // This will also validate selections
+        self.state.sort_settings_changed = false; // Reset flag
+        self.state.status_message = Some("Sort settings applied to current view.".to_string());
     }
 }
 
@@ -1079,11 +1166,15 @@ fn ui(frame: &mut Frame, app: &mut App) {
         let mut strategy_style = Style::default();
         let mut algo_style = Style::default();
         let mut parallel_style = Style::default();
+        let mut sort_criterion_style = Style::default();
+        let mut sort_order_style = Style::default();
 
         match app.state.selected_setting_category_index {
             0 => strategy_style = strategy_style.fg(Color::Yellow).add_modifier(Modifier::BOLD),
             1 => algo_style = algo_style.fg(Color::Yellow).add_modifier(Modifier::BOLD),
             2 => parallel_style = parallel_style.fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            3 => sort_criterion_style = sort_criterion_style.fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            4 => sort_order_style = sort_order_style.fg(Color::Yellow).add_modifier(Modifier::BOLD),
             _ => {}
         }
 
@@ -1100,22 +1191,101 @@ fn ui(frame: &mut Frame, app: &mut App) {
                     |c| c.to_string()
                 )
             ), parallel_style)),
-            Line::from(Span::styled(format!("   (0 for auto, 1-N for specific count. Use +/- or numbers)"), parallel_style)),
+            Line::from(Span::styled(format!("   (0 for auto, 1-N, +/-, requires rescan)"), parallel_style)),
             Line::from(Span::raw("")),
-            Line::from(Span::raw(if app.state.rescan_needed {
-                "[!] Settings changed. Press Ctrl+R to rescan for changes to take effect."
+            Line::from(Span::styled(format!("4. Sort Files By: {:?}", app.state.current_sort_criterion), sort_criterion_style)),
+            Line::from(Span::styled(format!("   (f:name, z:size, c:created, m:modified, p:path length)"), sort_criterion_style)),
+            Line::from(Span::raw("")),
+            Line::from(Span::styled(format!("5. Sort Order: {:?}", app.state.current_sort_order), sort_order_style)),
+            Line::from(Span::styled(format!("   (a:ascending, d:descending)"), sort_order_style)),
+            Line::from(Span::raw("")),
+            Line::from(Span::raw(if app.state.rescan_needed && app.state.sort_settings_changed {
+                "[!] Algorithm/Parallelism and Sort settings changed. Ctrl+R to rescan, Sort applied on Esc."
+            } else if app.state.rescan_needed {
+                "[!] Algorithm/Parallelism settings changed. Press Ctrl+R to rescan."
+            } else if app.state.sort_settings_changed {
+                "[!] Sort settings changed. Applied on exiting settings (Esc)."
             } else {
                 "No pending setting changes."
             })),
         ];
         let settings_paragraph = Paragraph::new(settings_text)
             .block(Block::default().borders(Borders::ALL).title("Options"))
-            .wrap({ Wrap { trim: true } });
+            .wrap(Wrap { trim: true });
         frame.render_widget(settings_paragraph, chunks[1]);
 
         let hint = Paragraph::new("Esc: Exit Settings | Use indicated keys to change values.")
             .alignment(Alignment::Center);
         frame.render_widget(hint, chunks[2]);
+
+    } else if app.state.input_mode == InputMode::Help {
+        let help_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .margin(1)
+            .constraints([
+                Constraint::Length(3), // Title
+                Constraint::Min(0),   // Content
+                Constraint::Length(1), // Footer
+            ])
+            .split(frame.size());
+
+        let title = Paragraph::new("--- Dedup TUI Help ---")
+            .alignment(Alignment::Center)
+            .block(Block::default().borders(Borders::ALL).title("Help Screen"));
+        frame.render_widget(title, help_chunks[0]);
+
+        let help_text_lines = vec![
+            Line::from(Span::styled("General Navigation:", Style::default().add_modifier(Modifier::BOLD))),
+            Line::from("  q          : Quit application"),
+            Line::from("  Tab        : Cycle focus between Panels (Sets/Folders -> Files -> Jobs)"),
+            Line::from("  h          : Show this Help screen (Esc to close)"),
+            Line::from("  Ctrl+R     : Trigger a rescan with current settings"),
+            Line::from("  Ctrl+S     : Open Settings menu (Esc to close)"),
+            Line::from("  Ctrl+E     : Execute all pending jobs"),
+            Line::from(""),
+            Line::from(Span::styled("Sets/Folders Panel (Left):", Style::default().add_modifier(Modifier::BOLD))),
+            Line::from("  Up/k       : Select previous folder/set"),
+            Line::from("  Down/j     : Select next folder/set"),
+            Line::from("  Enter/l    : Focus Files panel for selected set / Expand/Collapse folder (TODO)"),
+            Line::from("  d          : Mark all but one file (per strategy) in selected set for deletion"),
+            // Line::from("  Ctrl+A : Select all files in all sets for action (TODO)"),
+            // Line::from("  /        : Filter sets by regex (TODO)"),
+            Line::from(""),
+            Line::from(Span::styled("Files Panel (Middle):", Style::default().add_modifier(Modifier::BOLD))),
+            Line::from("  Up/k       : Select previous file in set"),
+            Line::from("  Down/j     : Select next file in set"),
+            Line::from("  Left/h     : Focus Sets/Folders panel"),
+            Line::from("  s          : Mark selected file to be KEPT (others in set marked for DELETE)"),
+            Line::from("  d          : Mark selected file for DELETE"),
+            Line::from("  c          : Mark selected file for COPY (prompts for destination)"),
+            Line::from("  i          : Mark selected file to be IGNORED (won't be deleted/moved/copied)"),
+            Line::from(""),
+            Line::from(Span::styled("Jobs Panel (Right):", Style::default().add_modifier(Modifier::BOLD))),
+            Line::from("  Up/k       : Select previous job"),
+            Line::from("  Down/j     : Select next job"),
+            Line::from("  x/Del/Bsp  : Remove selected job"),
+            Line::from(""),
+            Line::from(Span::styled("Settings Menu (Ctrl+S to access):", Style::default().add_modifier(Modifier::BOLD))),
+            Line::from("  Up/Down    : Navigate setting categories"),
+            Line::from("  Strategy   : n (Newest), o (Oldest), s (Shortest Path), l (Longest Path)"),
+            Line::from("  Algorithm  : m (md5), a (sha256), b (blake3) - requires rescan"),
+            Line::from("  Parallelism: 0 (Auto), 1-9, + (Increment), - (Decrement) - requires rescan"),
+            Line::from("  Sorting    : (TODO: Sort By, Sort Order)"),
+            Line::from("  Esc        : Exit settings menu"),
+            Line::from(""),
+            Line::from(Span::styled("Input Prompts (e.g., Copy Destination):", Style::default().add_modifier(Modifier::BOLD))),
+            Line::from("  Enter      : Confirm input"),
+            Line::from("  Esc        : Cancel input"),
+        ];
+
+        let help_paragraph = Paragraph::new(help_text_lines)
+            .block(Block::default().borders(Borders::ALL).title("Keybindings"))
+            .wrap(Wrap { trim: true });
+        frame.render_widget(help_paragraph, help_chunks[1]);
+
+        let footer = Paragraph::new("Press 'Esc' to close Help.")
+            .alignment(Alignment::Center);
+        frame.render_widget(footer, help_chunks[2]);
 
     } else {
         // Main UI (3 panels + status bar)
@@ -1292,6 +1462,10 @@ fn ui(frame: &mut Frame, app: &mut App) {
                 // Implementation of handle_regex_input_key method
                 // This method is not provided in the original file or the new code block
                 // It's assumed to exist as it's called in the on_key method
+            }
+            InputMode::Help => {
+                // The Help mode has its own full-screen UI, so no specific status bar here.
+                // The hints are part of the help_paragraph and footer Paragraph already rendered.
             }
         }
     }

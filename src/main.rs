@@ -10,66 +10,78 @@ use humansize::{format_size, DECIMAL};
 
 #[derive(Parser, Debug, Clone)]
 #[clap(author, version, about, long_about = None)]
-struct Cli {
+pub struct Cli {
     /// The directory to scan for duplicate files.
     #[clap(required_unless_present = "interactive", default_value = ".")]
-    directory: PathBuf,
+    pub directory: PathBuf,
 
     /// Automatically delete duplicate files.
-    #[clap(short, long)]
-    delete: bool,
+    #[clap(short, long, help = "Delete duplicate files automatically based on selection strategy")]
+    pub delete: bool,
 
     /// Move duplicate files to the specified folder.
-    #[clap(short = 'M', long = "move-to")] // Changed short to 'M' to avoid conflict
-    move_to: Option<PathBuf>,
+    #[clap(short = 'M', long, help = "Move duplicate files to a specified directory")]
+    pub move_to: Option<PathBuf>,
 
     /// Write a log file to the specified path.
-    #[clap(short, long)]
-    log: Option<PathBuf>,
+    #[clap(short, long, help = "Log actions and errors to a file (dedup.log)")]
+    pub log: bool,
 
     /// Write a file containing duplicate information.
-    #[clap(short, long, default_value = "duplicates.json")]
-    output: PathBuf,
+    #[clap(short, long, help = "Output duplicate sets to a file (e.g., duplicates.json)")]
+    pub output: Option<PathBuf>,
 
     /// Output format for the duplicates file.
-    #[clap(short, long, value_parser = ["json", "toml"], default_value = "json")]
-    format: String,
+    #[clap(short, long, value_parser = clap::builder::PossibleValuesParser::new(["json", "toml"]), default_value = "json", help = "Format for the output file [json|toml]")]
+    pub format: String,
 
     /// Hashing algorithm to use for comparing files.
-    #[clap(short, long, value_parser = ["md5", "sha256", "blake3"], default_value = "blake3")]
-    algorithm: String,
+    #[clap(short, long, value_parser = clap::builder::PossibleValuesParser::new(["md5", "sha256", "blake3"]), default_value = "blake3", help = "Hashing algorithm [md5|sha256|blake3]")]
+    pub algorithm: String,
 
     /// Number of parallel threads to use for hashing. Defaults to auto-detected number of cores.
-    #[clap(short, long)]
-    parallel: Option<usize>,
+    #[clap(short, long, help = "Number of parallel threads for hashing (default: auto)")]
+    pub parallel: Option<usize>,
 
     /// Mode for selecting which file to keep/delete in non-interactive mode.
-    #[clap(long, value_parser = ["shortest_path", "longest_path", "newest_modified", "oldest_modified"], default_value = "newest_modified")]
-    mode: String,
+    #[clap(long, default_value = "newest", help = "Selection strategy for delete/move [newest|oldest|shortest|longest]")]
+    pub mode: String,
 
     /// Fire up interactive TUI mode.
-    #[clap(short, long)]
-    interactive: bool,
+    #[clap(short, long, help = "Run in interactive TUI mode")]
+    pub interactive: bool,
 
     /// Verbosity level.
-    #[clap(short, long, action = clap::ArgAction::Count)]
-    verbose: u8,
+    #[clap(short, long, action = clap::ArgAction::Count, help = "Verbosity level (-v, -vv, -vvv)")]
+    pub verbose: u8,
 
     /// Include files matching the given glob pattern. Can be specified multiple times.
-    #[clap(long)]
-    include: Option<Vec<String>>,
+    #[clap(long, help = "Include specific file patterns (glob)")]
+    pub include: Vec<String>,
 
     /// Exclude files matching the given glob pattern. Can be specified multiple times.
-    #[clap(long)]
-    exclude: Option<Vec<String>>,
+    #[clap(long, help = "Exclude specific file patterns (glob)")]
+    pub exclude: Vec<String>,
 
     /// Read filter rules from a file (similar to rclone filter files).
-    #[clap(long)]
-    filter_from: Option<PathBuf>,
+    #[clap(long, help = "Load filter rules from a file (one pattern per line, # for comments)")]
+    pub filter_from: Option<PathBuf>,
 
     /// Show progress information during scanning/hashing.
-    #[clap(long)]
-    progress: bool,
+    #[clap(long, help = "Show progress bar for CLI scan (TUI has its own progress display)")]
+    pub progress: bool,
+
+    #[clap(long, help = "Show progress during TUI scan (enabled by default for TUI mode)")]
+    pub progress_tui: bool,
+
+    #[clap(short, long, action = clap::ArgAction::Count, help = "Verbosity level (-v, -vv, -vvv)")]
+    pub verbose_tui: u8,
+
+    #[clap(long, value_parser = crate::file_utils::SortCriterion::from_str, default_value = "modifiedat", help = "Sort files by criterion [name|size|created|modified|path]")]
+    pub sort_by: crate::file_utils::SortCriterion,
+
+    #[clap(long, value_parser = crate::file_utils::SortOrder::from_str, default_value = "descending", help = "Sort order [asc|desc]")]
+    pub sort_order: crate::file_utils::SortOrder,
 }
 
 fn setup_logger(verbosity: u8, log_file: Option<&PathBuf>) -> Result<()> {
@@ -108,7 +120,7 @@ fn setup_logger(verbosity: u8, log_file: Option<&PathBuf>) -> Result<()> {
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    setup_logger(cli.verbose, cli.log.as_ref())?;
+    setup_logger(cli.verbose, cli.log.then_some(&PathBuf::from("dedup.log")))?;
 
     log::info!("Logger initialized. Application starting.");
     log::debug!("CLI args: {:#?}", cli);
@@ -149,14 +161,14 @@ fn main() -> Result<()> {
                     // The default output file is "duplicates.json". We should write to it unless the user changes it.
                     // Or, perhaps, only write if the user *explicitly* sets -o or if it's not the default and implicit?
                     // For now, let's assume we always write to cli.output if duplicates are found.
-                    if !cli.output.as_os_str().is_empty() { // Check if output path is provided
-                        match file_utils::output_duplicates(&duplicate_sets, &cli.output, &cli.format) {
+                    if let Some(output_path) = &cli.output {
+                        match file_utils::output_duplicates(&duplicate_sets, output_path, &cli.format) {
                             Ok(_) => {
-                                log::info!("Successfully wrote duplicate list to {:?}", cli.output);
-                                println!("Duplicate list saved to {:?}", cli.output);
+                                log::info!("Successfully wrote duplicate list to {:?}", output_path);
+                                println!("Duplicate list saved to {:?}", output_path);
                             }
                             Err(e) => {
-                                log::error!("Failed to write duplicate list to {:?}: {}", cli.output, e);
+                                log::error!("Failed to write duplicate list to {:?}: {}", output_path, e);
                                 eprintln!("Failed to write output file: {}", e);
                             }
                         }
@@ -180,12 +192,12 @@ fn main() -> Result<()> {
 
                                     if cli.delete {
                                         // Note: No dry_run flag from CLI yet, so actions are real.
-                                        match file_utils::delete_files(&files_to_action, false) {
+                                        match file_utils::delete_files(&files_to_action, cli.progress) {
                                             Ok(count) => total_deleted += count,
                                             Err(e) => log::error!("Error during deletion batch: {}", e),
                                         }
                                     } else if let Some(ref target_move_dir) = cli.move_to {
-                                        match file_utils::move_files(&files_to_action, target_move_dir, false) {
+                                        match file_utils::move_files(&files_to_action, target_move_dir, cli.progress) {
                                             Ok(count) => total_moved += count,
                                             Err(e) => log::error!("Error during move batch: {}", e),
                                         }

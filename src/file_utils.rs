@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use anyhow::Result;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -14,12 +15,52 @@ use crate::Cli;
 use crate::tui_app::ScanMessage;
 use std::sync::mpsc::Sender as StdMpscSender;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortCriterion {
+    FileName,
+    FileSize,
+    CreatedAt,
+    ModifiedAt,
+    PathLength,
+}
+
+impl SortCriterion {
+    pub fn from_str(s: &str) -> Result<Self> {
+        match s.to_lowercase().as_str() {
+            "name" => Ok(Self::FileName),
+            "size" => Ok(Self::FileSize),
+            "created" => Ok(Self::CreatedAt),
+            "modified" | "modifiedat" => Ok(Self::ModifiedAt),
+            "path" => Ok(Self::PathLength),
+            _ => Err(anyhow::anyhow!("Invalid sort criterion: {}", s)),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortOrder {
+    Ascending,
+    Descending,
+}
+
+impl SortOrder {
+    pub fn from_str(s: &str) -> Result<Self> {
+        match s.to_lowercase().as_str() {
+            "asc" | "ascending" => Ok(Self::Ascending),
+            "desc" | "descending" => Ok(Self::Descending),
+            _ => Err(anyhow::anyhow!("Invalid sort order: {}", s)),
+        }
+    }
+}
+
 // Represents information about a single file, including its hash if calculated.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct FileInfo {
     pub path: PathBuf,
     pub size: u64,
     pub hash: Option<String>,
+    pub modified_at: Option<SystemTime>,
+    pub created_at: Option<SystemTime>,
 }
 
 // Represents a set of duplicate files (same size, same hash).
@@ -71,17 +112,13 @@ impl FilterRules {
         }
 
         // Process --include flags
-        if let Some(includes) = &cli.include {
-            for pattern_str in includes {
-                rules.add_include(pattern_str)?;
-            }
+        for pattern_str in &cli.include {
+            rules.add_include(pattern_str)?;
         }
 
         // Process --exclude flags
-        if let Some(excludes) = &cli.exclude {
-            for pattern_str in excludes {
-                rules.add_exclude(pattern_str)?;
-            }
+        for pattern_str in &cli.exclude {
+            rules.add_exclude(pattern_str)?;
         }
         
         if !rules.includes.is_empty() {
@@ -243,7 +280,20 @@ pub fn find_duplicate_files_with_progress(
             for path in paths {
                 match calculate_hash(&path, &cli.algorithm) {
                     Ok(hash_str) => {
-                        let file_info = FileInfo { path: path.clone(), size, hash: Some(hash_str.clone()) };
+                        let metadata = match fs::metadata(&path) {
+                            Ok(m) => m,
+                            Err(e) => {
+                                log::warn!("Failed to get metadata for {:?}: {}", path, e);
+                                continue;
+                            }
+                        };
+                        let file_info = FileInfo { 
+                            path: path.clone(), 
+                            size, 
+                            hash: Some(hash_str.clone()),
+                            modified_at: metadata.modified().ok(),
+                            created_at: metadata.created().ok(),
+                        };
                         hashes_in_group.entry(hash_str).or_default().push(file_info);
                     }
                     Err(e) => {
@@ -388,7 +438,20 @@ pub fn find_duplicate_files(
             for path in paths {
                 match calculate_hash(&path, &cli.algorithm) {
                     Ok(hash_str) => {
-                        let file_info = FileInfo { path: path.clone(), size, hash: Some(hash_str.clone()) };
+                        let metadata = match fs::metadata(&path) {
+                            Ok(m) => m,
+                            Err(e) => {
+                                log::warn!("Failed to get metadata for {:?}: {}", path, e);
+                                continue;
+                            }
+                        };
+                        let file_info = FileInfo { 
+                            path: path.clone(), 
+                            size, 
+                            hash: Some(hash_str.clone()),
+                            modified_at: metadata.modified().ok(),
+                            created_at: metadata.created().ok(),
+                        };
                         hashes_in_group.entry(hash_str).or_default().push(file_info);
                     }
                     Err(e) => {
@@ -511,7 +574,7 @@ pub enum SelectionStrategy {
 
 impl SelectionStrategy {
     pub fn from_str(s: &str) -> Result<Self> {
-        match s {
+        match s.to_lowercase().as_str() {
             "shortest_path" => Ok(Self::ShortestPath),
             "longest_path" => Ok(Self::LongestPath),
             "newest_modified" => Ok(Self::NewestModified),
@@ -653,6 +716,23 @@ pub fn move_files(files_to_move: &[FileInfo], target_dir: &Path, dry_run: bool) 
         }
     }
     Ok(count)
+}
+
+// Helper function to sort a Vec<FileInfo>
+pub(crate) fn sort_file_infos(files: &mut Vec<FileInfo>, criterion: SortCriterion, order: SortOrder) {
+    files.sort_by(|a, b| {
+        let mut comparison = match criterion {
+            SortCriterion::FileName => a.path.file_name().cmp(&b.path.file_name()),
+            SortCriterion::FileSize => a.size.cmp(&b.size),
+            SortCriterion::CreatedAt => a.created_at.cmp(&b.created_at), // Assumes created_at is Option<SystemTime>
+            SortCriterion::ModifiedAt => a.modified_at.cmp(&b.modified_at), // Assumes modified_at is Option<SystemTime>
+            SortCriterion::PathLength => a.path.as_os_str().len().cmp(&b.path.as_os_str().len()),
+        };
+        if order == SortOrder::Descending {
+            comparison = comparison.reverse();
+        }
+        comparison
+    });
 }
 
 // TODO: Implement action functions (delete, move)
