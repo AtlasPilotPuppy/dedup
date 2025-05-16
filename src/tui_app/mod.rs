@@ -117,9 +117,17 @@ impl App {
             let handle = std_thread::spawn(move || {
                 // This is the background thread
                 log::info!("[ScanThread] Starting duplicate scan...");
-                let result = file_utils::find_duplicate_files_with_progress(&cli_clone, tx.clone());
-                if tx.send(ScanMessage::Completed(result)).is_err() {
-                    log::error!("[ScanThread] Failed to send completion message to TUI.");
+                match file_utils::find_duplicate_files_with_progress(&cli_clone, tx.clone()) {
+                    Ok(result) => {
+                        if tx.send(ScanMessage::Completed(Ok(result))).is_err() {
+                            log::error!("[ScanThread] Failed to send completion message to TUI.");
+                        }
+                    }
+                    Err(e) => {
+                        if tx.send(ScanMessage::Error(e.to_string())).is_err() {
+                            log::error!("[ScanThread] Failed to send error message to TUI.");
+                        }
+                    }
                 }
                 log::info!("[ScanThread] Scan finished.");
             });
@@ -186,9 +194,6 @@ impl App {
                             }
                         }
                         self.validate_selection_indices(); // Important after loading data
-                        // Once completed, we might not need the channel anymore
-                        // self.scan_rx = None; // Or keep it if re-scan is possible
-                        // self.scan_thread_join_handle.take().map(|h| h.join()); // Optionally join
                         break; // Process one completion, then redraw
                     }
                     ScanMessage::Error(err_msg) => {
@@ -196,7 +201,7 @@ impl App {
                         self.state.loading_message = format!("Scan Error: {}", err_msg);
                         self.state.status_message = Some(format!("Scan failed: {}", err_msg));
                         log::error!("Scan thread reported an error message: {}", err_msg);
-                         break;
+                        break;
                     }
                 }
             }
@@ -393,7 +398,6 @@ impl App {
     }
 
     fn set_selected_file_as_kept(&mut self) {
-        let mut new_status_message = None;
         let set_index = self.state.selected_set_index;
         let file_index_in_set = self.state.selected_file_index_in_set;
 
@@ -401,7 +405,7 @@ impl App {
                                     .and_then(|s| s.files.get(file_index_in_set).cloned()) {
             
             log::info!("User designated {:?} as to be KEPT.", file_to_keep.path);
-            new_status_message = Some(format!("Marked {} to be KEPT.", file_to_keep.path.file_name().unwrap_or_default().to_string_lossy()));
+            self.state.status_message = Some(format!("Marked {} to be KEPT.", file_to_keep.path.file_name().unwrap_or_default().to_string_lossy()));
 
             // Set selected file to Keep
             self.state.jobs.retain(|job| job.file_info.path != file_to_keep.path); 
@@ -422,9 +426,8 @@ impl App {
                 }
             }
         } else {
-            new_status_message = Some("No file/set selected or available to keep.".to_string());
+            self.state.status_message = Some("No file/set selected or available to keep.".to_string());
         }
-        self.state.status_message = new_status_message; 
     }
     
     fn validate_selection_indices(&mut self) {
