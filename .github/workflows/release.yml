@@ -44,6 +44,8 @@ jobs:
           target
         key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
     
+    - name: Set RUSTFLAGS for gxhash
+      run: echo "RUSTFLAGS=-C target-cpu=native" >> $GITHUB_ENV
     - name: Build
       run: cargo build --release --target ${{ matrix.target }}
     
