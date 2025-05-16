@@ -124,8 +124,7 @@ fn main() -> Result<()> {
 
     if cli.interactive {
         log::info!("Interactive mode selected for directory: {:?}", cli.directory);
-        println!("Interactive mode is not yet implemented. Please run without the -i flag for now.");
-        // TODO: Start TUI
+        tui_app::run_tui_app(&cli)?
     } else {
         log::info!("Non-interactive mode selected for directory: {:?}", cli.directory);
         match file_utils::find_duplicate_files(&cli) {

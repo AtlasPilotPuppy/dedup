@@ -220,7 +220,9 @@ impl App {
 
         // Ctrl+E to Execute jobs
         if key_code == KeyCode::Char('e') && modifiers == KeyModifiers::CONTROL {
-            self.process_pending_jobs();
+            if let Err(e) = self.process_pending_jobs() {
+                self.state.status_message = Some(format!("Error processing jobs: {}", e));
+            }
             return;
         }
 
@@ -244,7 +246,9 @@ impl App {
             return;
         }
         if key_code == KeyCode::Char('e') && modifiers == KeyModifiers::CONTROL {
-            self.process_pending_jobs();
+            if let Err(e) = self.process_pending_jobs() {
+                self.state.status_message = Some(format!("Error processing jobs: {}", e));
+            }
             return;
         }
 
