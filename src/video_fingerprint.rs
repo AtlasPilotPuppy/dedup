@@ -102,6 +102,7 @@ fn extract_keyframes(path: &Path) -> Result<Vec<DynamicImage>> {
     Ok(keyframes)
 }
 
+#[allow(clippy::type_complexity)]
 /// Extract video metadata using ffmpeg
 pub fn extract_video_metadata(
     path: &Path,

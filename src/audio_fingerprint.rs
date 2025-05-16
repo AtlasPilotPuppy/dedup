@@ -5,7 +5,6 @@ use base64::Engine;
 
 /// Simple audio fingerprinting module using chromaprint/fpcalc if available
 /// or ffmpeg's ebur128 filter as a fallback
-
 /// Generate an audio fingerprint from a file
 pub fn fingerprint_file(path: &Path) -> Result<Vec<u8>> {
     // First try with chromaprint/fpcalc if available

@@ -8,6 +8,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use walkdir::WalkDir;
+use std::str::FromStr;
 
 use crate::tui_app::ScanMessage;
 use crate::Cli;
@@ -22,14 +23,15 @@ pub enum SortCriterion {
     PathLength,
 }
 
-impl SortCriterion {
-    pub fn from_str(s: &str) -> Result<Self> {
+impl FromStr for SortCriterion {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "name" => Ok(Self::FileName),
             "size" => Ok(Self::FileSize),
-            "created" => Ok(Self::CreatedAt),
-            "modified" | "modifiedat" => Ok(Self::ModifiedAt),
-            "path" => Ok(Self::PathLength),
+            "created" | "created_at" => Ok(Self::CreatedAt),
+            "modified" | "modified_at" => Ok(Self::ModifiedAt),
+            "path_length" => Ok(Self::PathLength),
             _ => Err(anyhow::anyhow!("Invalid sort criterion: {}", s)),
         }
     }
@@ -54,8 +56,9 @@ pub enum SortOrder {
     Descending,
 }
 
-impl SortOrder {
-    pub fn from_str(s: &str) -> Result<Self> {
+impl FromStr for SortOrder {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "asc" | "ascending" => Ok(Self::Ascending),
             "desc" | "descending" => Ok(Self::Descending),
@@ -375,7 +378,7 @@ pub fn find_duplicate_files_with_progress(
     let mut last_update_time = std::time::Instant::now();
     let update_interval = std::time::Duration::from_millis(400); // Less frequent updates (400ms)
 
-    for entry_result in walker.filter_entry(|e| {
+    for entry in walker.filter_entry(|e| {
         if is_hidden(e) || is_symlink(e) {
             return false;
         }
@@ -388,64 +391,59 @@ pub fn find_duplicate_files_with_progress(
             );
             false
         }
-    }) {
-        match entry_result {
-            Ok(entry) => {
-                if entry.file_type().is_file() {
-                    let path = entry.path().to_path_buf();
-                    files_scanned_count += 1;
+    }).flatten() {
+        if entry.file_type().is_file() {
+            let path = entry.path().to_path_buf();
+            files_scanned_count += 1;
 
-                    // Determine update frequency based on file count
-                    let should_update = if files_scanned_count < 100 {
-                        files_scanned_count % 10 == 0
-                    } else if files_scanned_count < 500 {
-                        files_scanned_count % 20 == 0
-                    } else if files_scanned_count < 1000 {
-                        files_scanned_count % 50 == 0
-                    } else if files_scanned_count < 5000 {
-                        files_scanned_count % 100 == 0
-                    } else if files_scanned_count < 10000 {
-                        files_scanned_count % 200 == 0
-                    } else if files_scanned_count < 50000 {
-                        files_scanned_count % 500 == 0
-                    } else {
-                        files_scanned_count % 1000 == 0
-                    };
+            // Determine update frequency based on file count
+            let should_update = if files_scanned_count < 100 {
+                files_scanned_count % 10 == 0
+            } else if files_scanned_count < 500 {
+                files_scanned_count % 20 == 0
+            } else if files_scanned_count < 1000 {
+                files_scanned_count % 50 == 0
+            } else if files_scanned_count < 5000 {
+                files_scanned_count % 100 == 0
+            } else if files_scanned_count < 10000 {
+                files_scanned_count % 200 == 0
+            } else if files_scanned_count < 50000 {
+                files_scanned_count % 500 == 0
+            } else {
+                files_scanned_count % 1000 == 0
+            };
 
-                    if should_update || last_update_time.elapsed() >= update_interval {
-                        last_update_time = std::time::Instant::now();
-                        // Show progress percentage if total is known
-                        if total_files > 0 {
-                            let percent = (files_scanned_count as f64 / total_files as f64) * 100.0;
-                            send_status(
-                                1,
-                                format!(
-                                    "Stage 1/3: 📁 Scanning files: {}/{} ({:.1}%)",
-                                    files_scanned_count, total_files, percent
-                                ),
-                            );
-                        } else {
-                            // Remove file name from status update to reduce repaints
-                            send_status(
-                                1,
-                                format!("Stage 1/3: 📁 Found {} files...", files_scanned_count),
-                            );
-                        }
-                    }
-
-                    match fs::metadata(&path) {
-                        Ok(metadata) => {
-                            if metadata.len() > 0 {
-                                files_by_size.entry(metadata.len()).or_default().push(path);
-                            }
-                        }
-                        Err(e) => {
-                            log::warn!("[ScanThread] Failed to get metadata for {:?}: {}", path, e)
-                        }
-                    }
+            if should_update || last_update_time.elapsed() >= update_interval {
+                last_update_time = std::time::Instant::now();
+                // Show progress percentage if total is known
+                if total_files > 0 {
+                    let percent = (files_scanned_count as f64 / total_files as f64) * 100.0;
+                    send_status(
+                        1,
+                        format!(
+                            "Stage 1/3: 📁 Scanning files: {}/{} ({:.1}%)",
+                            files_scanned_count, total_files, percent
+                        ),
+                    );
+                } else {
+                    // Remove file name from status update to reduce repaints
+                    send_status(
+                        1,
+                        format!("Stage 1/3: 📁 Found {} files...", files_scanned_count),
+                    );
                 }
             }
-            Err(e) => log::warn!("[ScanThread] Error walking directory: {}", e),
+
+            match fs::metadata(&path) {
+                Ok(metadata) => {
+                    if metadata.len() > 0 {
+                        files_by_size.entry(metadata.len()).or_default().push(path);
+                    }
+                }
+                Err(e) => {
+                    log::warn!("[ScanThread] Failed to get metadata for {:?}: {}", path, e)
+                }
+            }
         }
     }
 
@@ -785,7 +783,7 @@ fn find_similar_media_files_with_progress(
     let mut file_infos = Vec::new();
     let walker = WalkDir::new(&cli.directories[0]).into_iter();
 
-    for entry_result in walker.filter_entry(|e| {
+    for entry in walker.filter_entry(|e| {
         if is_hidden(e) || is_symlink(e) {
             return false;
         }
@@ -798,33 +796,28 @@ fn find_similar_media_files_with_progress(
             );
             false
         }
-    }) {
-        match entry_result {
-            Ok(entry) => {
-                if entry.file_type().is_file() {
-                    let path = entry.path().to_path_buf();
+    }).flatten() {
+        if entry.file_type().is_file() {
+            let path = entry.path().to_path_buf();
 
-                    match fs::metadata(&path) {
-                        Ok(metadata) => {
-                            if metadata.len() > 0 {
-                                let file_info = FileInfo {
-                                    path: path.clone(),
-                                    size: metadata.len(),
-                                    hash: None, // We don't need hash for media comparison
-                                    modified_at: metadata.modified().ok(),
-                                    created_at: metadata.created().ok(),
-                                };
+            match fs::metadata(&path) {
+                Ok(metadata) => {
+                    if metadata.len() > 0 {
+                        let file_info = FileInfo {
+                            path: path.clone(),
+                            size: metadata.len(),
+                            hash: None, // We don't need hash for media comparison
+                            modified_at: metadata.modified().ok(),
+                            created_at: metadata.created().ok(),
+                        };
 
-                                file_infos.push(file_info);
-                            }
-                        }
-                        Err(e) => {
-                            log::warn!("[ScanThread] Failed to get metadata for {:?}: {}", path, e)
-                        }
+                        file_infos.push(file_info);
                     }
                 }
+                Err(e) => {
+                    log::warn!("[ScanThread] Failed to get metadata for {:?}: {}", path, e)
+                }
             }
-            Err(e) => log::warn!("[ScanThread] Error walking directory: {}", e),
         }
     }
 
@@ -988,8 +981,9 @@ pub enum SelectionStrategy {
     OldestModified,
 }
 
-impl SelectionStrategy {
-    pub fn from_str(s: &str) -> Result<Self> {
+impl FromStr for SelectionStrategy {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "shortest_path" => Ok(Self::ShortestPath),
             "longest_path" => Ok(Self::LongestPath),
@@ -1203,7 +1197,7 @@ pub fn move_files(
 
 // Helper function to sort a Vec<FileInfo>
 pub(crate) fn sort_file_infos(
-    files: &mut Vec<FileInfo>,
+    files: &mut [FileInfo],
     criterion: SortCriterion,
     order: SortOrder,
 ) {
@@ -1408,51 +1402,45 @@ fn scan_directory(cli: &Cli, directory: &Path) -> Result<Vec<FileInfo>> {
     let mut files = Vec::new();
     let walker = WalkDir::new(directory).into_iter();
 
-    for entry_result in walker.filter_entry(|e| {
+    for entry in walker.filter_entry(|e| {
         if is_hidden(e) || is_symlink(e) {
             return false;
         }
         if let Some(path_str) = e.path().to_str() {
             filter_rules.is_match(path_str)
         } else {
-            log::warn!("Path {:?} is not valid UTF-8, excluding.", e.path());
             false
         }
-    }) {
-        match entry_result {
-            Ok(entry) => {
-                if entry.file_type().is_file() {
-                    let path = entry.path().to_path_buf();
-                    match fs::metadata(&path) {
-                        Ok(metadata) => {
-                            if metadata.len() > 0 {
-                                let size = metadata.len();
+    }).flatten() {
+        if entry.file_type().is_file() {
+            let path = entry.path().to_path_buf();
+            match fs::metadata(&path) {
+                Ok(metadata) => {
+                    if metadata.len() > 0 {
+                        let size = metadata.len();
 
-                                // Calculate hash
-                                let hash = match calculate_hash(&path, &cli.algorithm) {
-                                    Ok(h) => Some(h),
-                                    Err(e) => {
-                                        log::warn!("Failed to hash file {:?}: {}", path, e);
-                                        None
-                                    }
-                                };
-
-                                let file_info = FileInfo {
-                                    path,
-                                    size,
-                                    hash,
-                                    modified_at: metadata.modified().ok(),
-                                    created_at: metadata.created().ok(),
-                                };
-
-                                files.push(file_info);
+                        // Calculate hash
+                        let hash = match calculate_hash(&path, &cli.algorithm) {
+                            Ok(h) => Some(h),
+                            Err(e) => {
+                                log::warn!("Failed to hash file {:?}: {}", path, e);
+                                None
                             }
-                        }
-                        Err(e) => log::warn!("Failed to get metadata for {:?}: {}", path, e),
+                        };
+
+                        let file_info = FileInfo {
+                            path,
+                            size,
+                            hash,
+                            modified_at: metadata.modified().ok(),
+                            created_at: metadata.created().ok(),
+                        };
+
+                        files.push(file_info);
                     }
                 }
+                Err(e) => log::warn!("Failed to get metadata for {:?}: {}", path, e),
             }
-            Err(e) => log::warn!("Error walking directory: {}", e),
         }
     }
 
@@ -1589,7 +1577,7 @@ pub fn count_files_in_directory(directory: &Path, filter_rules: &FilterRules) ->
     let mut count = 0;
     let walker = WalkDir::new(directory).into_iter();
 
-    for entry_result in walker.filter_entry(|e| {
+    for entry in walker.filter_entry(|e| {
         if is_hidden(e) || is_symlink(e) {
             return false;
         }
@@ -1598,11 +1586,9 @@ pub fn count_files_in_directory(directory: &Path, filter_rules: &FilterRules) ->
         } else {
             false
         }
-    }) {
-        if let Ok(entry) = entry_result {
-            if entry.file_type().is_file() {
-                count += 1;
-            }
+    }).flatten() {
+        if entry.file_type().is_file() {
+            count += 1;
         }
     }
 

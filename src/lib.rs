@@ -40,6 +40,7 @@ pub mod video_fingerprint;
 
 use clap::Parser;
 use std::path::PathBuf;
+use std::str::FromStr;
 // Ensure these are correctly pathed if they are part of file_utils module
 use crate::config::DedupConfig;
 use crate::file_utils::{SortCriterion, SortOrder};

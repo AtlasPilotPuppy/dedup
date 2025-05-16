@@ -5,6 +5,7 @@ use anyhow::Result;
 use humansize::{format_size, DECIMAL};
 use simplelog::LevelFilter;
 use std::path::Path;
+use std::str::FromStr;
 
 use dedup::config::DedupConfig;
 use dedup::file_utils;

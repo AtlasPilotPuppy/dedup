@@ -513,7 +513,7 @@ pub fn determine_preferred_media_file<'a>(
     }
 }
 
-/// Find similar media files in a directory
+#[allow(clippy::arc_with_non_send_sync)]
 pub fn find_similar_media_files(
     file_infos: &[FileInfo],
     options: &MediaDedupOptions,

@@ -19,6 +19,7 @@ use std::thread as std_thread; // Alias for clarity
 use std::time::{Duration, Instant};
 use tui_input::backend::crossterm::EventHandler; // For tui-input
 use tui_input::Input;
+use std::str::FromStr;
 
 use crate::file_utils::{
     self, delete_files, move_files, DuplicateSet, FileInfo, SelectionStrategy, SortCriterion,
@@ -258,11 +259,10 @@ impl App {
         });
 
         // Wrap the thread in Some() with error handling
-        let scan_join_handle = match scan_thread.thread().id() {
-            id => {
-                log::info!("Scan thread started with ID: {:?}", id);
-                Some(scan_thread)
-            }
+        let id = scan_thread.thread().id();
+        let scan_join_handle = {
+            log::info!("Scan thread started with ID: {:?}", id);
+            Some(scan_thread)
         };
 
         Self {
@@ -440,7 +440,7 @@ impl App {
 
         let id = scan_thread.thread().id();
         let scan_join_handle = {
-            log::info!("Rescan thread started with ID: {:?}", id);
+            log::info!("Scan thread started with ID: {:?}", id);
             Some(scan_thread)
         };
 
