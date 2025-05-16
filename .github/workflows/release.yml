@@ -15,15 +15,19 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             artifact_name: dedup-linux-x86_64
+            binary_name: dedup
           - os: macos-latest
             target: x86_64-apple-darwin
             artifact_name: dedup-macos-x86_64
+            binary_name: dedup
           - os: macos-latest
             target: aarch64-apple-darwin
             artifact_name: dedup-macos-aarch64
+            binary_name: dedup
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             artifact_name: dedup-windows-x86_64.exe
+            binary_name: dedup.exe
 
     steps:
     - uses: actions/checkout@v4
@@ -64,9 +68,9 @@ jobs:
       run: |
         cd target/${{ matrix.target }}/release
         if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-          7z a ../../${{ matrix.artifact_name }}.zip ${{ matrix.artifact_name }}
+          7z a ../../${{ matrix.artifact_name }}.zip ${{ matrix.binary_name }}
         else
-          tar czf ../../${{ matrix.artifact_name }}.tar.gz ${{ matrix.artifact_name }}
+          tar czf ../../${{ matrix.artifact_name }}.tar.gz ${{ matrix.binary_name }}
         fi
 
     - name: Upload artifact
