@@ -223,6 +223,16 @@ impl TestEnv {
             media_formats: Vec::new(),
             media_similarity: 90,
             media_dedup_options: MediaDedupOptions::default(),
+            #[cfg(feature = "ssh")]
+            allow_remote_install: true,
+            #[cfg(feature = "ssh")]
+            ssh_options: Vec::new(),
+            #[cfg(feature = "ssh")]
+            rsync_options: Vec::new(),
+            #[cfg(feature = "ssh")]
+            use_remote_dedups: true,
+            #[cfg(feature = "ssh")]
+            use_sudo: false,
         }
     }
 }

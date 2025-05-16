@@ -250,7 +250,7 @@ impl RemoteLocation {
     }
     
     /// Install dedups on the remote system
-    pub fn install_dedups(&self, cli: &crate::Cli) -> Result<()> {
+    pub fn install_dedups(&self, cli: &crate::Cli) -> Result<String> {
         log::info!("Attempting to install dedups on remote host '{}'...", self.host);
         
         // First check if we want to use sudo and if it's available
@@ -283,17 +283,18 @@ impl RemoteLocation {
         log::debug!("Creating installation directory: {}", install_dir);
         self.run_command(&mkdir_cmd)?;
         
-        // First ensure ~/.local/bin is in PATH if we're using it
-        if install_dir.contains("~/.local/bin") {
-            log::debug!("Ensuring ~/.local/bin is in PATH");
-            let path_cmd = r#"
-                echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc;
-                echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc 2>/dev/null || true;
+        // Set up PATH for both current session and future sessions
+        let path_setup = r#"
+            if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
                 export PATH="$HOME/.local/bin:$PATH"
-            "#;
-            if let Err(e) = self.run_command(path_cmd) {
-                log::warn!("Failed to update PATH in shell config: {}", e);
-            }
+                echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+                echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc 2>/dev/null || true
+                echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.profile
+            fi
+        "#;
+        
+        if let Err(e) = self.run_command(path_setup) {
+            log::warn!("Failed to update PATH in shell config: {}", e);
         }
         
         // Download and install dedups
@@ -307,26 +308,22 @@ impl RemoteLocation {
             Ok(_) => {
                 // Verify installation with updated PATH
                 let verify_cmd = format!(
-                    "export PATH=\"$HOME/.local/bin:$PATH\"; {} which dedups",
+                    "export PATH=\"$HOME/.local/bin:$PATH\"; {} which dedups || echo 'not found'",
                     if has_sudo { "sudo" } else { "" }
                 );
                 match self.run_command(&verify_cmd) {
                     Ok(path) => {
-                        log::info!("Successfully installed dedups on remote host '{}' at: {}", self.host, path.trim());
-                        // Verify we can actually run it
-                        let test_cmd = format!(
-                            "export PATH=\"$HOME/.local/bin:$PATH\"; dedups --version"
-                        );
-                        match self.run_command(&test_cmd) {
-                            Ok(_) => Ok(()),
-                            Err(e) => {
-                                log::error!("dedups installed but failed to execute: {}", e);
-                                Err(anyhow::anyhow!("Installation verification failed: dedups installed but cannot be executed"))
-                            }
+                        let path = path.trim();
+                        if path != "not found" {
+                            log::info!("Successfully installed dedups on remote host '{}' at: {}", self.host, path);
+                            Ok(path.to_string())
+                        } else {
+                            log::error!("Installation appeared to succeed but dedups not found in PATH");
+                            Err(anyhow::anyhow!("Installation verification failed: dedups not found in PATH"))
                         }
                     }
                     Err(e) => {
-                        log::error!("Installation appeared to succeed but dedups not found in PATH. Error: {}", e);
+                        log::error!("Failed to verify installation: {}", e);
                         Err(anyhow::anyhow!("Installation verification failed: {}", e))
                     }
                 }

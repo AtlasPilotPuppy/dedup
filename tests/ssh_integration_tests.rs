@@ -52,7 +52,7 @@ fn test_check_dedups_installed() -> Result<()> {
     let is_installed = rt.block_on(remote.check_dedups_installed())?;
     
     // Just print the result, don't assert since we don't know if it's installed
-    println!("Is dedups installed on local test host: {}", is_installed);
+    println!("Is dedups installed on local test host: {:?}", is_installed);
     
     Ok(())
 }
@@ -61,7 +61,7 @@ fn test_check_dedups_installed() -> Result<()> {
 #[ignore] // These tests require a configured SSH host and are ignored by default
 fn test_file_operations() -> Result<()> {
     // Create a test CLI configuration
-    let cli = Cli::parse_from(&["dedups", "--use-sudo", "--allow-remote-install"]);
+    let _cli = Cli::parse_from(&["dedups", "--use-sudo", "--allow-remote-install"]);
     
     // Create a temporary local file
     let local_tempdir = tempfile::tempdir()?;

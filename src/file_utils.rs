@@ -1606,58 +1606,94 @@ pub fn copy_missing_files(
     let mut copy_count = 0;
     let mut logs = Vec::new();
     
+    // Handle destination being remote
+    let dest_is_remote = is_remote_path(target_dir);
+    
+    if dest_is_remote {
+        #[cfg(not(feature = "ssh"))]
+        {
+            return Err(anyhow::anyhow!("SSH support is not enabled in this build"));
+        }
+    } else if !target_dir.exists() {
+        if dry_run {
+            let msg = format!(
+                "[DRY RUN] Would create destination directory: {}",
+                target_dir.display()
+            );
+            logs.push(msg.clone());
+            log::info!("{}", msg);
+        } else {
+            fs::create_dir_all(target_dir)?;
+            let msg = format!("Created destination directory: {}", target_dir.display());
+            logs.push(msg.clone());
+            log::info!("{}", msg);
+        }
+    }
+    
+    // Process each file
     for file in missing_files {
         let source_path = &file.path;
         
-        // Use local path handling logic for both remote and local
-        let _source_file_name = source_path
-            .file_name()
-            .ok_or_else(|| anyhow::anyhow!("Failed to get file name"))?;
-            
-        // For now we'll preserve the source directory structure under target
-        // This makes more sense for remote copying to avoid name conflicts
-        let relative_path = if let Ok(rel_path) = source_path.strip_prefix("/") {
-            rel_path.to_path_buf()
+        // Get the source directory name from the path
+        let source_dir_name = source_path
+            .parent()
+            .and_then(|p| p.file_name())
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_default();
+        
+        // Create the target path that preserves the source directory structure
+        let final_dest_path = if source_dir_name.is_empty() {
+            // If no parent directory, just use the file name
+            target_dir.join(source_path.file_name().unwrap_or_default())
         } else {
-            source_path.to_path_buf()
+            // Create a subdirectory in target with the source directory name
+            let source_subdir = target_dir.join(&source_dir_name);
+            source_subdir.join(source_path.file_name().unwrap_or_default())
         };
         
-        let target_path = target_dir.join(relative_path);
-        
-        // Create parent directories if they don't exist (only for local target)
-        if !is_remote_path(target_dir) {
-            if let Some(parent) = target_path.parent() {
+        // Create parent directories if needed
+        if let Some(parent) = final_dest_path.parent() {
+            if !parent.exists() {
                 if dry_run {
-                    logs.push(format!("[DRY RUN] Would create directory: {}", parent.display()));
+                    let msg = format!("[DRY RUN] Would create directory: {}", parent.display());
+                    logs.push(msg.clone());
+                    log::info!("{}", msg);
                 } else {
-                    std::fs::create_dir_all(parent)?;
-                    logs.push(format!("Created directory: {}", parent.display()));
+                    fs::create_dir_all(parent)?;
+                    let msg = format!("Created directory: {}", parent.display());
+                    logs.push(msg.clone());
+                    log::info!("{}", msg);
                 }
             }
         }
         
         // Copy the file
         if dry_run {
-            logs.push(format!(
+            let msg = format!(
                 "[DRY RUN] Would copy {} to {}",
                 source_path.display(),
-                target_path.display()
-            ));
+                final_dest_path.display()
+            );
+            logs.push(msg.clone());
+            log::info!("{}", msg);
+            copy_count += 1;
         } else {
-            match copy_file(source_path, &target_path, dry_run) {
+            match copy_file(source_path, &final_dest_path, dry_run) {
                 Ok(_) => {
-                    logs.push(format!(
+                    let msg = format!(
                         "Copied {} to {}",
                         source_path.display(),
-                        target_path.display()
-                    ));
+                        final_dest_path.display()
+                    );
+                    logs.push(msg.clone());
+                    log::info!("{}", msg);
                     copy_count += 1;
                 }
                 Err(e) => {
                     let error_msg = format!(
                         "Failed to copy {} to {}: {}",
                         source_path.display(),
-                        target_path.display(),
+                        final_dest_path.display(),
                         e
                     );
                     logs.push(error_msg.clone());
@@ -1829,15 +1865,12 @@ mod tests {
     }
 }
 
-#[cfg(feature = "ssh")]
-use crate::ssh_utils::RemoteLocation;
-
 /// Determines if a path is a remote SSH path
 pub fn is_remote_path(_path: &Path) -> bool {
     #[cfg(feature = "ssh")]
     {
         if let Some(path_str) = _path.to_str() {
-            return RemoteLocation::is_ssh_path(path_str);
+            return crate::ssh_utils::RemoteLocation::is_ssh_path(path_str);
         }
     }
     
@@ -1846,57 +1879,48 @@ pub fn is_remote_path(_path: &Path) -> bool {
 
 /// Handles a directory that could be either local or remote
 pub fn handle_directory(cli: &crate::Cli, dir_path: &Path) -> Result<Vec<FileInfo>> {
+    #[cfg(feature = "ssh")]
     if is_remote_path(dir_path) {
-        #[cfg(feature = "ssh")]
-        {
-            log::info!("Attempting to access remote directory: {}", dir_path.display());
-            
-            // First verify the path format is correct
-            let path_str = dir_path.to_str()
-                .ok_or_else(|| anyhow::anyhow!(
-                    "Invalid characters in remote path: {}. Path must be UTF-8 encoded.",
-                    dir_path.display()
-                ))?;
-            
-            if !path_str.starts_with("ssh:") {
-                return Err(anyhow::anyhow!(
-                    "Invalid remote path format: {}. Remote paths must start with 'ssh:' (example: ssh:hostname:/path)",
-                    path_str
-                ));
-            }
-            
-            // Parse the remote location
-            let remote_location = RemoteLocation::parse(path_str)
-                .context(format!("Failed to parse remote path: {}. Format should be ssh:host:/path", path_str))?;
-            
-            // Check if the directory exists
-            match remote_location.check_directory_exists() {
-                Ok(true) => {
-                    // Directory exists, proceed with scanning
-                    handle_remote_directory(cli, dir_path)
-                },
-                Ok(false) => {
-                    Err(anyhow::anyhow!(
-                        "Remote directory does not exist: {}. Please verify the path on host '{}'.",
-                        remote_location.path.display(),
-                        remote_location.host
-                    ))
-                },
-                Err(e) => {
-                    Err(anyhow::anyhow!(
-                        "Failed to check remote directory: {}. Error: {}",
-                        dir_path.display(),
-                        e
-                    ))
-                }
-            }
+        log::info!("Attempting to access remote directory: {}", dir_path.display());
+        
+        // First verify the path format is correct
+        let path_str = dir_path.to_str()
+            .ok_or_else(|| anyhow::anyhow!(
+                "Invalid characters in remote path: {}. Path must be UTF-8 encoded.",
+                dir_path.display()
+            ))?;
+        
+        if !path_str.starts_with("ssh:") {
+            return Err(anyhow::anyhow!(
+                "Invalid remote path format: {}. Remote paths must start with 'ssh:' (example: ssh:hostname:/path)",
+                path_str
+            ));
         }
         
-        #[cfg(not(feature = "ssh"))]
-        {
-            return Err(anyhow::anyhow!(
-                "SSH support is not enabled in this build. Please rebuild with --features ssh enabled."
-            ));
+        // Parse the remote location
+        let remote_location = crate::ssh_utils::RemoteLocation::parse(path_str)
+            .context(format!("Failed to parse remote path: {}. Format should be ssh:host:/path", path_str))?;
+        
+        // Check if the directory exists
+        match remote_location.check_directory_exists() {
+            Ok(true) => {
+                // Directory exists, proceed with scanning
+                handle_remote_directory(cli, dir_path)
+            },
+            Ok(false) => {
+                Err(anyhow::anyhow!(
+                    "Remote directory does not exist: {}. Please verify the path on host '{}'.",
+                    remote_location.path.display(),
+                    remote_location.host
+                ))
+            },
+            Err(e) => {
+                Err(anyhow::anyhow!(
+                    "Failed to check remote directory: {}. Error: {}",
+                    dir_path.display(),
+                    e
+                ))
+            }
         }
     } else {
         // Local directory
@@ -1906,7 +1930,19 @@ pub fn handle_directory(cli: &crate::Cli, dir_path: &Path) -> Result<Vec<FileInf
                 dir_path.display()
             ));
         }
-        return scan_directory(cli, dir_path);
+        scan_directory(cli, dir_path)
+    }
+
+    #[cfg(not(feature = "ssh"))]
+    {
+        // Local directory only
+        if !dir_path.exists() {
+            return Err(anyhow::anyhow!(
+                "Local directory does not exist: {}. Please verify the path is correct.",
+                dir_path.display()
+            ));
+        }
+        scan_directory(cli, dir_path)
     }
 }
 
@@ -1920,7 +1956,7 @@ fn handle_remote_directory(cli: &crate::Cli, dir_path: &Path) -> Result<Vec<File
         .ok_or_else(|| anyhow::anyhow!("Invalid UTF-8 in remote path: {}", dir_path.display()))?;
     
     // Parse the remote location
-    let remote_location = RemoteLocation::parse(path_str)
+    let remote_location = crate::ssh_utils::RemoteLocation::parse(path_str)
         .with_context(|| format!("Failed to parse remote path: {}. Format should be ssh:host:/path", path_str))?;
     
     // Apply any CLI SSH/Rsync options to the remote location
@@ -1963,60 +1999,72 @@ fn handle_remote_directory(cli: &crate::Cli, dir_path: &Path) -> Result<Vec<File
         .unwrap()
         .block_on(remote.check_dedups_installed())?;
     
-    if dedups_installed && cli.use_remote_dedups {
-        log::info!("Using remote dedups for directory scan");
-        
-        // Set up SSH protocol for communication
-        let mut protocol = crate::ssh_utils::SshProtocol::new(remote.clone());
-        protocol.connect()?;
-        
-        // Prepare dedups arguments for remote execution
-        let mut args_vec = Vec::new();
-        args_vec.push(remote.path.to_str().unwrap_or("/"));
-        
-        // Add common arguments that make sense for remote execution
-        if !cli.include.is_empty() {
-            args_vec.push("--include");
-            for pattern in &cli.include {
-                args_vec.push(pattern);
+    if let Some(dedups_path) = dedups_installed {
+        if cli.use_remote_dedups {
+            log::info!("Using remote dedups at {} for directory scan", dedups_path);
+            
+            // Set up SSH protocol for communication
+            let mut protocol = crate::ssh_utils::SshProtocol::new(remote.clone());
+            protocol.connect()?;
+            
+            // Prepare dedups arguments for remote execution
+            let mut args_vec = Vec::new();
+            args_vec.push(remote.path.to_str().unwrap_or("/"));
+            
+            // Add common arguments that make sense for remote execution
+            if !cli.include.is_empty() {
+                args_vec.push("--include");
+                for pattern in &cli.include {
+                    args_vec.push(pattern);
+                }
             }
-        }
-        if !cli.exclude.is_empty() {
-            args_vec.push("--exclude");
-            for pattern in &cli.exclude {
-                args_vec.push(pattern);
+            if !cli.exclude.is_empty() {
+                args_vec.push("--exclude");
+                for pattern in &cli.exclude {
+                    args_vec.push(pattern);
+                }
             }
+            if let Some(ref filter_file) = cli.filter_from {
+                args_vec.push("--filter-from");
+                args_vec.push(filter_file.to_str().unwrap_or(""));
+            }
+            
+            // Create a vector of string slices manually
+            let mut args = Vec::new();
+            for s in &args_vec {
+                args.push(s.as_ref());
+            }
+            
+            // Execute remote dedups scan and parse results
+            let output = protocol.execute_dedups(&args)?;
+            
+            // Parse JSON output (assuming dedups outputs JSON)
+            let scan_result: Vec<FileInfo> = serde_json::from_str(&output)
+                .with_context(|| "Failed to parse remote dedups output")?;
+            
+            Ok(scan_result)
+        } else {
+            log::info!("Remote dedups found at {} but use_remote_dedups is disabled", dedups_path);
+            handle_remote_fallback(cli, &remote)
         }
-        if let Some(ref filter_file) = cli.filter_from {
-            args_vec.push("--filter-from");
-            args_vec.push(filter_file.to_str().unwrap_or(""));
-        }
-        
-        // Create a vector of string slices manually
-        let mut args = Vec::new();
-        for s in &args_vec {
-            args.push(s.as_ref());
-        }
-        
-        // Execute remote dedups scan and parse results
-        let output = protocol.execute_dedups(&args)?;
-        
-        // Parse JSON output (assuming dedups outputs JSON)
-        let scan_result: Vec<FileInfo> = serde_json::from_str(&output)
-            .with_context(|| "Failed to parse remote dedups output")?;
-        
-        Ok(scan_result)
     } else {
-        if !dedups_installed && cli.allow_remote_install {
+        if !dedups_installed.is_some() && cli.allow_remote_install {
             log::info!("dedups not found on remote, attempting installation");
-            if let Err(e) = remote.install_dedups(cli) {
-                log::warn!("Failed to install dedups on remote: {}", e);
+            match remote.install_dedups(cli) {
+                Ok(path) => {
+                    log::info!("Successfully installed dedups at {}, retrying operation", path);
+                    // Retry the operation now that dedups is installed
+                    return handle_directory(cli, dir_path);
+                }
+                Err(e) => {
+                    log::warn!("Failed to install dedups on remote: {}", e);
+                }
             }
         }
         
         // Check if we're in media mode and warn appropriately
         if cli.media_mode {
-            if !dedups_installed {
+            if !dedups_installed.is_some() {
                 return Err(anyhow::anyhow!(
                     "Media mode requires dedups to be installed on the remote host '{}'. \
                     Please install dedups on the remote system or use --allow-remote-install.",
@@ -2030,47 +2078,57 @@ fn handle_remote_directory(cli: &crate::Cli, dir_path: &Path) -> Result<Vec<File
             }
         }
         
-        // Fallback to limited remote scanning via SSH commands
-        log::warn!("Using limited remote scanning functionality (no remote dedups available)");
-        if !dedups_installed {
-            log::info!("To enable full functionality, install dedups on the remote host or use --allow-remote-install");
-        } else if !cli.use_remote_dedups {
-            log::info!("To enable full functionality, enable remote dedups with --use-remote-dedups");
-        }
-        
-        // Perform basic file listing with remote commands
-        let command = format!("find {} -type f -not -path '*/\\.*' | sort", remote.path.display());
-        let output = remote.run_command(&command)?;
-        
-        // Parse output into FileInfo structs
-        let mut file_infos = Vec::new();
-        for line in output.lines() {
-            let path = std::path::PathBuf::from(line.trim());
-            
-            // Get file stats
-            let stat_cmd = format!("stat -c '%s %Y' '{}'", path.display());
-            let stat_output = remote.run_command(&stat_cmd)?;
-            let parts: Vec<&str> = stat_output.split_whitespace().collect();
-            
-            if parts.len() >= 2 {
-                let size = parts[0].parse::<u64>().unwrap_or(0);
-                let mtime_secs = parts[1].parse::<u64>().unwrap_or(0);
-                
-                // Create the FileInfo with correct modified_at type
-                let file_info = FileInfo {
-                    path: path.clone(),
-                    size,
-                    modified_at: std::time::SystemTime::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(mtime_secs)),
-                    created_at: None, // Not easily available on all systems
-                    hash: None, // We'll compute this later if needed
-                };
-                
-                file_infos.push(file_info);
-            }
-        }
-        
-        Ok(file_infos)
+        handle_remote_fallback(cli, &remote)
     }
+}
+
+#[cfg(feature = "ssh")]
+fn handle_remote_fallback(cli: &crate::Cli, remote: &crate::ssh_utils::RemoteLocation) -> Result<Vec<FileInfo>> {
+    // Fallback to limited remote scanning via SSH commands
+    log::warn!("Using limited remote scanning functionality (no remote dedups available)");
+    
+    // Create a runtime for async operations
+    let rt = tokio::runtime::Runtime::new()?;
+    let dedups_installed = rt.block_on(remote.check_dedups_installed())?;
+    
+    if dedups_installed.is_none() {
+        log::info!("To enable full functionality, install dedups on the remote host or use --allow-remote-install");
+    } else if !cli.use_remote_dedups {
+        log::info!("To enable full functionality, enable remote dedups with --use-remote-dedups");
+    }
+    
+    // Perform basic file listing with remote commands
+    let command = format!("find {} -type f -not -path '*/\\.*' | sort", remote.path.display());
+    let output = remote.run_command(&command)?;
+    
+    // Parse output into FileInfo structs
+    let mut file_infos = Vec::new();
+    for line in output.lines() {
+        let path = std::path::PathBuf::from(line.trim());
+        
+        // Get file stats
+        let stat_cmd = format!("stat -c '%s %Y' '{}'", path.display());
+        let stat_output = remote.run_command(&stat_cmd)?;
+        let parts: Vec<&str> = stat_output.split_whitespace().collect();
+        
+        if parts.len() >= 2 {
+            let size = parts[0].parse::<u64>().unwrap_or(0);
+            let mtime_secs = parts[1].parse::<u64>().unwrap_or(0);
+            
+            // Create the FileInfo with correct modified_at type
+            let file_info = FileInfo {
+                path: path.clone(),
+                size,
+                modified_at: std::time::SystemTime::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(mtime_secs)),
+                created_at: None, // Not easily available on all systems
+                hash: None, // We'll compute this later if needed
+            };
+            
+            file_infos.push(file_info);
+        }
+    }
+    
+    Ok(file_infos)
 }
 
 // Helper function to convert std::io::Result<FileTime> to Option<SystemTime>
