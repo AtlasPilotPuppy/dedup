@@ -222,6 +222,24 @@ pub fn calculate_hash(path: &Path, algorithm: &str) -> Result<String> {
             let hash = blake3::hash(&file_content);
             Ok(hash.to_hex().as_str().to_string())
         }
+        "xxhash" => {
+            use std::hash::Hasher;
+            use twox_hash::XxHash64;
+            
+            let mut hasher = XxHash64::default();
+            hasher.write(&file_content);
+            let result = hasher.finish();
+            Ok(format!("{:016x}", result))
+        }
+        "gxhash" => {
+            use std::hash::Hasher;
+            use gxhash::GxHasher;
+            
+            let mut hasher = GxHasher::default();
+            hasher.write(&file_content);
+            let result = hasher.finish();
+            Ok(format!("{:016x}", result))
+        }
         _ => Err(anyhow::anyhow!("Unsupported hashing algorithm: {}", algorithm)),
     }
 }
@@ -1315,6 +1333,28 @@ mod tests {
         assert_eq!(hash.len(), 64);
         // Update the expected hash value with the actual one from our implementation
         assert_eq!(hash, "2f1514181aadccd913abd94cfa592701a5686ab23f8df1dff1b74710febc6d4a");
+    }
+
+    #[test]
+    fn test_xxhash() {
+        let test_content = b"The quick brown fox jumps over the lazy dog";
+        let file = create_test_file(test_content);
+        let hash = calculate_hash(file.path(), "xxhash").unwrap();
+        // xxHash has a fixed length of 16 hex characters (64 bits)
+        assert_eq!(hash.len(), 16);
+        // We check the format rather than exact value as implementation might vary
+        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+    
+    #[test]
+    fn test_gxhash() {
+        let test_content = b"The quick brown fox jumps over the lazy dog";
+        let file = create_test_file(test_content);
+        let hash = calculate_hash(file.path(), "gxhash").unwrap();
+        // gxHash has a fixed length of 16 hex characters (64 bits)
+        assert_eq!(hash.len(), 16);
+        // We check the format rather than exact value as implementation might vary
+        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     #[test]

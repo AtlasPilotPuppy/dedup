@@ -45,7 +45,7 @@ pub struct DedupConfig {
 }
 
 fn default_algorithm() -> String {
-    "blake3".to_string()
+    "xxhash".to_string()
 }
 
 fn default_mode() -> String {
@@ -164,7 +164,7 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = DedupConfig::default();
-        assert_eq!(config.algorithm, "blake3");
+        assert_eq!(config.algorithm, "xxhash");
         assert_eq!(config.mode, "newest_modified");
         assert_eq!(config.format, "json");
         assert_eq!(config.sort_by, "modifiedat");

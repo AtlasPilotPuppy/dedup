@@ -692,7 +692,7 @@ impl App {
                 self.state.default_selection_strategy = SelectionStrategy::LongestPath;
                 self.state.status_message = Some("Strategy: Longest Path".to_string());
             }
-            // Algorithm selection keys (m, a, b)
+            // Algorithm selection keys (m, a, b, x, g)
             KeyCode::Char('m') if self.state.selected_setting_category_index == 1 => {
                 self.state.current_algorithm = "md5".to_string();
                 self.state.rescan_needed = true;
@@ -707,6 +707,16 @@ impl App {
                 self.state.current_algorithm = "blake3".to_string();
                 self.state.rescan_needed = true;
                 self.state.status_message = Some("Algorithm: blake3 (Rescan needed)".to_string());
+            }
+            KeyCode::Char('x') if self.state.selected_setting_category_index == 1 => {
+                self.state.current_algorithm = "xxhash".to_string();
+                self.state.rescan_needed = true;
+                self.state.status_message = Some("Algorithm: xxhash (Rescan needed)".to_string());
+            }
+            KeyCode::Char('g') if self.state.selected_setting_category_index == 1 => {
+                self.state.current_algorithm = "gxhash".to_string();
+                self.state.rescan_needed = true;
+                self.state.status_message = Some("Algorithm: gxhash (Rescan needed)".to_string());
             }
             // Parallelism adjustment keys (+, -, 0-9)
             KeyCode::Char('0') if self.state.selected_setting_category_index == 2 => {
@@ -1411,7 +1421,7 @@ fn ui(frame: &mut Frame, app: &mut App) {
             Line::from(Span::styled(format!("   (n:newest, o:oldest, s:shortest, l:longest)"), strategy_style)),
             Line::from(Span::raw("")),
             Line::from(Span::styled(format!("2. Hashing Algorithm: {}", app.state.current_algorithm), algo_style)),
-            Line::from(Span::styled(format!("   (m:md5, a:sha256, b:blake3)"), algo_style)),
+            Line::from(Span::styled(format!("   (m:md5, a:sha256, b:blake3, x:xxhash, g:gxhash)"), algo_style)),
             Line::from(Span::raw("")),
             Line::from(Span::styled(format!("3. Parallel Cores: {}", 
                 app.state.current_parallel.map_or_else(
@@ -1496,7 +1506,7 @@ fn ui(frame: &mut Frame, app: &mut App) {
             Line::from(Span::styled("Settings Menu (Ctrl+S to access):", Style::default().add_modifier(Modifier::BOLD))),
             Line::from("  Up/Down    : Navigate setting categories"),
             Line::from("  Strategy   : n (Newest), o (Oldest), s (Shortest Path), l (Longest Path)"),
-            Line::from("  Algorithm  : m (md5), a (sha256), b (blake3) - requires rescan"),
+            Line::from("  Algorithm  : m (md5), a (sha256), b (blake3), x (xxhash), g (gxhash) - requires rescan"),
             Line::from("  Parallelism: 0 (Auto), 1-9, + (Increment), - (Decrement) - requires rescan"),
             Line::from("  Sorting    : (TODO: Sort By, Sort Order)"),
             Line::from("  Esc        : Exit settings menu"),
