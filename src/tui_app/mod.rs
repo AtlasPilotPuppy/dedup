@@ -614,8 +614,13 @@ pub fn run_tui_app(cli: &Cli) -> Result<()> {
         log::error!("TUI Error: {}", err);
         if log::log_enabled!(log::Level::Debug) {
             let mut backtrace_output = "(backtrace not available or disabled)".to_string();
-            if let Some(bt) = err.backtrace() { // bt is &Backtrace
-                backtrace_output = format!("Stack backtrace:\n{}", bt); // bt is Display
+            
+            // Explicitly wrap the backtrace reference in Some() because err.backtrace() returns &Backtrace
+            let an_option_of_backtrace: Option<&std::backtrace::Backtrace> = Some(err.backtrace());
+
+            // Now match on this explicitly typed Option
+            if let Some(bt_ref) = an_option_of_backtrace { // bt_ref should be &std::backtrace::Backtrace
+                backtrace_output = format!("Stack backtrace:\n{}", bt_ref); // &std::backtrace::Backtrace implements Display
             }
             println!("Error in TUI: {}\n{}", err, backtrace_output);
         } else {
