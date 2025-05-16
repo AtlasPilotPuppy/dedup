@@ -43,6 +43,34 @@ cargo build --release
 # The binary will be available at target/release/dedup_tui
 ```
 
+### Windows Limitations
+
+When using `dedup_tui` on Windows, please note the following limitations:
+
+1. **Path Length**: Windows has a default path length limit of 260 characters. While `dedup_tui` can handle longer paths, you may need to enable long path support in Windows:
+   - Run `git config --system core.longpaths true` if using Git
+   - Enable long paths in Windows registry or group policy
+   - Use the `\\?\` prefix for paths longer than 260 characters
+
+2. **File Permissions**: Windows file permissions are more restrictive than Unix-like systems:
+   - Some files may be locked by other processes
+   - System files and protected directories may be inaccessible
+   - Consider running as administrator for full access
+
+3. **Media Processing**: Media deduplication on Windows requires:
+   - FFmpeg installed and available in PATH
+   - ImageMagick installed and available in PATH
+   - Additional dependencies for video processing
+
+4. **Performance**: Windows performance may be slightly lower than on Unix-like systems due to:
+   - Different file system characteristics
+   - Additional security checks
+   - Path normalization overhead
+
+5. **Configuration**: The configuration file location is different:
+   - Windows: `C:\Users\<username>\.deduprc`
+   - Consider using forward slashes in paths even on Windows
+
 ## Command-Line Usage
 
 ### Basic Usage
