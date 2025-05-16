@@ -1,6 +1,6 @@
 use anyhow::Result;
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event as CEvent, KeyCode, KeyEvent, KeyEventKind},
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event as CEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -399,7 +399,7 @@ impl App {
 
     fn handle_normal_mode_key(&mut self, key_event: KeyEvent) {
         match key_event.code {
-            KeyCode::Char('q') => {
+            KeyCode::Char('q') | KeyCode::Char('c') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.should_quit = true;
             }
             KeyCode::Char('h') => {
@@ -407,38 +407,61 @@ impl App {
                 self.state.status_message = Some("Displaying Help. Esc to exit.".to_string());
             }
             KeyCode::Char('a') => {
-                // Select all files in the current set
+                // Toggle keep/delete for all files in the current set or folder
                 if let Some(selected) = self.state.display_list.get(self.state.selected_display_list_index) {
                     match selected {
                         DisplayListItem::SetEntry { original_group_index, original_set_index_in_group, .. } => {
-                            // Get a copy of the files we need to process
                             let files_to_process = if let Some(group) = self.state.grouped_data.get(*original_group_index) {
                                 group.sets[*original_set_index_in_group].files.clone()
                             } else {
                                 Vec::new()
                             };
-                            
-                            // Now process the files
-                            for _file in files_to_process {
-                                self.set_action_for_selected_file(ActionType::Keep);
+                            let all_kept = files_to_process.iter().all(|file| {
+                                self.state.jobs.iter().any(|job| job.file_info.path == file.path && job.action == ActionType::Keep)
+                            });
+                            let paths: Vec<_> = files_to_process.iter().map(|f| f.path.clone()).collect();
+                            self.state.jobs.retain(|job| !paths.contains(&job.file_info.path));
+                            let action = if all_kept { ActionType::Delete } else { ActionType::Keep };
+                            for file in files_to_process {
+                                self.state.jobs.push(Job {
+                                    action: action.clone(),
+                                    file_info: file,
+                                });
                             }
-                            self.state.status_message = Some("All files in set marked to keep".to_string());
+                            self.state.status_message = Some(if all_kept {
+                                "All files in set marked for delete".to_string()
+                            } else {
+                                "All files in set marked to keep".to_string()
+                            });
                         }
                         DisplayListItem::Folder { .. } => {
-                            // Get a copy of all files in the folder
-                            let files_to_process = if let Some(group) = self.state.grouped_data.get(self.state.selected_display_list_index) {
-                                group.sets.iter()
-                                    .flat_map(|set| set.files.clone())
-                                    .collect::<Vec<_>>()
+                            // Find the group for this folder
+                            let group_index = self.state.display_list[..=self.state.selected_display_list_index]
+                                .iter()
+                                .filter(|item| matches!(item, DisplayListItem::Folder { .. }))
+                                .count() - 1;
+                            let files_to_process = if let Some(group) = self.state.grouped_data.get(group_index) {
+                                group.sets.iter().flat_map(|set| set.files.clone()).collect::<Vec<_>>()
                             } else {
                                 Vec::new()
                             };
-                            
-                            // Now process the files
-                            for _file in files_to_process {
-                                self.set_action_for_selected_file(ActionType::Keep);
+                            let all_kept = files_to_process.iter().all(|file| {
+                                self.state.jobs.iter().any(|job| job.file_info.path == file.path && job.action == ActionType::Keep)
+                            });
+                            let paths: Vec<_> = files_to_process.iter().map(|f| f.path.clone()).collect();
+                            self.state.jobs.retain(|job| !paths.contains(&job.file_info.path));
+                            let action = if all_kept { ActionType::Delete } else { ActionType::Keep };
+                            for file in files_to_process {
+                                self.state.jobs.push(Job {
+                                    action: action.clone(),
+                                    file_info: file,
+                                });
                             }
-                            self.state.status_message = Some("All files in folder marked to keep".to_string());
+                            self.state.status_message = Some(if all_kept {
+                                "All files in folder marked for delete".to_string()
+                            } else {
+                                "All files in folder marked to keep".to_string()
+                            });
                         }
                     }
                 }
@@ -1168,11 +1191,12 @@ fn ui(frame: &mut Frame, app: &mut App) {
             Constraint::Length(3),  // Title
             Constraint::Length(3),  // Status
             Constraint::Min(0),     // Main content
-            Constraint::Length(1),  // Help bar
+            Constraint::Length(1),  // Progress bar (if any)
+            Constraint::Length(1),  // Help bar (always visible)
         ])
         .split(frame.size());
 
-    if app.state.is_loading && app.scan_rx.is_some() { // Show loading screen only if async scan is active
+    if app.state.is_loading && app.scan_rx.is_some() {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -1339,8 +1363,9 @@ fn ui(frame: &mut Frame, app: &mut App) {
         let main_chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Percentage(70),
-                Constraint::Percentage(30),
+                Constraint::Percentage(35),  // Sets/Folders panel
+                Constraint::Percentage(35),  // Files panel
+                Constraint::Percentage(30),  // Jobs panel
             ])
             .split(chunks[2]);
 
@@ -1438,7 +1463,7 @@ fn ui(frame: &mut Frame, app: &mut App) {
         if app.current_selected_set_from_display_list().map_or(false, |s| !s.files.is_empty()) {
             files_list_state.select(Some(app.state.selected_file_index_in_set));
         }
-        frame.render_stateful_widget(files_list, main_chunks[0], &mut files_list_state);
+        frame.render_stateful_widget(files_list, main_chunks[1], &mut files_list_state);
 
         // Right Panel: Jobs
         let jobs_panel_title_string = format!("Jobs ({}) (Ctrl+E: Exec, x:del)", app.state.jobs.len());
@@ -1462,12 +1487,12 @@ fn ui(frame: &mut Frame, app: &mut App) {
         if !app.state.jobs.is_empty() {
             jobs_list_state.select(Some(app.state.selected_job_index));
         }
-        frame.render_stateful_widget(jobs_list_widget, main_chunks[1], &mut jobs_list_state);
+        frame.render_stateful_widget(jobs_list_widget, main_chunks[2], &mut jobs_list_state);
 
         // Status Bar / Input Area
         match app.state.input_mode {
             InputMode::Normal => {
-                let status_text = app.state.status_message.as_deref().unwrap_or("q:quit | Tab:cycle | Arrows/jk:nav | s:keep d:del c:copy i:ign | Ctrl+E:exec | Ctrl+R:rescan | Ctrl+S:settings | x:del job");
+                let status_text = app.state.status_message.as_deref().unwrap_or("q/Ctrl+C:quit | Tab:cycle | Arrows/jk:nav | a:toggle s:keep d:del c:copy i:ign | Ctrl+E:exec | Ctrl+R:rescan | Ctrl+S:settings | x:del job");
                 let status_bar = Paragraph::new(status_text)
                     .style(Style::default().fg(Color::LightCyan))
                     .alignment(Alignment::Left);
@@ -1488,23 +1513,59 @@ fn ui(frame: &mut Frame, app: &mut App) {
                     input_chunks[1].x + app.state.current_input.visual_cursor() as u16 + 1, 
                     input_chunks[1].y + 1 
                 );
-             }
+            }
             InputMode::Settings => {
                 // The Settings mode has its own full-screen UI, so no specific status bar here.
-                // The hints are part of the settings_paragraph and hint Paragraph already rendered.
             }
             InputMode::Help => {
                 // The Help mode has its own full-screen UI, so no specific status bar here.
-                // The hints are part of the help_paragraph and footer Paragraph already rendered.
             }
         }
 
-        // Draw help bar at the bottom
-        let help = "h: Help | ↑/↓: Navigate | Space: Toggle | a: Select All | q: Quit";
-        let help = Paragraph::new(help)
+        // Draw progress bar (if any) just above the help bar
+        use ratatui::widgets::Gauge;
+        if app.state.is_loading {
+            // Try to extract a percentage from the loading_message, fallback to indeterminate
+            let (label, percent) = if let Some((done, total)) = app.state.loading_message.split_once('/') {
+                let done = done.chars().rev().take_while(|c| c.is_digit(10)).collect::<String>().chars().rev().collect::<String>().parse::<u64>().ok();
+                let total = total.chars().take_while(|c| c.is_digit(10)).collect::<String>().parse::<u64>().ok();
+                if let (Some(done), Some(total)) = (done, total) {
+                    let percent = if total > 0 { done as f64 / total as f64 } else { 0.0 };
+                    (app.state.loading_message.clone(), percent)
+                } else {
+                    (app.state.loading_message.clone(), 0.0)
+                }
+            } else {
+                (app.state.loading_message.clone(), 0.0)
+            };
+            let gauge = Gauge::default()
+                .block(Block::default().borders(Borders::ALL).title("Progress"))
+                .gauge_style(Style::default().fg(Color::Yellow).bg(Color::Black))
+                .label(label)
+                .ratio(percent);
+            frame.render_widget(gauge, chunks[3]);
+        } else if !app.state.jobs.is_empty() && app.state.input_mode == InputMode::Normal {
+            let total = app.state.jobs.len();
+            let completed = 0; // You can track completed jobs if you add a field
+            let percent = if total > 0 { completed as f64 / total as f64 } else { 0.0 };
+            let gauge = Gauge::default()
+                .block(Block::default().borders(Borders::ALL).title("Job Progress"))
+                .gauge_style(Style::default().fg(Color::Green).bg(Color::Black))
+                .label(format!("Pending jobs: {} | Ctrl+E: Execute, x: Remove job", total))
+                .ratio(percent);
+            frame.render_widget(gauge, chunks[3]);
+        } else {
+            // Draw an empty block if no progress
+            let empty = Block::default();
+            frame.render_widget(empty, chunks[3]);
+        }
+
+        // Draw help bar at the very bottom
+        let help = "h: Help | ↑/↓: Navigate | Space: Toggle | a: Toggle Keep/Delete | q/Ctrl+C: Quit";
+        let help_bar = ratatui::widgets::Paragraph::new(help)
             .style(Style::default().fg(Color::DarkGray))
             .alignment(Alignment::Center);
-        frame.render_widget(help, chunks[3]);
+        frame.render_widget(help_bar, chunks[4]);
     }
 }
 

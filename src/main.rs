@@ -109,7 +109,17 @@ fn setup_logger(verbosity: u8, log_file: Option<&Path>) -> Result<()> {
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    setup_logger(cli.verbose, cli.log.then_some(&PathBuf::from("dedup.log").as_path()))?;
+    // Always log to file in TUI mode to avoid interfering with the TUI display
+    let dedup_tui_log = PathBuf::from("dedup_tui.log");
+    let dedup_log = PathBuf::from("dedup.log");
+    let log_file = if cli.interactive {
+        Some(dedup_tui_log.as_path())
+    } else if cli.log {
+        Some(dedup_log.as_path())
+    } else {
+        None
+    };
+    setup_logger(cli.verbose, log_file)?;
 
     log::info!("Logger initialized. Application starting.");
     log::debug!("CLI args: {:#?}", cli);
