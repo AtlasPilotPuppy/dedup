@@ -2,11 +2,13 @@ mod file_utils;
 mod tui_app;
 
 use clap::Parser;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use simplelog::*;
 use std::fs::File;
 use anyhow::Result;
 use humansize::{format_size, DECIMAL};
+use env_logger;
+use log::{LevelFilter, info, debug, error};
 
 #[derive(Parser, Debug, Clone)]
 #[clap(author, version, about, long_about = None)]
@@ -74,9 +76,6 @@ pub struct Cli {
     #[clap(long, help = "Show progress during TUI scan (enabled by default for TUI mode)")]
     pub progress_tui: bool,
 
-    #[clap(short, long, action = clap::ArgAction::Count, help = "Verbosity level (-v, -vv, -vvv)")]
-    pub verbose_tui: u8,
-
     #[clap(long, value_parser = crate::file_utils::SortCriterion::from_str, default_value = "modifiedat", help = "Sort files by criterion [name|size|created|modified|path]")]
     pub sort_by: crate::file_utils::SortCriterion,
 
@@ -84,43 +83,31 @@ pub struct Cli {
     pub sort_order: crate::file_utils::SortOrder,
 }
 
-fn setup_logger(verbosity: u8, log_file: Option<&PathBuf>) -> Result<()> {
-    let log_level = match verbosity {
-        0 => LevelFilter::Warn,
-        1 => LevelFilter::Info,
-        2 => LevelFilter::Debug,
+fn setup_logger(verbosity: u8, log_file: Option<&Path>) -> Result<()> {
+    let level = match verbosity {
+        0 => LevelFilter::Info,
+        1 => LevelFilter::Debug,
         _ => LevelFilter::Trace,
     };
 
-    let mut loggers: Vec<Box<dyn SharedLogger>> = Vec::new();
+    let mut builder = env_logger::Builder::new();
+    builder.filter_level(level);
+    builder.format_timestamp_millis();
+    builder.format_target(false);
 
-    let term_logger = TermLogger::new(
-        log_level,
-        Config::default(),
-        TerminalMode::Mixed,
-        ColorChoice::Auto,
-    );
-    loggers.push(term_logger);
-
-    if let Some(path) = log_file {
-        if let Some(parent) = path.parent() {
-            if !parent.exists() {
-                std::fs::create_dir_all(parent)?;
-            }
-        }
-        let file = File::create(path)?;
-        let file_logger = WriteLogger::new(log_level, Config::default(), file);
-        loggers.push(file_logger);
+    if let Some(log_path) = log_file {
+        let file = std::fs::File::create(log_path)?;
+        builder.target(env_logger::Target::Pipe(Box::new(file)));
     }
 
-    CombinedLogger::init(loggers)?;
+    builder.init();
     Ok(())
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    setup_logger(cli.verbose, cli.log.then_some(&PathBuf::from("dedup.log")))?;
+    setup_logger(cli.verbose, cli.log.then_some(&PathBuf::from("dedup.log").as_path()))?;
 
     log::info!("Logger initialized. Application starting.");
     log::debug!("CLI args: {:#?}", cli);
@@ -157,10 +144,7 @@ fn main() -> Result<()> {
                         }
                     }
 
-                    // Output to file if specified (and not using default if it's just for display)
-                    // The default output file is "duplicates.json". We should write to it unless the user changes it.
-                    // Or, perhaps, only write if the user *explicitly* sets -o or if it's not the default and implicit?
-                    // For now, let's assume we always write to cli.output if duplicates are found.
+                    // Output to file if specified
                     if let Some(output_path) = &cli.output {
                         match file_utils::output_duplicates(&duplicate_sets, output_path, &cli.format) {
                             Ok(_) => {
@@ -191,7 +175,6 @@ fn main() -> Result<()> {
                                     println!("Keeping: {}", kept_file.path.display());
 
                                     if cli.delete {
-                                        // Note: No dry_run flag from CLI yet, so actions are real.
                                         match file_utils::delete_files(&files_to_action, cli.progress) {
                                             Ok(count) => total_deleted += count,
                                             Err(e) => log::error!("Error during deletion batch: {}", e),
