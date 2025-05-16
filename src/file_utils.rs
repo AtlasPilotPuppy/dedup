@@ -2037,12 +2037,14 @@ fn handle_remote_directory(cli: &crate::Cli, dir_path: &Path) -> Result<Vec<File
             
             // Execute remote dedups scan and parse results
             let output = protocol.execute_dedups(&args)?;
-            
-            // Parse JSON output (assuming dedups outputs JSON)
-            let scan_result: Vec<FileInfo> = serde_json::from_str(&output)
-                .with_context(|| "Failed to parse remote dedups output")?;
-            
-            Ok(scan_result)
+            log::debug!("Remote dedups raw output length: {} bytes", output.len());
+            if let Ok(scan_result) = serde_json::from_str::<Vec<FileInfo>>(&output) {
+                log::debug!("Successfully parsed remote dedups JSON: {} files", scan_result.len());
+                return Ok(scan_result);
+            }
+            // Fallback to remote listing
+            log::info!("Remote dedups output could not be parsed as JSON; falling back to basic remote listing");
+            return handle_remote_fallback(cli, &remote);
         } else {
             log::info!("Remote dedups found at {} but use_remote_dedups is disabled", dedups_path);
             handle_remote_fallback(cli, &remote)
