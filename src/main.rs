@@ -7,10 +7,10 @@ use anyhow::Result;
 use humansize::{format_size, DECIMAL};
 use env_logger;
 
-use dedup_tui::Cli;
-use dedup_tui::file_utils;
-use dedup_tui::tui_app;
-use dedup_tui::config::DedupConfig;
+use dedup::Cli;
+use dedup::file_utils;
+use dedup::tui_app;
+use dedup::config::DedupConfig;
 
 fn setup_logger(verbosity: u8, log_file: Option<&Path>) -> Result<()> {
     let level = match verbosity {
@@ -40,7 +40,7 @@ fn main() -> Result<()> {
     // Configure logging based on mode
     if cli.interactive {
         // For interactive mode, use a file
-        let log_file = Some(Path::new("dedup_tui.log"));
+        let log_file = Some(Path::new("dedup.log"));
         setup_logger(cli.verbose, log_file)?;
     } else if cli.log || cli.log_file.is_some() {
         // User enabled logging

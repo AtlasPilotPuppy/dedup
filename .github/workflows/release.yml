@@ -14,16 +14,16 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            artifact_name: dedup_tui-linux-x86_64
+            artifact_name: dedup-linux-x86_64
           - os: macos-latest
             target: x86_64-apple-darwin
-            artifact_name: dedup_tui-macos-x86_64
+            artifact_name: dedup-macos-x86_64
           - os: macos-latest
             target: aarch64-apple-darwin
-            artifact_name: dedup_tui-macos-aarch64
+            artifact_name: dedup-macos-aarch64
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            artifact_name: dedup_tui-windows-x86_64.exe
+            artifact_name: dedup-windows-x86_64.exe
 
     steps:
     - uses: actions/checkout@v3
@@ -90,6 +90,6 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ steps.create_release.outputs.upload_url }}
-        asset_path: ./dedup_tui-*
+        asset_path: ./dedup-*
         asset_name: ${{ basename }}
         asset_content_type: application/octet-stream 

@@ -27,27 +27,27 @@ A high-performance duplicate file finder and manager written in Rust. `dedup` ef
 ### From Cargo
 
 ```bash
-cargo install dedup_tui
+cargo install dedup
 ```
 
 ### From Source
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/dedup_tui.git
-cd dedup_tui
+git clone https://github.com/yourusername/dedup.git
+cd dedup
 
 # Build in release mode
 cargo build --release
 
-# The binary will be available at target/release/dedup_tui
+# The binary will be available at target/release/dedup
 ```
 
 ### Windows Limitations
 
-When using `dedup_tui` on Windows, please note the following limitations:
+When using `dedup` on Windows, please note the following limitations:
 
-1. **Path Length**: Windows has a default path length limit of 260 characters. While `dedup_tui` can handle longer paths, you may need to enable long path support in Windows:
+1. **Path Length**: Windows has a default path length limit of 260 characters. While `dedup` can handle longer paths, you may need to enable long path support in Windows:
    - Run `git config --system core.longpaths true` if using Git
    - Enable long paths in Windows registry or group policy
    - Use the `\\?\` prefix for paths longer than 260 characters
@@ -77,41 +77,41 @@ When using `dedup_tui` on Windows, please note the following limitations:
 
 ```bash
 # Find duplicates in the current directory using the TUI
-dedup_tui -i
+dedup -i
 
 # Find duplicates in a specific directory
-dedup_tui /path/to/directory
+dedup /path/to/directory
 
 # Find and delete duplicates (non-interactive)
-dedup_tui /path/to/directory --delete --mode newest_modified
+dedup /path/to/directory --delete --mode newest_modified
 
 # Use a custom config file
-dedup_tui /path/to/directory --config-file /path/to/my-config.toml
+dedup /path/to/directory --config-file /path/to/my-config.toml
 ```
 
 ### Multi-Directory Operations
 
 ```bash
 # Copy missing files from source to target directory
-dedup_tui /source/directory /target/directory
+dedup /source/directory /target/directory
 
 # Explicitly specify a target directory (can be useful with multiple source directories)
-dedup_tui /source/dir1 /source/dir2 --target /target/directory
+dedup /source/dir1 /source/dir2 --target /target/directory
 
 # Deduplicate between directories and copy missing files
-dedup_tui /source/directory /target/directory --deduplicate
+dedup /source/directory /target/directory --deduplicate
 
 # Find duplicates in both source and target (without copying)
 # and save the results to a file
-dedup_tui /source/directory /target/directory --deduplicate -o duplicates.json
+dedup /source/directory /target/directory --deduplicate -o duplicates.json
 
 # Copy missing files from multiple source directories to a target
-dedup_tui /source/dir1 /source/dir2 /source/dir3 /target/directory
+dedup /source/dir1 /source/dir2 /source/dir3 /target/directory
 
 # First deduplicate the target, then copy unique files from source
 # (run as separate commands)
-dedup_tui /target/directory --delete --mode newest_modified
-dedup_tui /source/directory /target/directory
+dedup /target/directory --delete --mode newest_modified
+dedup /source/directory /target/directory
 ```
 
 ## Media Deduplication
@@ -134,35 +134,35 @@ The media deduplication feature can detect similar images, videos, and audio fil
 
 ```bash
 # Enable media deduplication mode
-dedup_tui /path/to/media --media-mode
+dedup /path/to/media --media-mode
 
 # Set resolution preference (highest, lowest, or custom resolution)
-dedup_tui /path/to/media --media-mode --media-resolution highest
-dedup_tui /path/to/media --media-mode --media-resolution lowest
-dedup_tui /path/to/media --media-mode --media-resolution 1280x720
+dedup /path/to/media --media-mode --media-resolution highest
+dedup /path/to/media --media-mode --media-resolution lowest
+dedup /path/to/media --media-mode --media-resolution 1280x720
 
 # Set format preferences (comma-separated, highest priority first)
-dedup_tui /path/to/media --media-mode --media-formats raw,png,jpg
+dedup /path/to/media --media-mode --media-formats raw,png,jpg
 
 # Adjust similarity threshold (0-100, default: 90)
-dedup_tui /path/to/media --media-mode --media-similarity 85
+dedup /path/to/media --media-mode --media-similarity 85
 ```
 
 ### Recommended Settings for Different Use Cases
 
 - **Professional Photography**:
   ```bash
-  dedup_tui /path/to/photos --media-mode --media-resolution highest --media-formats raw,tiff,png,jpg
+  dedup /path/to/photos --media-mode --media-resolution highest --media-formats raw,tiff,png,jpg
   ```
 
 - **Web/Mobile Optimization**:
   ```bash
-  dedup_tui /path/to/images --media-mode --media-resolution 1920x1080 --media-formats webp,jpg,png
+  dedup /path/to/images --media-mode --media-resolution 1920x1080 --media-formats webp,jpg,png
   ```
 
 - **Audio Collection**:
   ```bash
-  dedup_tui /path/to/audio --media-mode --media-formats flac,mp3,ogg
+  dedup /path/to/audio --media-mode --media-formats flac,mp3,ogg
   ```
 
 ### Sample Media Script
@@ -177,10 +177,10 @@ chmod +x sample_media.sh
 ./sample_media.sh
 
 # Test media deduplication on the sample files (interactive mode)
-dedup_tui -i demo --media-mode
+dedup -i demo --media-mode
 
 # For CLI mode with specific options
-dedup_tui --dry-run demo --media-mode --media-resolution highest --media-formats png,jpg,mp4
+dedup --dry-run demo --media-mode --media-resolution highest --media-formats png,jpg,mp4
 ```
 
 The script creates the following directory structure:
@@ -204,47 +204,47 @@ Dependencies for the sample script:
 
 ```bash
 # Find and list duplicates only
-dedup_tui /path/to/photos
+dedup /path/to/photos
 
 # Find and immediately delete duplicates, keeping newest files
-dedup_tui /path/to/photos --delete --mode newest_modified
+dedup /path/to/photos --delete --mode newest_modified
 
 # Move duplicates to a separate folder instead of deleting
-dedup_tui /path/to/photos --move-to /path/to/duplicates --mode shortest_path
+dedup /path/to/photos --move-to /path/to/duplicates --mode shortest_path
 
 # Export a report of duplicates for review
-dedup_tui /path/to/photos -o duplicates.json
+dedup /path/to/photos -o duplicates.json
 
 # Use file caching for faster repeated scans
-dedup_tui /path/to/photos --cache-location ~/.dedup_cache --fast-mode
+dedup /path/to/photos --cache-location ~/.dedup_cache --fast-mode
 ```
 
 #### Synchronizing Directories
 
 ```bash
 # Scenario 1: Safely copy missing files from source to target
-dedup_tui /source/photos /target/backup
+dedup /source/photos /target/backup
 
 # Scenario 2: Full synchronization with deduplication
 # Step 1: Clean duplicates in the target directory
-dedup_tui /target/backup --delete --mode newest_modified
+dedup /target/backup --delete --mode newest_modified
 # Step 2: Clean duplicates in the source directory
-dedup_tui /source/photos --delete --mode newest_modified
+dedup /source/photos --delete --mode newest_modified
 # Step 3: Copy missing files from source to target
-dedup_tui /source/photos /target/backup
+dedup /source/photos /target/backup
 
 # Scenario 3: One-step operation to deduplicate between directories
-dedup_tui /source/photos /target/backup --deduplicate
+dedup /source/photos /target/backup --deduplicate
 
 # Scenario 4: Multiple source directories to one target
-dedup_tui /photos/2020 /photos/2021 /photos/2022 /backup/all_photos
+dedup /photos/2020 /photos/2021 /photos/2022 /backup/all_photos
 ```
 
 ### Available Options
 
 ```
 USAGE:
-    dedup_tui [OPTIONS] [directory]
+    dedup [OPTIONS] [directory]
 
 ARGS:
     <directory>    The directory to scan for duplicate files [default: .]
@@ -392,7 +392,7 @@ The configuration file is located at:
 
 You can also specify a custom configuration file using the `--config-file` option:
 ```bash
-dedup_tui --config-file /path/to/my-config.toml /path/to/directory
+dedup --config-file /path/to/my-config.toml /path/to/directory
 ```
 
 ### Format
@@ -482,8 +482,8 @@ To set up the development environment:
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/dedup_tui.git
-cd dedup_tui
+git clone https://github.com/yourusername/dedup.git
+cd dedup
 
 # Install development dependencies
 cargo install cargo-watch cargo-tarpaulin

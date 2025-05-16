@@ -2,7 +2,7 @@
 
 # sample_media.sh - Download sample media files to demonstrate media deduplication
 # This script will create a folder structure with sample images, videos, and audio files
-# to demonstrate the media deduplication features of dedup_tui
+# to demonstrate the media deduplication features of dedup
 
 set -e
 echo "Creating sample media files for dedup demonstration..."
@@ -155,6 +155,7 @@ echo "├── different_formats    # Same media in different file formats"
 echo "└── resized              # Same media with different resolutions"
 echo ""
 echo "To test media deduplication run:"
+echo "dedup -i demo --media-mode"
 echo "dedup_tui -i demo --media-mode"
 echo "or"
 echo "dedup_tui --dry-run demo --media-mode --media-resolution highest --media-formats png,jpg,mp4"

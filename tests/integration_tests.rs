@@ -9,11 +9,11 @@ use rand::{Rng, SeedableRng};
 use rand::rngs::StdRng;
 use rand::distributions::Alphanumeric;
 
-// Assuming your crate's main library functions are accessible via `dedup_tui::`
-use dedup_tui::file_utils::{self, FileInfo, SelectionStrategy, SortCriterion, SortOrder};
-use dedup_tui::Cli; // Assuming Cli is public or pub(crate) and accessible
-use dedup_tui::media_dedup::MediaDedupOptions; // Import MediaDedupOptions directly
-// use dedup_tui::tui_app::AppState; // Remove unused import
+// Assuming your crate's main library functions are accessible via `dedup::`
+use dedup::file_utils::{self, FileInfo, SelectionStrategy, SortCriterion, SortOrder};
+use dedup::Cli; // Assuming Cli is public or pub(crate) and accessible
+use dedup::media_dedup::MediaDedupOptions; // Import MediaDedupOptions directly
+// use dedup::tui_app::AppState; // Remove unused import
 
 // --- Test Constants ---
 // const TEST_BASE_DIR_NAME: &str = "dedup_integration_tests"; // Remove unused constant
@@ -194,6 +194,7 @@ impl TestEnv {
             delete: false,
             move_to: None,
             log: false, // Avoid log file creation during tests unless specific test needs it
+            log_file: None, // Add the missing log_file field
             output: None,
             format: "json".to_string(),
             algorithm: "blake3".to_string(), // Fast algorithm for tests
@@ -233,14 +234,14 @@ impl Drop for TestEnv {
 mod integration {
     use super::*;
     // Make sure this path is correct for your project structure
-    // For example, if file_utils is in lib.rs: `use dedup_tui::file_utils;`
+    // For example, if file_utils is in lib.rs: `use dedup::file_utils;`
     // If it's a submodule: `use crate::file_utils;` (if tests/ is seen as part of crate)
-    // Or `use dedup_tui::file_utils;` if dedup_tui is the crate name.
+    // Or `use dedup::file_utils;` if dedup is the crate name.
     // Assuming file_utils is at the root of the crate or lib.rs exposes it via `pub mod file_utils;`
     // and main.rs might have `mod file_utils;` if it's a binary crate.
     // If Cli is defined in main.rs, you might need to move it to lib.rs or make it accessible.
     // For tests, it's common to access items via `crate_name::module::item`.
-    // Let's assume `dedup_tui` is the crate name as specified in Cargo.toml
+    // Let's assume `dedup` is the crate name as specified in Cargo.toml
 
     #[test]
     fn test_environment_setup_cleanup() -> Result<()> {

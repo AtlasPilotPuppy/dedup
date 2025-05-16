@@ -1,5 +1,5 @@
 [package]
-name = "dedup_tui"
+name = "dedup"
 version = "0.1.0"
 edition = "2021"
 

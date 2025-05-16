@@ -27,7 +27,7 @@ pub mod video_fingerprint;
 // or re-export it from main.rs if main.rs uses this lib.rs as a library.
 // For a typical binary project that also wants to expose a library for testing/other uses:
 // Option 1: Move Cli to lib.rs
-// Option 2: Keep Cli in main.rs but ensure main.rs uses `dedup_tui::Cli` after this lib.rs is established.
+// Option 2: Keep Cli in main.rs but ensure main.rs uses `dedup::Cli` after this lib.rs is established.
 
 // For now, let's assume you will move or already have Cli definition in a way it can be exported.
 // If Cli is in main.rs, and main.rs is the binary entry point, you can't directly import from main.rs into lib.rs.
@@ -304,7 +304,7 @@ impl Cli {
 // you might need to adjust your integration tests to not depend on Cli directly if it's not easily importable.
 // However, the standard way is to define such core structs in lib.rs.
 
-// For the integration tests to compile with `use dedup_tui::Cli;`
+// For the integration tests to compile with `use dedup::Cli;`
 // You need to define or re-export `Cli` from your library crate (src/lib.rs)
 // If Cli is in main.rs, consider moving it to lib.rs or a module within lib.rs.
 // If you cannot move it now, the tests might need to construct a Cli-like struct or
@@ -315,7 +315,7 @@ impl Cli {
 // The Cli struct is now defined above directly in this file.
 
 // If Cli is in main.rs, and main.rs becomes a binary that uses this library,
-// then main.rs would use `use dedup_tui::Cli;` (if Cli is made public in lib.rs).
+// then main.rs would use `use dedup::Cli;` (if Cli is made public in lib.rs).
 
 // Simplest path for now: Define Cli in a new module within the library, e.g. `src/cli_definition.rs`
 // then `pub mod cli_definition;` and `pub use cli_definition::Cli;` here. 

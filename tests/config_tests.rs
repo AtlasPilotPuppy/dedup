@@ -1,4 +1,5 @@
-use dedup_tui::config::DedupConfig;
+use dedup::config::DedupConfig;
+use dedup::Cli;
 use std::fs;
 use tempfile::tempdir;
 
@@ -100,7 +101,6 @@ fn test_create_default_if_not_exists() -> anyhow::Result<()> {
 #[test]
 fn test_custom_config_file() -> anyhow::Result<()> {
     use clap::Parser;
-    use dedup_tui::Cli;
     
     // Create a temporary directory for testing
     let temp_dir = tempdir()?;
@@ -117,7 +117,7 @@ fn test_custom_config_file() -> anyhow::Result<()> {
     
     // Set up CLI args to use the custom config
     let args = vec![
-        "dedup_tui",           // Program name
+        "dedup",           // Program name
         "--interactive",       // Interactive mode (no directory required)
         "--config-file",       // Custom config flag
         custom_config_path.to_str().unwrap(), // Custom config path
