@@ -5,6 +5,9 @@ on:
     tags:
       - 'v*'
 
+permissions:
+  contents: write
+
 jobs:
   build:
     name: Build
@@ -83,18 +86,26 @@ jobs:
     name: Create Release
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
     - uses: actions/checkout@v4
 
     - name: Download all artifacts
       uses: actions/download-artifact@v4
 
+    - name: List downloaded artifacts
+      run: ls -la
+
     - name: Create Release
       id: create_release
       uses: softprops/action-gh-release@v1
       with:
         files: |
-          dedup-*
+          dedup-linux-x86_64.tar.gz
+          dedup-macos-x86_64.tar.gz
+          dedup-macos-aarch64.tar.gz
+          dedup-windows-x86_64.exe.zip
         generate_release_notes: true
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} 
