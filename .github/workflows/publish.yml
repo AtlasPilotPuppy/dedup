@@ -31,12 +31,18 @@ jobs:
 
       - name: Check formatting
         run: cargo fmt -- --check
+        env:
+          RUSTFLAGS: "-C target-cpu=native"
 
       - name: Clippy
         run: cargo clippy -- -D warnings
+        env:
+          RUSTFLAGS: "-C target-cpu=native"
 
       - name: Run tests
         run: cargo test --all-features
+        env:
+          RUSTFLAGS: "-C target-cpu=native"
 
       - name: Publish to crates.io
         run: cargo publish --token ${CRATES_TOKEN}
