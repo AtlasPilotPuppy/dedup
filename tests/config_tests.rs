@@ -76,21 +76,31 @@ fn test_nonexistent_config() -> anyhow::Result<()> {
 fn test_create_default_if_not_exists() -> anyhow::Result<()> {
     // Create a temporary directory for testing
     let temp_dir = tempdir()?;
-    let config_path = temp_dir.path().join(".deduprc");
 
-    // Set a test home directory to avoid affecting the real user's config
+    // Set up environment for cross-platform testing
     std::env::set_var("HOME", temp_dir.path());
+    std::env::set_var("USERPROFILE", temp_dir.path());
 
-    // Mock the config path function for testing
+    // On Windows, also set up APPDATA for config_dir
+    #[cfg(target_family = "windows")]
+    std::env::set_var("APPDATA", temp_dir.path());
+
+    // Create default config
     let create_result = DedupConfig::create_default_if_not_exists();
 
     // The function should succeed and return true (file was created)
     assert!(create_result.is_ok());
+    assert!(create_result.unwrap());
 
-    // Check if the file was created
-    assert!(config_path.exists());
+    // Get the expected config path and verify the file exists
+    let config_path = DedupConfig::get_config_path()?;
+    assert!(
+        config_path.exists(),
+        "Config file was not created at expected path: {:?}",
+        config_path
+    );
 
-    // If we run it again, it should return false (file already exists)
+    // Second call should return false (file already exists)
     let second_result = DedupConfig::create_default_if_not_exists();
     assert!(second_result.is_ok());
     assert!(!second_result.unwrap());

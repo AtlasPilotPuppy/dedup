@@ -100,10 +100,24 @@ impl Default for DedupConfig {
 impl DedupConfig {
     /// Get the path to the user's config file
     pub fn get_config_path() -> Result<PathBuf> {
-        // Try to get the user's home directory
-        let home_dir = dirs::home_dir().context("Could not determine home directory")?;
+        #[cfg(target_family = "unix")]
+        {
+            // Unix-style: ~/.deduprc
+            let home_dir = dirs::home_dir().context("Could not determine home directory")?;
+            Ok(home_dir.join(".deduprc"))
+        }
 
-        Ok(home_dir.join(".deduprc"))
+        #[cfg(target_family = "windows")]
+        {
+            // Windows-style: %APPDATA%\dedup\config.toml or %USERPROFILE%\.deduprc as fallback
+            if let Some(config_dir) = dirs::config_dir() {
+                Ok(config_dir.join("dedup").join("config.toml"))
+            } else {
+                // Fallback to home directory if config_dir isn't available
+                let home_dir = dirs::home_dir().context("Could not determine home directory")?;
+                Ok(home_dir.join(".deduprc"))
+            }
+        }
     }
 
     /// Load configuration from the .deduprc file
