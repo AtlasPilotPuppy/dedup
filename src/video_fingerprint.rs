@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use std::path::Path;
 use std::process::Command;
 
-use image::{DynamicImage, ImageBuffer, Rgba};
+use image::DynamicImage;
 use img_hash::{HashAlg, HasherConfig};
 
 /// Video fingerprinting module using ffmpeg to extract keyframes
@@ -64,7 +64,7 @@ fn extract_keyframes(path: &Path) -> Result<Vec<DynamicImage>> {
 
     // Use ffmpeg to extract I-frames (keyframes) only
     let output = Command::new("ffmpeg")
-        .args(&[
+        .args([
             "-i",
             path.to_str().unwrap(),
             "-vf",
@@ -115,7 +115,7 @@ pub fn extract_video_metadata(
 
     // Use ffmpeg to get video metadata
     let output = Command::new("ffprobe")
-        .args(&[
+        .args([
             "-v",
             "error",
             "-select_streams",

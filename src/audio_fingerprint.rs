@@ -63,7 +63,7 @@ fn fingerprint_with_ffmpeg(path: &Path) -> Result<Vec<u8>> {
     // Use ffmpeg to analyze audio and extract loudness information
     // This is a simpler alternative to chromaprint but less accurate
     let output = Command::new("ffmpeg")
-        .args(&[
+        .args([
             "-i",
             path.to_str().unwrap(),
             "-filter:a",

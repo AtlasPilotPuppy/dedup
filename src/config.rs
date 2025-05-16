@@ -4,7 +4,7 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
-use crate::media_dedup::{FormatPreference, MediaDedupOptions, ResolutionPreference};
+use crate::media_dedup::MediaDedupOptions;
 
 /// Configuration structure for .deduprc file
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -187,7 +187,7 @@ mod tests {
         assert!(config.include.is_empty());
         assert!(config.exclude.is_empty());
         assert_eq!(config.parallel, None);
-        assert_eq!(config.progress, false);
+        assert!(!config.progress);
     }
 
     #[test]

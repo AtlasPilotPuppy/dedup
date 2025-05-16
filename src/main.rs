@@ -2,7 +2,6 @@
 // mod tui_app;
 
 use anyhow::Result;
-use env_logger;
 use humansize::{format_size, DECIMAL};
 use simplelog::LevelFilter;
 use std::path::Path;

@@ -19,10 +19,7 @@ use crate::video_fingerprint;
 
 /// Check if ffmpeg is installed and available
 pub fn is_ffmpeg_available() -> bool {
-    match Command::new("ffmpeg").arg("-version").output() {
-        Ok(_) => true,
-        Err(_) => false,
-    }
+    Command::new("ffmpeg").arg("-version").output().is_ok()
 }
 
 /// Different supported media types for deduplication
@@ -139,15 +136,12 @@ impl From<FileInfo> for MediaFileInfo {
 pub fn detect_media_type(path: &Path) -> MediaKind {
     // First try with infer (content-based detection)
     if let Ok(content) = std::fs::read(path) {
-        match infer::get(&content) {
-            Some(info) => match info.mime_type() {
-                m if m.starts_with("image/") => return MediaKind::Image,
-                m if m.starts_with("video/") => return MediaKind::Video,
-                m if m.starts_with("audio/") => return MediaKind::Audio,
-                _ => {}
-            },
-            None => {}
-        }
+        if let Some(info) = infer::get(&content) { match info.mime_type() {
+            m if m.starts_with("image/") => return MediaKind::Image,
+            m if m.starts_with("video/") => return MediaKind::Video,
+            m if m.starts_with("audio/") => return MediaKind::Audio,
+            _ => {}
+        } }
     }
 
     // Fall back to extension-based detection if content analysis failed
@@ -297,7 +291,7 @@ pub fn extract_audio_metadata(path: &Path) -> Result<MediaMetadata> {
     if is_ffmpeg_available() {
         // Use ffprobe to get audio metadata
         let output = Command::new("ffprobe")
-            .args(&[
+            .args([
                 "-v",
                 "error",
                 "-select_streams",
@@ -619,9 +613,9 @@ pub fn find_similar_media_files(
     let mut similar_groups: Vec<Vec<MediaFileInfo>> = Vec::new();
 
     // Process each media type separately
-    process_media_type_similarity(&image_files, &options, &mut similar_groups)?;
-    process_media_type_similarity(&video_files, &options, &mut similar_groups)?;
-    process_media_type_similarity(&audio_files, &options, &mut similar_groups)?;
+    process_media_type_similarity(&image_files, options, &mut similar_groups)?;
+    process_media_type_similarity(&video_files, options, &mut similar_groups)?;
+    process_media_type_similarity(&audio_files, options, &mut similar_groups)?;
 
     log::info!(
         "Found {} groups of similar media files.",
@@ -708,7 +702,7 @@ pub fn convert_to_duplicate_sets(
             // Create a fake "hash" for media sets based on the first file in the group
             let hash = format!(
                 "media_{}",
-                group[0].file_info.path.to_string_lossy().to_string()
+                group[0].file_info.path.to_string_lossy()
             );
             let size = group[0].file_info.size;
 
@@ -832,7 +826,7 @@ mod tests {
     #[test]
     fn test_media_dedup_options_default() {
         let options = MediaDedupOptions::default();
-        assert_eq!(options.enabled, false);
+        assert!(!options.enabled);
         assert_eq!(options.similarity_threshold, 90);
 
         // Test that resolution preference is highest by default

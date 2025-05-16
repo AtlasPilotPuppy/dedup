@@ -15,7 +15,7 @@ fn test_config_defaults() {
     assert!(config.include.is_empty());
     assert!(config.exclude.is_empty());
     assert_eq!(config.parallel, None);
-    assert_eq!(config.progress, false);
+    assert!(!config.progress);
 }
 
 #[test]
@@ -140,7 +140,7 @@ fn test_custom_config_file() -> anyhow::Result<()> {
     // Verify config values from the custom file
     assert_eq!(config.algorithm, "sha1");
     assert_eq!(config.parallel, Some(2));
-    assert_eq!(config.progress, true);
+    assert!(config.progress);
 
     Ok(())
 }

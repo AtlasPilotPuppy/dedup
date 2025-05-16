@@ -35,7 +35,7 @@ struct TestEnv {
 impl TestEnv {
     pub fn new() -> Self {
         let mut rng = StdRng::from_entropy();
-        let unique_id: String = (0..8).map(|_| rng.sample(&Alphanumeric) as char).collect();
+        let unique_id: String = (0..8).map(|_| rng.sample(Alphanumeric) as char).collect();
         let root_path = std::env::temp_dir().join(format!("dedup_test_{}", unique_id));
 
         if root_path.exists() {
@@ -106,7 +106,7 @@ impl TestEnv {
     // Generates a random alphanumeric string of a given length
     fn generate_random_string(&mut self, length: usize) -> String {
         (0..length)
-            .map(|_| self.rng.sample(&Alphanumeric) as char)
+            .map(|_| self.rng.sample(Alphanumeric) as char)
             .collect()
     }
 
@@ -526,8 +526,7 @@ mod integration {
             let mut found_map = HashMap::new();
             for entry in fs::read_dir(&target_move_dir)? {
                 let entry = entry?;
-                if entry.path().is_file() {
-                    if entry
+                if entry.path().is_file() && entry
                         .path()
                         .file_name()
                         .unwrap_or_default()
@@ -537,11 +536,9 @@ mod integration {
                                 .file_stem()
                                 .unwrap_or_default()
                                 .to_string_lossy(),
-                        )
-                    {
-                        moved_correctly_count += 1;
-                        *found_map.entry(original_path.clone()).or_insert(0) += 1;
-                    }
+                        ) {
+                    moved_correctly_count += 1;
+                    *found_map.entry(original_path.clone()).or_insert(0) += 1;
                 }
             }
             assert_eq!(
@@ -752,7 +749,7 @@ mod integration {
         // List files in the source directory that was copied to target
         println!("Files in copied source directory:");
         if target_dir.join("source").exists() {
-            for entry in fs::read_dir(&target_dir.join("source"))? {
+            for entry in fs::read_dir(target_dir.join("source"))? {
                 println!("  Copied file: {:?}", entry?.path());
             }
         }

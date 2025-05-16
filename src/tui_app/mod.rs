@@ -1648,7 +1648,7 @@ impl App {
                         Ok(())
                     } else {
                         if !target_dir.exists() {
-                            if let Err(e) = std::fs::create_dir_all(&target_dir) {
+                            if let Err(e) = std::fs::create_dir_all(target_dir) {
                                 let error_msg = format!(
                                     "Failed to create target directory {}: {}",
                                     target_dir.display(),
@@ -1691,7 +1691,7 @@ impl App {
                                     dest_path.display(),
                                     size
                                 ));
-                                ()
+                                
                             })
                             .map_err(|e| {
                                 let error_msg = format!(
@@ -2161,10 +2161,10 @@ fn ui(frame: &mut Frame, app: &mut App) {
 
         let settings_text = vec![
             Line::from(Span::styled(format!("1. File Selection Strategy: {:?}", app.state.default_selection_strategy), strategy_style)),
-            Line::from(Span::styled(format!("   (n:newest, o:oldest, s:shortest, l:longest)"), strategy_style)),
+            Line::from(Span::styled("   (n:newest, o:oldest, s:shortest, l:longest)".to_string(), strategy_style)),
             Line::from(Span::raw("")),
             Line::from(Span::styled(format!("2. Hashing Algorithm: {}", app.state.current_algorithm), algo_style)),
-            Line::from(Span::styled(format!("   (m:md5, a:sha256, b:blake3, x:xxhash, g:gxhash, f:fnv1a, c:crc32)"), algo_style)),
+            Line::from(Span::styled("   (m:md5, a:sha256, b:blake3, x:xxhash, g:gxhash, f:fnv1a, c:crc32)".to_string(), algo_style)),
             Line::from(Span::raw("")),
             Line::from(Span::styled(format!("3. Parallel Cores: {}",
                 app.state.current_parallel.map_or_else(
@@ -2172,13 +2172,13 @@ fn ui(frame: &mut Frame, app: &mut App) {
                     |c| c.to_string()
                 )
             ), parallel_style)),
-            Line::from(Span::styled(format!("   (0 for auto, 1-N, +/-, requires rescan)"), parallel_style)),
+            Line::from(Span::styled("   (0 for auto, 1-N, +/-, requires rescan)".to_string(), parallel_style)),
             Line::from(Span::raw("")),
             Line::from(Span::styled(format!("4. Sort Files By: {:?}", app.state.current_sort_criterion), sort_criterion_style)),
-            Line::from(Span::styled(format!("   (f:name, z:size, c:created, m:modified, p:path length)"), sort_criterion_style)),
+            Line::from(Span::styled("   (f:name, z:size, c:created, m:modified, p:path length)".to_string(), sort_criterion_style)),
             Line::from(Span::raw("")),
             Line::from(Span::styled(format!("5. Sort Order: {:?}", app.state.current_sort_order), sort_order_style)),
-            Line::from(Span::styled(format!("   (a:ascending, d:descending)"), sort_order_style)),
+            Line::from(Span::styled("   (a:ascending, d:descending)".to_string(), sort_order_style)),
             Line::from(Span::raw("")),
 
             // Media deduplication options
@@ -2195,17 +2195,17 @@ fn ui(frame: &mut Frame, app: &mut App) {
                     "Disabled"
                 }
             ), media_mode_style)),
-            Line::from(Span::styled(format!("   (e:toggle, requires rescan)"), media_mode_style)),
+            Line::from(Span::styled("   (e:toggle, requires rescan)".to_string(), media_mode_style)),
             Line::from(Span::raw("")),
             Line::from(Span::styled(format!("7. Media Resolution Preference: {}", app.state.media_resolution), media_resolution_style)),
-            Line::from(Span::styled(format!("   (h:highest, l:lowest, c:custom, requires rescan)"), media_resolution_style)),
+            Line::from(Span::styled("   (h:highest, l:lowest, c:custom, requires rescan)".to_string(), media_resolution_style)),
             Line::from(Span::raw("")),
             Line::from(Span::styled(format!("8. Media Format Preference: {}",
                 app.state.media_formats.iter().take(3).cloned().collect::<Vec<_>>().join(" > ")), media_format_style)),
-            Line::from(Span::styled(format!("   (r:raw first, p:png first, j:jpg first, requires rescan)"), media_format_style)),
+            Line::from(Span::styled("   (r:raw first, p:png first, j:jpg first, requires rescan)".to_string(), media_format_style)),
             Line::from(Span::raw("")),
             Line::from(Span::styled(format!("9. Media Similarity Threshold: {}%", app.state.media_similarity), media_similarity_style)),
-            Line::from(Span::styled(format!("   (1:95% strict, 2:90% default, 3:85% relaxed, 4:75% very relaxed, requires rescan)"), media_similarity_style)),
+            Line::from(Span::styled("   (1:95% strict, 2:90% default, 3:85% relaxed, 4:75% very relaxed, requires rescan)".to_string(), media_similarity_style)),
             Line::from(Span::raw("")),
             Line::from(Span::raw(if app.state.rescan_needed && app.state.sort_settings_changed {
                 "[!] Algorithm/Parallelism/Media and Sort settings changed. Ctrl+R to rescan, Sort applied on Esc."
@@ -2431,15 +2431,13 @@ fn ui(frame: &mut Frame, app: &mut App) {
                                 prefix = "[I]";
                             }
                         }
-                    } else {
-                        if let Ok((default_kept, _)) = file_utils::determine_action_targets(
-                            selected_set,
-                            app.state.default_selection_strategy,
-                        ) {
-                            if default_kept.path == file_info.path {
-                                style = style.fg(Color::Green);
-                                prefix = "[k]";
-                            }
+                    } else if let Ok((default_kept, _)) = file_utils::determine_action_targets(
+                        selected_set,
+                        app.state.default_selection_strategy,
+                    ) {
+                        if default_kept.path == file_info.path {
+                            style = style.fg(Color::Green);
+                            prefix = "[k]";
                         }
                     }
                     ListItem::new(Line::from(vec![
@@ -2472,7 +2470,7 @@ fn ui(frame: &mut Frame, app: &mut App) {
         let mut files_list_state = ListState::default();
         if app
             .current_selected_set_from_display_list()
-            .map_or(false, |s| !s.files.is_empty())
+            .is_some_and(|s| !s.files.is_empty())
         {
             files_list_state.select(Some(app.state.selected_file_index_in_set));
         }
@@ -2736,7 +2734,7 @@ fn ui(frame: &mut Frame, app: &mut App) {
                 app.state
                     .log_filter
                     .as_ref()
-                    .map_or(true, |f| msg.contains(f))
+                    .is_none_or(|f| msg.contains(f))
             })
             .skip(scroll)
             .take(log_height)

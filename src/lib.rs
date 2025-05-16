@@ -43,7 +43,7 @@ use std::path::PathBuf;
 // Ensure these are correctly pathed if they are part of file_utils module
 use crate::config::DedupConfig;
 use crate::file_utils::{SortCriterion, SortOrder};
-use crate::media_dedup::{FormatPreference, MediaDedupOptions, ResolutionPreference};
+use crate::media_dedup::MediaDedupOptions;
 
 #[derive(Parser, Debug, Clone)]
 #[clap(author, version, about, long_about = None)]

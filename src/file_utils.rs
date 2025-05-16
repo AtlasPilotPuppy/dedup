@@ -1,13 +1,11 @@
 use anyhow::Result;
 use glob::{Pattern, PatternError};
-use indicatif::{ProgressBar, ProgressStyle};
 use num_cpus;
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 use walkdir::WalkDir;
 
@@ -771,7 +769,7 @@ fn find_similar_media_files_with_progress(
         }
     };
 
-    send_status(4, format!("Starting media similarity detection..."));
+    send_status(4, "Starting media similarity detection...".to_string());
 
     // First, collect all files recursively
     let filter_rules = FilterRules::new(cli)?;

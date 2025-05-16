@@ -24,7 +24,7 @@ impl FileCacheEntry {
             path: file_info.path.clone(),
             size: file_info.size,
             hash: hash.clone(),
-            modified_at: file_info.modified_at.clone(),
+            modified_at: file_info.modified_at,
             algorithm: algorithm.to_string(),
         })
     }
@@ -34,7 +34,7 @@ impl FileCacheEntry {
             path: self.path.clone(),
             size: self.size,
             hash: Some(self.hash.clone()),
-            modified_at: self.modified_at.clone(),
+            modified_at: self.modified_at,
             created_at: None, // Cache doesn't store creation time
         }
     }
