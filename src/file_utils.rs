@@ -3,7 +3,6 @@ use glob::{Pattern, PatternError};
 use num_cpus;
 use rayon::prelude::*;
 use sha1::Digest;
-use sha2::Digest as Sha2Digest;
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::hash::Hasher;
@@ -264,9 +263,9 @@ pub fn calculate_hash(path: &Path, algorithm: &str) -> Result<String> {
         }
         #[cfg(not(feature = "linux"))]
         "gxhash" => {
-            return Err(anyhow::anyhow!(
+            Err(anyhow::anyhow!(
                 "gxhash is only available on Linux platforms"
-            ));
+            ))
         }
         "fnv1a" => {
             let mut hasher = fnv::FnvHasher::default();
@@ -277,7 +276,7 @@ pub fn calculate_hash(path: &Path, algorithm: &str) -> Result<String> {
             let result = crc32fast::hash(&buffer);
             Ok(format!("{:08x}", result))
         }
-        _ => return Err(anyhow::anyhow!("Invalid hash algorithm: {}", algorithm)),
+        _ => Err(anyhow::anyhow!("Invalid hash algorithm: {}", algorithm)),
     }
 }
 
