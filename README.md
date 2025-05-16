@@ -7,6 +7,7 @@ A high-performance duplicate file finder and manager written in Rust. `dedup` ef
 - **High Performance**: Uses multi-threading with Rayon for parallel hash calculation
 - **Multiple Hash Algorithms**: Choose between MD5, SHA1, SHA256, Blake3, xxHash (default), GxHash, FNV1a, or CRC32
 - **Interactive TUI**: Visually inspect and manage duplicate files
+- **Media Deduplication**: Identify similar media files that differ in format, resolution, or quality
 - **File Cache**: Store and reuse file hash values to speed up repeated scans of unchanged files
 - **Selection Strategies**: Various automated selection strategies for keeping/removing duplicates
   - Shortest path: Keep files with the shortest paths
@@ -85,6 +86,90 @@ dedup_tui /target/directory --delete --mode newest_modified
 dedup_tui /source/directory /target/directory
 ```
 
+## Media Deduplication
+
+The media deduplication feature can detect similar images, videos, and audio files even when they have different formats, resolutions, or quality levels.
+
+### Supported Media Types
+
+- **Images**: Detects similar images using perceptual hashing
+- **Videos**: Extracts keyframes to identify similar video content
+- **Audio**: Creates audio fingerprints to match similar audio content
+
+### How It Works
+
+- **Images**: Uses perceptual hashing (pHash) to create a "fingerprint" of the visual content
+- **Videos**: Extracts keyframes and generates visual fingerprints
+- **Audio**: Generates acoustic fingerprints that can identify similar audio content
+
+### Media Deduplication Options
+
+```bash
+# Enable media deduplication mode
+dedup_tui /path/to/media --media-mode
+
+# Set resolution preference (highest, lowest, or custom resolution)
+dedup_tui /path/to/media --media-mode --media-resolution highest
+dedup_tui /path/to/media --media-mode --media-resolution lowest
+dedup_tui /path/to/media --media-mode --media-resolution 1280x720
+
+# Set format preferences (comma-separated, highest priority first)
+dedup_tui /path/to/media --media-mode --media-formats raw,png,jpg
+
+# Adjust similarity threshold (0-100, default: 90)
+dedup_tui /path/to/media --media-mode --media-similarity 85
+```
+
+### Recommended Settings for Different Use Cases
+
+- **Professional Photography**:
+  ```bash
+  dedup_tui /path/to/photos --media-mode --media-resolution highest --media-formats raw,tiff,png,jpg
+  ```
+
+- **Web/Mobile Optimization**:
+  ```bash
+  dedup_tui /path/to/images --media-mode --media-resolution 1920x1080 --media-formats webp,jpg,png
+  ```
+
+- **Audio Collection**:
+  ```bash
+  dedup_tui /path/to/audio --media-mode --media-formats flac,mp3,ogg
+  ```
+
+### Sample Media Script
+
+A sample script is included to demonstrate the media deduplication features. The script downloads small media files and creates variations with different formats, resolutions, and quality levels.
+
+```bash
+# Make the script executable
+chmod +x sample_media.sh
+
+# Run the script to create sample media files
+./sample_media.sh
+
+# Test media deduplication on the sample files (interactive mode)
+dedup_tui -i demo --media-mode
+
+# For CLI mode with specific options
+dedup_tui --dry-run demo --media-mode --media-resolution highest --media-formats png,jpg,mp4
+```
+
+The script creates the following directory structure:
+
+```
+demo/
+├── original             # Original media files
+├── similar_quality      # Same media with different quality levels
+├── different_formats    # Same media in different file formats
+└── resized              # Same media with different resolutions
+```
+
+Dependencies for the sample script:
+- curl: For downloading files
+- ffmpeg: For video and audio conversions
+- ImageMagick: For image conversions
+
 ### Common Workflows
 
 #### Single Directory Cleanup
@@ -140,7 +225,7 @@ OPTIONS:
     -d, --delete                 Delete duplicate files automatically based on selection strategy
     -M, --move-to <move-to>      Move duplicate files to a specified directory
     -l, --log                    Log actions and errors to a file (dedup.log)
-    -o, --output <o>        Output duplicate sets to a file (e.g., duplicates.json)
+    -o, --output <o>             Output duplicate sets to a file (e.g., duplicates.json)
     -f, --format <format>        Format for the output file [json|toml] [default: json]
     -a, --algorithm <algorithm>  Hashing algorithm [md5|sha1|sha256|blake3|xxhash|gxhash|fnv1a|crc32] [default: xxhash]
     -p, --parallel <parallel>    Number of parallel threads for hashing (default: auto)
@@ -162,6 +247,13 @@ OPTIONS:
         --cache-location <cache-location>
                                  Directory to store file hash cache for faster rescans
         --fast-mode              Use cached file hashes when available (requires cache-location)
+        --media-mode             Enable media deduplication for similar images/videos/audio
+        --media-resolution <resolution>
+                                 Preferred resolution for media files [highest|lowest|WIDTHxHEIGHT] [default: highest]
+        --media-formats <formats>
+                                 Preferred formats for media files (comma-separated, e.g., 'raw,png,jpg')
+        --media-similarity <threshold>
+                                 Similarity threshold percentage for media files (0-100) [default: 90]
     -h, --help                   Print help information
     -V, --version                Print version information
 ```
@@ -224,6 +316,11 @@ The Settings screen (Ctrl+S) allows you to configure:
 - Hash algorithm
 - Parallelism level
 - Sort criteria and order
+- Media deduplication options:
+  - Media mode enable/disable
+  - Resolution preference
+  - Format preference
+  - Similarity threshold
 
 ## Screenshots
 
@@ -249,6 +346,10 @@ The Settings screen (Ctrl+S) allows you to configure:
   - Enable `--cache-location` to store file hashes on disk
   - Use `--fast-mode` to skip hash calculations for unchanged files
   - This can dramatically speed up subsequent scans by 5-10x
+- **Media Deduplication**:
+  - Media scanning requires additional processing time, especially for videos
+  - FFmpeg is required for video and audio processing
+  - Ensure FFmpeg is installed if you want to deduplicate videos and audio
 
 ## Configuration File
 
@@ -298,6 +399,22 @@ exclude = ["*tmp*", "*.log"]
 # File hash cache settings
 cache_location = "/path/to/cache"  # Optional: Path to store hash cache
 fast_mode = false                  # Whether to use cache by default
+
+# Media deduplication settings
+[media_dedup]
+enabled = true
+resolution_preference = "highest"  # highest, lowest, or WIDTHxHEIGHT
+similarity_threshold = 90          # 0-100, where 100 is exact match
+
+# Format preferences (ordered by preference, highest first)
+formats = [
+  "raw",
+  "png",
+  "jpg",
+  "mp4",
+  "flac",
+  "mp3"
+]
 ```
 
 ### Usage
