@@ -2,6 +2,8 @@
 
 A high-performance duplicate file finder and manager written in Rust. `dedup` efficiently identifies duplicate files using parallel processing and provides both a command-line interface and an interactive Terminal User Interface (TUI) for managing the results.
 
+[![Tests](https://github.com/AtlasPilotPuppy/dedup/actions/workflows/tests.yml/badge.svg)](https://github.com/AtlasPilotPuppy/dedup/actions/workflows/tests.yml)
+
 ## Features
 
 - **High Performance**: Uses multi-threading with Rayon for parallel hash calculation
