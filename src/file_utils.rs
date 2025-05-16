@@ -257,7 +257,7 @@ pub fn calculate_hash(path: &Path, algorithm: &str) -> Result<String> {
         }
         #[cfg(feature = "linux")]
         "gxhash" => {
-            let mut hasher = gxhash::GxHash::default();
+            let mut hasher = gxhash::GxHasher::default();
             hasher.write(&buffer);
             Ok(format!("{:016x}", hasher.finish()))
         }

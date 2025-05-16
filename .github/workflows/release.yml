@@ -44,21 +44,15 @@ jobs:
           target
         key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
-    # Set RUSTFLAGS and build (OS-specific)
-    - name: Set RUSTFLAGS for gxhash (Linux only)
-      if: matrix.os == 'ubuntu-latest'
-      run: echo "RUSTFLAGS=-C target-cpu=native" >> $GITHUB_ENV
-
-    - name: Build (Linux)
+    # Build (OS-specific)
+    - name: Build (Ubuntu)
       if: matrix.os == 'ubuntu-latest'
       run: cargo build --release --target ${{ matrix.target }} --features linux
+      env:
+        RUSTFLAGS: "-C target-cpu=native"
 
-    - name: Build (macOS)
-      if: matrix.os == 'macos-latest'
-      run: cargo build --release --target ${{ matrix.target }} --features linux
-
-    - name: Build (Windows)
-      if: matrix.os == 'windows-latest'
+    - name: Build (macOS/Windows)
+      if: matrix.os != 'ubuntu-latest'
       run: cargo build --release --target ${{ matrix.target }}
 
     - name: Package
