@@ -14,7 +14,7 @@ use dedups::ssh_utils::SshProtocol;
 #[ignore] // These tests require a configured SSH host and are ignored by default
 fn test_ssh_remote_basic_operations() -> Result<()> {
     // Test basic connection
-    let remote = RemoteLocation::parse("ssh:local:/tmp")?;
+    let remote = RemoteLocation::parse("ssh:test-dedups:/tmp")?;
     
     // Run a simple command
     let output = remote.run_command("echo 'SSH test successful'")?;
@@ -34,7 +34,7 @@ fn test_ssh_remote_basic_operations() -> Result<()> {
 #[ignore] // These tests require a configured SSH host and are ignored by default
 fn test_is_remote_path() -> Result<()> {
     // Test path detection
-    assert!(file_utils::is_remote_path(Path::new("ssh:local:/tmp")));
+    assert!(file_utils::is_remote_path(Path::new("ssh:test-dedups:/tmp")));
     assert!(!file_utils::is_remote_path(Path::new("/tmp")));
     
     Ok(())
@@ -44,7 +44,7 @@ fn test_is_remote_path() -> Result<()> {
 #[ignore] // These tests require a configured SSH host and are ignored by default
 fn test_check_dedups_installed() -> Result<()> {
     // Test checking if dedups is installed on remote
-    let remote = RemoteLocation::parse("ssh:local:/tmp")?;
+    let remote = RemoteLocation::parse("ssh:test-dedups:/tmp")?;
     
     // Create tokio runtime for async functions
     let rt = tokio::runtime::Runtime::new()?;
@@ -70,7 +70,7 @@ fn test_file_operations() -> Result<()> {
     std::fs::write(&local_file, "Test content for SSH operations")?;
     
     // Create a remote path
-    let remote_path_str = format!("ssh:local:/tmp/dedups_remote_test_file.txt");
+    let remote_path_str = format!("ssh:test-dedups:/tmp/dedups_remote_test_file.txt");
     let remote_path = Path::new(&remote_path_str);
     
     // Copy the file to remote
@@ -103,13 +103,13 @@ fn test_file_operations() -> Result<()> {
 #[ignore] // These tests require a configured SSH host and are ignored by default
 fn test_handle_directory() -> Result<()> {
     // Create a minimal CLI configuration
-    let mut cli = Cli::parse_from(["dedups", "ssh:local:/tmp"]);
+    let mut cli = Cli::parse_from(["dedups", "ssh:test-dedups:/tmp"]);
     
     // Override any config that might be set
     cli.allow_remote_install = false; // Don't try to install dedups for this test
     
     // Try to scan the remote directory
-    let files = file_utils::handle_directory(&cli, Path::new("ssh:local:/tmp"))?;
+    let files = file_utils::handle_directory(&cli, Path::new("ssh:test-dedups:/tmp"))?;
     
     // Print some info about the files found
     println!("Found {} files in remote /tmp directory", files.len());
@@ -130,7 +130,7 @@ fn test_remote_dedups_execution() -> Result<()> {
     let cli = Cli::parse_from(&["dedups", "--use-sudo", "--allow-remote-install"]);
     
     // Set up remote connection
-    let remote = RemoteLocation::parse("ssh:local:/tmp")?;
+    let remote = RemoteLocation::parse("ssh:test-dedups:/tmp")?;
     
     // First check if dedups is installed
     let rt = tokio::runtime::Runtime::new()?;
@@ -185,7 +185,7 @@ fn test_remote_dedups_path_handling() -> Result<()> {
     let cli = Cli::parse_from(&["dedups", "--use-sudo", "--allow-remote-install"]);
     
     // Set up remote connection
-    let remote = RemoteLocation::parse("ssh:local:/tmp")?;
+    let remote = RemoteLocation::parse("ssh:test-dedups:/tmp")?;
     
     // Create a test file in ~/.local/bin to simulate local installation
     let setup_cmd = r#"
