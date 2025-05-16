@@ -233,18 +233,20 @@ pub fn find_duplicate_files_with_progress(
     log::info!("[ScanThread] Starting scan with progress updates for directory: {:?}", cli.directories[0]);
     let filter_rules = FilterRules::new(cli)?;
 
-    let send_status = |msg: String| {
-        if tx_progress.send(ScanMessage::StatusUpdate(msg)).is_err() {
+    let send_status = |stage: u8, msg: String| {
+        if tx_progress.send(ScanMessage::StatusUpdate(stage, msg)).is_err() {
             log::warn!("[ScanThread] Failed to send status update to TUI (channel closed).");
         }
     };
-    send_status(format!("Starting scan in {}", cli.directories[0].display()));
+    
+    // ========== STAGE 1: FILE DISCOVERY ==========
+    send_status(1, format!("Stage 1/3: Starting file discovery in {}", cli.directories[0].display()));
 
     let mut files_by_size: HashMap<u64, Vec<PathBuf>> = HashMap::new();
     let walker = WalkDir::new(&cli.directories[0]).into_iter();
     let mut files_scanned_count = 0;
     let mut last_update_time = std::time::Instant::now();
-    let update_interval = std::time::Duration::from_millis(250); // Update UI at most 4 times per second
+    let update_interval = std::time::Duration::from_millis(400); // Less frequent updates (400ms)
 
     for entry_result in walker.filter_entry(|e| {
         if is_hidden(e) || is_symlink(e) { return false; }
@@ -259,12 +261,31 @@ pub fn find_duplicate_files_with_progress(
             Ok(entry) => {
                 if entry.file_type().is_file() {
                     let path = entry.path().to_path_buf();
-                    files_scanned_count +=1;
-                    if files_scanned_count % 100 == 0 || last_update_time.elapsed() >= update_interval { 
+                    files_scanned_count += 1;
+                    
+                    // Determine update frequency based on file count
+                    let should_update = if files_scanned_count < 100 {
+                        files_scanned_count % 10 == 0
+                    } else if files_scanned_count < 500 {
+                        files_scanned_count % 20 == 0
+                    } else if files_scanned_count < 1000 {
+                        files_scanned_count % 50 == 0
+                    } else if files_scanned_count < 5000 {
+                        files_scanned_count % 100 == 0
+                    } else if files_scanned_count < 10000 {
+                        files_scanned_count % 200 == 0
+                    } else if files_scanned_count < 50000 {
+                        files_scanned_count % 500 == 0
+                    } else {
+                        files_scanned_count % 1000 == 0
+                    };
+                    
+                    if (should_update || last_update_time.elapsed() >= update_interval) {
                         last_update_time = std::time::Instant::now();
-                        let file_name = path.file_name().unwrap_or_default().to_string_lossy();
-                        send_status(format!("Scanning: {} files found... (current: {})", files_scanned_count, file_name));
+                        // Remove file name from status update to reduce repaints
+                        send_status(1, format!("Stage 1/3: Found {} files...", files_scanned_count));
                     }
+                    
                     match fs::metadata(&path) {
                         Ok(metadata) => {
                             if metadata.len() > 0 { 
@@ -278,13 +299,17 @@ pub fn find_duplicate_files_with_progress(
             Err(e) => log::warn!("[ScanThread] Error walking directory: {}", e),
         }
     }
-    send_status(format!("File scan complete. Found {} files in {} size groups.", 
-        files_by_size.values().map(|v| v.len()).sum::<usize>(), 
-        files_by_size.len()));
+    
+    let file_count = files_by_size.values().map(|v| v.len()).sum::<usize>();
+    let size_group_count = files_by_size.len();
+    
+    send_status(1, format!("Stage 1/3: File discovery complete. Found {} files in {} size groups.", 
+        file_count, size_group_count));
+    
     log::info!("[ScanThread] Found {} files matching criteria, grouped into {} unique file sizes.", 
-        files_by_size.values().map(|v| v.len()).sum::<usize>(), 
-        files_by_size.len());
+        file_count, size_group_count);
 
+    // ========== STAGE 2: SIZE COMPARISON ==========    
     let mut duplicate_sets: Vec<DuplicateSet> = Vec::new();
     let potential_duplicates: Vec<_> = files_by_size
         .into_iter()
@@ -292,14 +317,20 @@ pub fn find_duplicate_files_with_progress(
         .collect();
 
     if potential_duplicates.is_empty() {
-        send_status("Scan complete. No potential duplicates found.".to_string());
+        send_status(3, "Scan complete. No potential duplicates found.".to_string());
         log::info!("[ScanThread] No potential duplicates found after size grouping.");
         return Ok(Vec::new());
     }
 
-    send_status(format!("Found {} size groups with potential duplicates. Starting hash calculation...", potential_duplicates.len()));
-    log::info!("[ScanThread] Found {} sizes with potential duplicates. Calculating hashes...", potential_duplicates.len());
+    let potential_groups = potential_duplicates.len();
+    let potential_files: usize = potential_duplicates.iter().map(|(_, paths)| paths.len()).sum();
+    
+    send_status(2, format!("Stage 2/3: Found {} size groups with {} potential duplicate files", 
+                          potential_groups, potential_files));
+    
+    log::info!("[ScanThread] Found {} sizes with potential duplicates. Calculating hashes...", potential_groups);
 
+    // ========== STAGE 3: HASH CALCULATION ==========
     let num_threads = cli.parallel.unwrap_or_else(num_cpus::get);
     let pool = rayon::ThreadPoolBuilder::new().num_threads(num_threads).build()?;
     log::info!("[ScanThread] Using {} threads for hashing.", num_threads);
@@ -309,7 +340,8 @@ pub fn find_duplicate_files_with_progress(
     let total_groups_to_hash = potential_duplicates.len();
     let mut groups_hashed_count = 0;
     let total_files_to_hash = potential_duplicates.iter().map(|(_, paths)| paths.len()).sum::<usize>();
-    send_status(format!("Hashing {} files across {} size groups (using {} threads)...", 
+    
+    send_status(3, format!("Stage 3/3: Hashing {} files across {} size groups (using {} threads)...", 
         total_files_to_hash, total_groups_to_hash, num_threads));
 
     pool.install(|| {
@@ -350,15 +382,15 @@ pub fn find_duplicate_files_with_progress(
                 }
             });
     });
-    
-    // Drop the sender part for the local channel so `recv` can eventually find it closed
-    // drop(local_tx); // Not needed if for_each_with handles sender lifetime correctly.
 
+    let mut actual_duplicate_sets = 0;
+    
     for i in 0..total_groups_to_hash {
         match local_rx.recv() { // This will block until a message is received
             Ok(Ok(hashed_group)) => {
                 for (hash, file_infos_vec) in hashed_group {
                     if file_infos_vec.len() > 1 {
+                        actual_duplicate_sets += 1;
                         let first_file_size = file_infos_vec[0].size; // Get size before move
                         duplicate_sets.push(DuplicateSet { 
                             files: file_infos_vec, // file_infos_vec is moved here
@@ -381,16 +413,27 @@ pub fn find_duplicate_files_with_progress(
             }
         }
         groups_hashed_count += 1;
-        if groups_hashed_count == 1 || groups_hashed_count == total_groups_to_hash || 
-           groups_hashed_count % 5 == 0 || last_update_time.elapsed() >= update_interval {
+        
+        // Determine update frequency for hash progress
+        let should_update = if total_groups_to_hash < 20 {
+            true // Always update for small hash groups
+        } else if total_groups_to_hash < 100 {
+            groups_hashed_count % 5 == 0 || groups_hashed_count == total_groups_to_hash
+        } else if total_groups_to_hash < 500 {
+            groups_hashed_count % 10 == 0 || groups_hashed_count == total_groups_to_hash
+        } else {
+            groups_hashed_count % 20 == 0 || groups_hashed_count == total_groups_to_hash
+        };
+        
+        if should_update || last_update_time.elapsed() >= update_interval {
             last_update_time = std::time::Instant::now();
-            send_status(format!("Hashed {}/{} groups ({:.1}%)...", 
-                groups_hashed_count, total_groups_to_hash,
-                (groups_hashed_count as f64 / total_groups_to_hash as f64) * 100.0));
+            let progress_percent = (groups_hashed_count as f64 / total_groups_to_hash as f64) * 100.0;
+            send_status(3, format!("Stage 3/3: Hashed {}/{} groups ({:.1}%)... Found {} duplicate sets", 
+                groups_hashed_count, total_groups_to_hash, progress_percent, actual_duplicate_sets));
         }
     }
 
-    send_status(format!("Hashing complete. Found {} sets of duplicate files.", duplicate_sets.len()));
+    send_status(3, format!("All stages complete. Found {} sets of duplicate files.", duplicate_sets.len()));
     log::info!("[ScanThread] Found {} sets of duplicate files.", duplicate_sets.len());
     Ok(duplicate_sets)
 }
@@ -399,18 +442,34 @@ pub fn find_duplicate_files(
     cli: &Cli,
 ) -> Result<Vec<DuplicateSet>> {
     // This version is for non-TUI or TUI sync mode.
-    // It uses indicatif progress bars if cli.progress is true.
+    // It uses indicatif progress bars with distinct stages
     log::info!("Scanning directory (sync): {:?}", cli.directories[0]);
     let filter_rules = FilterRules::new(cli)?;
 
+    // ========== STAGE 1: FILE DISCOVERY ==========
+    let pb_draw_target = if cli.progress { indicatif::ProgressDrawTarget::stderr() } else { indicatif::ProgressDrawTarget::hidden() };
+    
+    // Create a multi-progress container
+    let multi_progress = indicatif::MultiProgress::new();
+    multi_progress.set_draw_target(pb_draw_target);
+    
+    // Create a progress bar for Stage 1: File Discovery
+    let pb_stage1 = multi_progress.add(ProgressBar::new_spinner());
+    pb_stage1.set_style(ProgressStyle::default_spinner()
+        .template("{spinner:.green} [1/3] File Discovery: {msg:.dim} ({elapsed_precise})")?);
+    if cli.progress { 
+        pb_stage1.enable_steady_tick(std::time::Duration::from_millis(200)); 
+    }
+    
+    pb_stage1.set_message("Scanning directory for files...");
+    
     let mut files_by_size: HashMap<u64, Vec<PathBuf>> = HashMap::new();
     let walker = WalkDir::new(&cli.directories[0]).into_iter();
     
-    let pb_files_draw_target = if cli.progress { indicatif::ProgressDrawTarget::stderr() } else { indicatif::ProgressDrawTarget::hidden() };
-    let pb_files = ProgressBar::with_draw_target(Some(0), pb_files_draw_target);
-    pb_files.set_style(ProgressStyle::default_spinner()
-        .template("{spinner:.green} Processing file: {msg:.dim} ({elapsed_precise})")?);
-    if cli.progress { pb_files.enable_steady_tick(std::time::Duration::from_millis(100)); }
+    let mut file_count = 0;
+    let mut size_count = 0;
+    let mut last_update_time = std::time::Instant::now();
+    let update_interval = std::time::Duration::from_millis(400); // Less frequent updates
 
     for entry_result in walker.filter_entry(|e| {
         if is_hidden(e) || is_symlink(e) { return false; }
@@ -425,14 +484,35 @@ pub fn find_duplicate_files(
             Ok(entry) => {
                 if entry.file_type().is_file() {
                     let path = entry.path().to_path_buf();
-                    if cli.progress { 
-                        pb_files.inc(1); 
-                        pb_files.set_message(path.file_name().unwrap_or_default().to_string_lossy().into_owned());
+                    file_count += 1;
+                    
+                    // Determine update frequency based on file count
+                    let should_update = if file_count < 100 {
+                        file_count % 10 == 0
+                    } else if file_count < 500 {
+                        file_count % 20 == 0
+                    } else if file_count < 1000 {
+                        file_count % 50 == 0
+                    } else if file_count < 5000 {
+                        file_count % 100 == 0
+                    } else if file_count < 10000 {
+                        file_count % 200 == 0
+                    } else if file_count < 50000 {
+                        file_count % 500 == 0
+                    } else {
+                        file_count % 1000 == 0
+                    };
+                    
+                    if should_update || last_update_time.elapsed() >= update_interval { 
+                        last_update_time = std::time::Instant::now();
+                        pb_stage1.set_message(format!("Found {} files...", file_count));
                     }
+                    
                     match fs::metadata(&path) {
                         Ok(metadata) => {
                             if metadata.len() > 0 {
                                 files_by_size.entry(metadata.len()).or_default().push(path);
+                                size_count = files_by_size.len();
                             }
                         }
                         Err(e) => log::warn!("Failed to get metadata for {:?}: {}", path, e),
@@ -442,12 +522,11 @@ pub fn find_duplicate_files(
             Err(e) => log::warn!("Error walking directory: {}", e),
         }
     }
-    if cli.progress { pb_files.finish_with_message("File scanning complete."); }
-    else { pb_files.finish_and_clear(); }
+    
+    // Complete Stage 1
+    pb_stage1.finish_with_message(format!("File discovery complete: {} files in {} size groups", file_count, size_count));
 
-    log::info!("Found {} files (sync) matching criteria, grouped into {} unique file sizes.", 
-        files_by_size.values().map(|v| v.len()).sum::<usize>(), 
-        files_by_size.len());
+    log::info!("Found {} files (sync) in {} unique size groups.", file_count, size_count);
 
     let mut duplicate_sets: Vec<DuplicateSet> = Vec::new();
     let potential_duplicates: Vec<_> = files_by_size
@@ -455,23 +534,46 @@ pub fn find_duplicate_files(
         .filter(|(_, paths)| paths.len() > 1)
         .collect();
 
+    let potential_duplicate_count = potential_duplicates.len();
+    
     if potential_duplicates.is_empty() {
+        pb_stage1.finish_and_clear();
         log::info!("No potential duplicates (sync) found after size grouping.");
         return Ok(Vec::new());
     }
 
-    log::info!("Found {} sizes (sync) with potential duplicates. Calculating hashes...", potential_duplicates.len());
+    // ========== STAGE 2: SIZE COMPARISON ==========
+    // We have potential duplicates by size, display stats
+    let pb_stage2 = multi_progress.add(ProgressBar::new(1));
+    pb_stage2.set_style(ProgressStyle::default_bar()
+        .template("{spinner:.green} [2/3] Size Analysis: {msg:.dim} ({elapsed_precise})")?);
+    if cli.progress { pb_stage2.enable_steady_tick(std::time::Duration::from_millis(200)); }
+    
+    // Size comparison is minimal in this implementation so just show the stats
+    let total_groups = potential_duplicates.len();
+    let total_potential_duplicates: usize = potential_duplicates.iter().map(|(_, paths)| paths.len()).sum();
+    
+    pb_stage2.set_message(format!("Found {} size groups with {} potential duplicate files", 
+                                 total_groups, total_potential_duplicates));
+    pb_stage2.inc(1);
+    pb_stage2.finish();
+    
+    log::info!("Found {} sizes (sync) with {} potential duplicate files. Calculating hashes...", 
+              total_groups, total_potential_duplicates);
+
+    // ========== STAGE 3: HASH CALCULATION ==========
+    let pb_stage3 = multi_progress.add(ProgressBar::new(potential_duplicates.len() as u64));
+    pb_stage3.set_style(ProgressStyle::default_bar()
+        .template("{spinner:.green} [3/3] Hash Calculation: [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({percent}%) {msg}")?
+        .progress_chars("#=> "));
+    if cli.progress { pb_stage3.enable_steady_tick(std::time::Duration::from_millis(200)); }
+    
+    pb_stage3.set_message(format!("Hashing files using {} algorithm with {} threads", 
+                                 cli.algorithm, cli.parallel.unwrap_or_else(num_cpus::get)));
 
     let num_threads = cli.parallel.unwrap_or_else(num_cpus::get);
     let pool = rayon::ThreadPoolBuilder::new().num_threads(num_threads).build()?;
     log::info!("Using {} threads for hashing (sync).", num_threads);
-
-    let pb_hashes_draw_target = if cli.progress { indicatif::ProgressDrawTarget::stderr() } else { indicatif::ProgressDrawTarget::hidden() };
-    let pb_hashes = ProgressBar::with_draw_target(Some(potential_duplicates.len() as u64), pb_hashes_draw_target);
-    pb_hashes.set_style(ProgressStyle::default_bar()
-        .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({percent}%) Hashing groups")?
-        .progress_chars("#=> "));
-    if cli.progress { pb_hashes.enable_steady_tick(std::time::Duration::from_millis(100)); }
 
     let (local_tx, local_rx) = std::sync::mpsc::channel::<Result<HashMap<String, Vec<FileInfo>>>>();
     let total_groups_to_hash = potential_duplicates.len();
@@ -511,11 +613,15 @@ pub fn find_duplicate_files(
             });
     });
 
+    let mut actual_duplicate_count = 0;
+    let mut last_update_count = 0;
+    
     for i in 0..total_groups_to_hash {
         match local_rx.recv() {
             Ok(Ok(hashed_group)) => {
                 for (hash, file_infos_vec) in hashed_group {
                     if file_infos_vec.len() > 1 {
+                        actual_duplicate_count += 1;
                         let first_file_size = file_infos_vec[0].size; // Get size before move
                         duplicate_sets.push(DuplicateSet { 
                             files: file_infos_vec, // file_infos_vec is moved here
@@ -531,11 +637,29 @@ pub fn find_duplicate_files(
                 return Err(anyhow::anyhow!("Hashing phase failed (sync): {}", e));
             }
         }
-        if cli.progress { pb_hashes.inc(1); }
+        pb_stage3.inc(1);
+        
+        // Only update the message text periodically to avoid excessive repainting
+        // Determine update frequency for hash progress based on total size
+        let should_update = if total_groups_to_hash < 20 {
+            true // Always update for small hash groups
+        } else if total_groups_to_hash < 100 {
+            i % 5 == 0 || i == total_groups_to_hash - 1 || actual_duplicate_count != last_update_count
+        } else if total_groups_to_hash < 500 {
+            i % 10 == 0 || i == total_groups_to_hash - 1 || (actual_duplicate_count - last_update_count) >= 5
+        } else {
+            i % 20 == 0 || i == total_groups_to_hash - 1 || (actual_duplicate_count - last_update_count) >= 10
+        };
+        
+        if should_update {
+            pb_stage3.set_message(format!("Hashed {}/{} groups, found {} duplicate sets", 
+                                         i + 1, total_groups_to_hash, actual_duplicate_count));
+            last_update_count = actual_duplicate_count;
+        }
     }
 
-    if cli.progress { pb_hashes.finish_with_message("Hashing complete (sync)."); }
-    else { pb_hashes.finish_and_clear(); }
+    // Finish stage 3
+    pb_stage3.finish_with_message(format!("Hash calculation complete! Found {} sets of duplicate files.", duplicate_sets.len()));
 
     log::info!("Found {} sets of duplicate files (sync).", duplicate_sets.len());
     Ok(duplicate_sets)

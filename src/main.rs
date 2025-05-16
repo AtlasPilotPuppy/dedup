@@ -52,16 +52,24 @@ fn main() -> Result<()> {
     log::debug!("CLI args: {:#?}", cli);
     
     // Log config file path for debugging
-    match DedupConfig::get_config_path() {
-        Ok(path) => {
-            log::debug!("Config file path: {:?}", path);
-            if path.exists() {
-                log::debug!("Using configuration from {:?}", path);
-            } else {
-                log::debug!("No config file found at {:?}, using defaults", path);
-            }
-        },
-        Err(e) => log::warn!("Could not determine config file path: {}", e),
+    if let Some(config_path) = &cli.config_file {
+        log::info!("Using custom config file: {:?}", config_path);
+        if !config_path.exists() {
+            log::warn!("Custom config file does not exist: {:?}", config_path);
+            log::info!("Will use default configuration values");
+        }
+    } else {
+        match DedupConfig::get_config_path() {
+            Ok(path) => {
+                log::debug!("Config file path: {:?}", path);
+                if path.exists() {
+                    log::debug!("Using configuration from {:?}", path);
+                } else {
+                    log::debug!("No config file found at {:?}, using defaults", path);
+                }
+            },
+            Err(e) => log::warn!("Could not determine config file path: {}", e),
+        }
     }
 
     // Check if directories exist

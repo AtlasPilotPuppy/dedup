@@ -16,6 +16,7 @@ A high-performance duplicate file finder and manager written in Rust. `dedup` ef
 - **Filtering**: Include/exclude files by glob patterns
 - **Output Formats**: Save duplicate file information as JSON or TOML
 - **Configurable**: Adjust thread count, verbosity, sorting options, and more
+- **Configuration File**: Use a custom configuration file to set defaults
 - **Planned Integration**: Future integration with rclone for cloud storage deduplication
 
 ## Installation
@@ -52,6 +53,9 @@ dedup_tui /path/to/directory
 
 # Find and delete duplicates (non-interactive)
 dedup_tui /path/to/directory --delete --mode newest_modified
+
+# Use a custom config file
+dedup_tui /path/to/directory --config-file /path/to/my-config.toml
 ```
 
 ### Multi-Directory Operations
@@ -147,6 +151,8 @@ OPTIONS:
         --sort-order <sort-order>
                                  Sort order [asc|desc] [default: descending]
         --raw-sizes              Display file sizes in raw bytes instead of human-readable format
+        --config-file <config-file>
+                                 Path to a custom config file
     -h, --help                   Print help information
     -V, --version                Print version information
 ```
@@ -240,6 +246,11 @@ The configuration file is located at:
 - Linux/macOS: `~/.deduprc`
 - Windows: `C:\Users\<username>\.deduprc`
 
+You can also specify a custom configuration file using the `--config-file` option:
+```bash
+dedup_tui --config-file /path/to/my-config.toml /path/to/directory
+```
+
 ### Format
 
 The configuration file uses TOML format:
@@ -274,6 +285,8 @@ exclude = ["*tmp*", "*.log"]
 ### Usage
 
 The application will automatically create a default configuration file if one doesn't exist. Options specified on the command line will always take precedence over the configuration file.
+
+If you specify a custom configuration file with `--config-file`, the default `.deduprc` file will be ignored, and no default file will be created if it doesn't exist.
 
 ## Contributing
 

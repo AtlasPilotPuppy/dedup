@@ -122,7 +122,7 @@ pub struct AppState {
 // Channel for messages from scan thread to TUI thread
 #[derive(Debug)]
 pub enum ScanMessage {
-    StatusUpdate(String),
+    StatusUpdate(u8, String), // Stage number (1-3) + message
     // ProgressUpdate(f32), // If we have percentage
     Completed(Result<Vec<DuplicateSet>>),
     Error(String),
@@ -178,7 +178,7 @@ impl App {
         let (tx, rx) = std_mpsc::channel::<ScanMessage>();
         
         // Send an immediate status update to show we're properly initialized
-        tx.send(ScanMessage::StatusUpdate(format!("Starting scan of {}...", cli_args.directories[0].display())))
+        tx.send(ScanMessage::StatusUpdate(1, format!("Starting scan of {}...", cli_args.directories[0].display())))
             .unwrap_or_else(|e| log::error!("Failed to send initial status update: {}", e));
         
         let mut current_cli_for_scan = cli_args.clone();
@@ -193,7 +193,7 @@ impl App {
         let thread_tx = tx.clone();
         let scan_thread = std_thread::spawn(move || {
             log::info!("[ScanThread] Starting initial duplicate scan...");
-            thread_tx.send(ScanMessage::StatusUpdate("Scan thread initialized, starting file scan...".to_string()))
+            thread_tx.send(ScanMessage::StatusUpdate(1, "Scan thread initialized, starting file scan...".to_string()))
                 .unwrap_or_else(|e| log::error!("[ScanThread] Failed to send initialization message: {}", e));
             
             match file_utils::find_duplicate_files_with_progress(&current_cli_for_scan, thread_tx.clone()) {
@@ -304,7 +304,7 @@ impl App {
         self.state.selected_file_index_in_set = 0;
         self.state.selected_job_index = 0;
         self.state.is_loading = true;
-        self.state.loading_message = "Rescanning with current settings...".to_string();
+        self.state.loading_message = "📁 [1/3] Rescanning with current settings...".to_string();
         self.state.status_message = Some("Starting rescan...".to_string());
         self.state.rescan_needed = false; // Reset flag as we are acting on it
 
@@ -314,87 +314,111 @@ impl App {
         // Note: We always use progress for TUI internal scans regardless of initial cli.progress
         // find_duplicate_files_with_progress requires a tx channel.
         // Ensure scan_tx is Some.
-        if self.scan_tx.is_none() {
-            let (tx, rx) = std_mpsc::channel::<ScanMessage>();
-            self.scan_tx = Some(tx);
-            self.scan_rx = Some(rx); // Also need to re-assign rx if tx was None
-        }
 
-        if let Some(tx_cloned) = self.scan_tx.clone() { // Ensure tx exists
-            let handle = std_thread::spawn(move || {
-                log::info!("[ScanThread] Starting rescan for duplicates...");
-                match file_utils::find_duplicate_files_with_progress(&current_cli_for_scan, tx_cloned.clone()) {
-                    Ok(raw_sets) => {
-                        if tx_cloned.send(ScanMessage::Completed(Ok(raw_sets))).is_err() {
-                            log::error!("[ScanThread] Failed to send rescan completion message to TUI.");
-                        }
-                    }
-                    Err(e) => {
-                        if tx_cloned.send(ScanMessage::Error(e.to_string())).is_err() {
-                            log::error!("[ScanThread] Failed to send rescan error message to TUI.");
-                        }
+        // Create a fresh channel, assign the receiver to our app's scan_rx
+        let (tx, rx) = std_mpsc::channel::<ScanMessage>();
+        self.scan_rx = Some(rx);
+        
+        // Send an initial status to note the rescan
+        tx.send(ScanMessage::StatusUpdate(1, "Starting new scan...".to_string()))
+            .unwrap_or_else(|e| log::error!("Failed to send initial rescan status: {}", e));
+
+        // Create the scan thread
+        let thread_tx = tx.clone();
+        let scan_thread = std_thread::spawn(move || {
+            log::info!("[ScanThread] Starting rescan...");
+            match file_utils::find_duplicate_files_with_progress(&current_cli_for_scan, thread_tx.clone()) {
+                Ok(raw_sets) => {
+                    log::info!("[ScanThread] Rescan completed successfully with {} sets", raw_sets.len());
+                    if thread_tx.send(ScanMessage::Completed(Ok(raw_sets))).is_err() {
+                        log::error!("[ScanThread] Failed to send rescan completion to TUI.");
                     }
                 }
-                log::info!("[ScanThread] Rescan finished.");
-            });
-            self.scan_thread_join_handle = Some(handle);
-        } else {
-            // This case should ideally not be reached if TUI always uses progress/async scan
-            log::error!("Failed to start rescan: No sender channel available.");
-            self.state.is_loading = false;
-            self.state.loading_message = "Error: Could not start rescan.".to_string();
-            self.state.status_message = Some("Rescan failed to start. Check logs.".to_string());
-        }
+                Err(e) => {
+                    log::error!("[ScanThread] Rescan failed with error: {}", e);
+                    if thread_tx.send(ScanMessage::Error(e.to_string())).is_err() {
+                        log::error!("[ScanThread] Failed to send rescan error to TUI.");
+                    }
+                }
+            }
+            log::info!("[ScanThread] Rescan finished.");
+        });
+
+        let scan_join_handle = match scan_thread.thread().id() {
+            id => {
+                log::info!("Rescan thread started with ID: {:?}", id);
+                Some(scan_thread)
+            }
+        };
+
+        self.scan_thread_join_handle = scan_join_handle;
+        self.scan_tx = Some(tx);
     }
 
     // Method to handle messages from the scan thread
     pub fn handle_scan_messages(&mut self) {
-        if let Some(rx) = &self.scan_rx {
-            log::debug!("TUI attempting to check scan messages");
-            while let Ok(message) = rx.try_recv() { // Use try_recv for non-blocking check
-                match message {
-                    ScanMessage::StatusUpdate(status) => {
-                        log::debug!("TUI received scan status update: {}", status);
-                        self.state.loading_message = status;
-                    }
-                    ScanMessage::Completed(result) => {
-                        log::info!("TUI received scan completion message");
-                        self.state.is_loading = false;
-                        match result {
-                            Ok(raw_sets) => {
-                                log::debug!("TUI received {} sets of duplicate files", raw_sets.len());
-                                let (grouped_data, display_list) = App::process_raw_sets_into_grouped_view(raw_sets, true); // Default expanded
-                                self.state.grouped_data = grouped_data;
-                                self.state.display_list = display_list;
-                                if self.state.display_list.is_empty() {
-                                    self.state.status_message = Some("Scan complete. No duplicates found.".to_string());
-                                } else {
-                                    self.state.status_message = Some(format!("Scan complete. Found {} display items.", self.state.display_list.len()));
+        if let Some(ref rx) = self.scan_rx {
+            match rx.try_recv() {
+                Ok(message) => {
+                    match message {
+                        ScanMessage::StatusUpdate(stage, msg) => {
+                            // Format the stage indicator for display
+                            let stage_prefix = match stage {
+                                1 => "📁 [1/3] ",
+                                2 => "🔍 [2/3] ",
+                                3 => "🔄 [3/3] ",
+                                _ => "",
+                            };
+                            
+                            self.state.loading_message = format!("{}{}", stage_prefix, msg);
+                            log::debug!("Updated loading message: {}", self.state.loading_message);
+                        },
+                        ScanMessage::Completed(result) => {
+                            match result {
+                                Ok(sets) => {
+                                    log::info!("Scan completed with {} sets", sets.len());
+                                    self.state.is_loading = false;
+
+                                    // Process the raw sets into our grouped view
+                                    let (grouped_data, display_list) = App::process_raw_sets_into_grouped_view(sets, true);
+                                    self.state.grouped_data = grouped_data;
+                                    self.state.display_list = display_list;
+                                    
+                                    // Apply current sort settings to the loaded data
+                                    self.apply_sort_settings();
+
+                                    self.state.status_message = Some(format!("Scan complete! Found {} duplicate sets.", 
+                                                                            self.state.grouped_data.iter()
+                                                                               .map(|g| g.sets.len())
+                                                                               .sum::<usize>()));
+                                },
+                                Err(e) => {
+                                    log::error!("Scan completed with error: {}", e);
+                                    self.state.is_loading = false;
+                                    self.state.status_message = Some(format!("Scan failed: {}", e));
                                 }
                             }
-                            Err(e) => {
-                                self.state.loading_message = format!("Error during scan: {}", e);
-                                self.state.status_message = Some("Scan failed: Check logs.".to_string());
-                                log::error!("Scan thread reported error: {}", e);
-                            }
+                        },
+                        ScanMessage::Error(err) => {
+                            log::error!("Scan error: {}", err);
+                            self.state.is_loading = false;
+                            self.state.status_message = Some(format!("Scan error: {}", err));
                         }
-                        self.rebuild_display_list(); // This ensures validate_selection_indices is called
-                        break; // Process one completion, then redraw
                     }
-                    ScanMessage::Error(err_msg) => {
-                        log::error!("TUI received scan error message: {}", err_msg);
-                        self.state.is_loading = false; // Stop loading on error
-                        self.state.loading_message = format!("Scan Error: {}", err_msg);
-                        self.state.status_message = Some(format!("Scan failed: {}", err_msg));
-                        log::error!("Scan thread reported an error message: {}", err_msg);
-                        break;
+                },
+                Err(std_mpsc::TryRecvError::Empty) => {
+                    // No messages available, perfectly normal.
+                },
+                Err(std_mpsc::TryRecvError::Disconnected) => {
+                    // Channel disconnected. This could happen if the scan thread finishes.
+                    log::warn!("Scan thread channel disconnected.");
+                    if self.state.is_loading {
+                        // If still in loading state, this is an error.
+                        self.state.is_loading = false;
+                        self.state.status_message = Some("Scan thread disconnected unexpectedly.".to_string());
                     }
                 }
             }
-            // Add logging if no messages were received this time
-            log::trace!("TUI check for scan messages completed - none available at this time");
-        } else {
-            log::warn!("TUI tried to handle scan messages but no receiver available");
         }
     }
 
@@ -1328,7 +1352,7 @@ fn ui(frame: &mut Frame, app: &mut App) {
         
         let gauge = Gauge::default()
             .block(Block::default().borders(Borders::ALL).title("Progress"))
-            .gauge_style(Style::default().fg(Color::Blue).bg(Color::Black))
+            .gauge_style(Style::default().fg(Color::White).bg(Color::Black))
             .label(format!("Scanning: {}...", app.cli_config.directories[0].display()))
             .ratio(pulse);
             
@@ -1674,7 +1698,7 @@ fn ui(frame: &mut Frame, app: &mut App) {
             };
             let gauge = Gauge::default()
                 .block(Block::default().borders(Borders::ALL).title("Progress"))
-                .gauge_style(Style::default().fg(Color::Blue).bg(Color::Black))
+                .gauge_style(Style::default().fg(Color::White).bg(Color::Black))
                 .label(label)
                 .ratio(percent);
             frame.render_widget(gauge, chunks[4]);
@@ -1684,7 +1708,7 @@ fn ui(frame: &mut Frame, app: &mut App) {
             let percent = if total > 0 { completed as f64 / total as f64 } else { 0.0 };
             let gauge = Gauge::default()
                 .block(Block::default().borders(Borders::ALL).title("Job Progress"))
-                .gauge_style(Style::default().fg(Color::Green).bg(Color::Black))
+                .gauge_style(Style::default().fg(Color::White).bg(Color::Black))
                 .label(format!("Pending jobs: {} | Ctrl+E: Execute, x: Remove job", total))
                 .ratio(percent);
             frame.render_widget(gauge, chunks[4]);

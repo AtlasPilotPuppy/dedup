@@ -119,6 +119,10 @@ pub struct Cli {
     /// Display file sizes in raw bytes instead of human-readable format.
     #[clap(long, help = "Display file sizes in raw bytes instead of human-readable format")]
     pub raw_sizes: bool,
+
+    /// Path to a custom config file. If provided, overrides the default ~/.deduprc file.
+    #[clap(long, help = "Path to a custom config file")]
+    pub config_file: Option<PathBuf>,
 }
 
 impl Cli {
@@ -127,14 +131,21 @@ impl Cli {
         // Parse CLI arguments first
         let mut cli = Self::parse();
         
-        // Load configuration
-        let config = DedupConfig::load()?;
+        // Load configuration from specified file or default location
+        let config = if let Some(config_path) = &cli.config_file {
+            DedupConfig::load_from_path(config_path)?
+        } else {
+            DedupConfig::load()?
+        };
         
         // Apply config values for any unspecified CLI arguments
         cli.apply_config(config);
         
         // Create default config file if it doesn't exist
-        let _ = DedupConfig::create_default_if_not_exists();
+        // Only do this if we're using the default config path
+        if cli.config_file.is_none() {
+            let _ = DedupConfig::create_default_if_not_exists();
+        }
         
         Ok(cli)
     }
