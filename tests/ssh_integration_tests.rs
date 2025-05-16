@@ -6,6 +6,7 @@ use dedups::file_utils;
 use dedups::ssh_utils::RemoteLocation;
 use dedups::Cli;
 use clap::Parser;
+use dedups::ssh_utils::SshProtocol;
 
 /// Integration tests for SSH functionality using a local host for testing
 /// Note: These tests require a 'local' host configured in ~/.ssh/config
@@ -118,6 +119,96 @@ fn test_handle_directory() -> Result<()> {
     
     // We should have found at least some files
     assert!(!files.is_empty(), "No files found in remote /tmp directory");
+    
+    Ok(())
+}
+
+#[test]
+#[ignore] // These tests require a configured SSH host and are ignored by default
+fn test_remote_dedups_execution() -> Result<()> {
+    // Create a test CLI configuration
+    let cli = Cli::parse_from(&["dedups", "--use-sudo", "--allow-remote-install"]);
+    
+    // Set up remote connection
+    let remote = RemoteLocation::parse("ssh:local:/tmp")?;
+    
+    // First check if dedups is installed
+    let rt = tokio::runtime::Runtime::new()?;
+    let dedups_path = rt.block_on(remote.check_dedups_installed())?;
+    
+    match dedups_path {
+        Some(path) => {
+            log::info!("Found dedups at: {}", path);
+            
+            // Set up SSH protocol
+            let mut protocol = SshProtocol::new(remote);
+            protocol.connect()?;
+            
+            // Try to execute a simple dedups command
+            let output = protocol.execute_dedups(&["--version"])?;
+            assert!(!output.is_empty(), "dedups --version should return version info");
+            
+            // Try to scan a directory
+            let scan_output = protocol.execute_dedups(&["/tmp", "--dry-run"])?;
+            assert!(!scan_output.is_empty(), "dedups scan should return some output");
+            
+            Ok(())
+        },
+        None => {
+            if cli.allow_remote_install {
+                // Try to install dedups
+                remote.install_dedups(&cli)?;
+                
+                // Verify installation
+                let dedups_path = rt.block_on(remote.check_dedups_installed())?;
+                assert!(dedups_path.is_some(), "dedups should be installed after installation");
+                
+                // Now try to use it
+                let mut protocol = SshProtocol::new(remote);
+                protocol.connect()?;
+                
+                let output = protocol.execute_dedups(&["--version"])?;
+                assert!(!output.is_empty(), "dedups --version should return version info");
+                
+                Ok(())
+            } else {
+                Ok(()) // Skip test if installation not allowed
+            }
+        }
+    }
+}
+
+#[test]
+#[ignore] // These tests require a configured SSH host and are ignored by default
+fn test_remote_dedups_path_handling() -> Result<()> {
+    // Create a test CLI configuration
+    let cli = Cli::parse_from(&["dedups", "--use-sudo", "--allow-remote-install"]);
+    
+    // Set up remote connection
+    let remote = RemoteLocation::parse("ssh:local:/tmp")?;
+    
+    // Create a test file in ~/.local/bin to simulate local installation
+    let setup_cmd = r#"
+        mkdir -p ~/.local/bin
+        echo '#!/bin/bash\necho "test dedups v0.1.0"' > ~/.local/bin/dedups
+        chmod +x ~/.local/bin/dedups
+    "#;
+    remote.run_command(setup_cmd)?;
+    
+    // Verify dedups is found
+    let rt = tokio::runtime::Runtime::new()?;
+    let dedups_path = rt.block_on(remote.check_dedups_installed())?;
+    assert!(dedups_path.is_some(), "dedups should be found in ~/.local/bin");
+    
+    // Try to execute dedups through SshProtocol
+    let mut protocol = SshProtocol::new(remote.clone());
+    protocol.connect()?;
+    
+    let output = protocol.execute_dedups(&["--version"])?;
+    assert!(output.contains("test dedups"), "Should execute the test dedups script");
+    
+    // Clean up
+    remote.run_command("rm -f ~/.local/bin/dedups")?;
     
     Ok(())
 } 
