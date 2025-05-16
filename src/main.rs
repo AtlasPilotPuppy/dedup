@@ -3,12 +3,10 @@ mod tui_app;
 
 use clap::Parser;
 use std::path::{Path, PathBuf};
-use simplelog::*;
-use std::fs::File;
+use simplelog::LevelFilter;
 use anyhow::Result;
 use humansize::{format_size, DECIMAL};
 use env_logger;
-use log::{LevelFilter, info, debug, error};
 
 #[derive(Parser, Debug, Clone)]
 #[clap(author, version, about, long_about = None)]
@@ -81,6 +79,10 @@ pub struct Cli {
 
     #[clap(long, value_parser = crate::file_utils::SortOrder::from_str, default_value = "descending", help = "Sort order [asc|desc]")]
     pub sort_order: crate::file_utils::SortOrder,
+
+    /// Display file sizes in raw bytes instead of human-readable format.
+    #[clap(long, help = "Display file sizes in raw bytes instead of human-readable format")]
+    pub raw_sizes: bool,
 }
 
 fn setup_logger(verbosity: u8, log_file: Option<&Path>) -> Result<()> {

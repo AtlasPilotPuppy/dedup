@@ -1,6 +1,6 @@
 use anyhow::Result;
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event as CEvent, KeyCode, KeyEvent, KeyModifiers, KeyEventKind},
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event as CEvent, KeyCode, KeyEvent, KeyEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -15,6 +15,7 @@ use std::collections::HashMap; // For grouping
 use std::path::{Path, PathBuf}; // Ensure Path is imported here
 use tui_input::backend::crossterm::EventHandler; // For tui-input
 use tui_input::Input;
+use humansize::{format_size, DECIMAL};
 
 use crate::Cli;
 use crate::file_utils::{self, DuplicateSet, FileInfo, SelectionStrategy, delete_files, move_files, SortCriterion, SortOrder}; // Added SortCriterion, SortOrder
@@ -48,7 +49,6 @@ pub enum InputMode {
     Normal,
     CopyDestination,
     Settings, // New mode for settings
-    RegexInput,
     Help, // New mode for help screen
 }
 
@@ -66,7 +66,6 @@ pub enum DisplayListItem {
         path: PathBuf,
         is_expanded: bool,
         set_count: usize,
-        original_group_index: usize,
     },
     SetEntry {
         set_hash_preview: String,
@@ -259,7 +258,6 @@ impl App {
                 path: group.path.clone(),
                 is_expanded: group.is_expanded,
                 set_count: group.sets.len(),
-                original_group_index: group_idx,
             });
             if group.is_expanded {
                 for (set_idx, set_item) in group.sets.iter().enumerate() {
@@ -394,74 +392,111 @@ impl App {
             InputMode::Normal => self.handle_normal_mode_key(key_event),
             InputMode::CopyDestination => self.handle_copy_dest_input_key(key_event),
             InputMode::Settings => self.handle_settings_mode_key(key_event),
-            InputMode::RegexInput => self.handle_regex_input_key(key_event),
             InputMode::Help => self.handle_help_mode_key(key_event),
         }
         self.validate_selection_indices(); // Ensure selections are valid after any action
     }
 
     fn handle_normal_mode_key(&mut self, key_event: KeyEvent) {
-        let key_code = key_event.code;
-        let modifiers = key_event.modifiers;
-
-        // General shortcuts first
-        if key_code == KeyCode::Char('q') {
-            self.should_quit = true;
-            return;
-        }
-        if key_code == KeyCode::Tab {
-            self.cycle_active_panel();
-            return;
-        }
-        if key_code == KeyCode::Char('e') && modifiers == KeyModifiers::CONTROL {
-            if let Err(e) = self.process_pending_jobs() {
-                self.state.status_message = Some(format!("Error processing jobs: {}", e));
+        match key_event.code {
+            KeyCode::Char('q') => {
+                self.should_quit = true;
             }
-            return;
+            KeyCode::Char('h') => {
+                self.state.input_mode = InputMode::Help;
+                self.state.status_message = Some("Displaying Help. Esc to exit.".to_string());
+            }
+            KeyCode::Char('a') => {
+                // Select all files in the current set
+                if let Some(selected) = self.state.display_list.get(self.state.selected_display_list_index) {
+                    match selected {
+                        DisplayListItem::SetEntry { original_group_index, original_set_index_in_group, .. } => {
+                            // Get a copy of the files we need to process
+                            let files_to_process = if let Some(group) = self.state.grouped_data.get(*original_group_index) {
+                                group.sets[*original_set_index_in_group].files.clone()
+                            } else {
+                                Vec::new()
+                            };
+                            
+                            // Now process the files
+                            for _file in files_to_process {
+                                self.set_action_for_selected_file(ActionType::Keep);
+                            }
+                            self.state.status_message = Some("All files in set marked to keep".to_string());
+                        }
+                        DisplayListItem::Folder { .. } => {
+                            // Get a copy of all files in the folder
+                            let files_to_process = if let Some(group) = self.state.grouped_data.get(self.state.selected_display_list_index) {
+                                group.sets.iter()
+                                    .flat_map(|set| set.files.clone())
+                                    .collect::<Vec<_>>()
+                            } else {
+                                Vec::new()
+                            };
+                            
+                            // Now process the files
+                            for _file in files_to_process {
+                                self.set_action_for_selected_file(ActionType::Keep);
+                            }
+                            self.state.status_message = Some("All files in folder marked to keep".to_string());
+                        }
+                    }
+                }
+            }
+            KeyCode::Tab => {
+                self.cycle_active_panel();
+            }
+            KeyCode::Char('e') => {
+                if let Err(e) = self.process_pending_jobs() {
+                    self.state.status_message = Some(format!("Error processing jobs: {}", e));
+                }
+            }
+            KeyCode::Char('r') => {
+                self.trigger_rescan();
+            }
+            KeyCode::Char('s') => {
+                self.state.input_mode = InputMode::Settings;
+                self.state.status_message = Some("Entered settings mode. Esc to exit.".to_string());
+            }
+            KeyCode::Char('d') => {
+                self.mark_set_for_deletion();
+            }
+            KeyCode::Char('i') => {
+                self.set_action_for_selected_file(ActionType::Ignore);
+            }
+            KeyCode::Char('c') => {
+                self.initiate_copy_action();
+            }
+            KeyCode::Char('k') => {
+                self.set_selected_file_as_kept();
+            }
+            KeyCode::Up => {
+                match self.state.active_panel {
+                    ActivePanel::Sets => self.select_previous_set(),
+                    ActivePanel::Files => self.select_previous_file_in_set(),
+                    ActivePanel::Jobs => self.select_previous_job(),
+                }
+            }
+            KeyCode::Down => {
+                match self.state.active_panel {
+                    ActivePanel::Sets => self.select_next_set(),
+                    ActivePanel::Files => self.select_next_file_in_set(),
+                    ActivePanel::Jobs => self.select_next_job(),
+                }
+            }
+            KeyCode::Left => {
+                self.state.active_panel = ActivePanel::Sets;
+            }
+            KeyCode::Right => {
+                self.focus_files_panel();
+            }
+            KeyCode::Char('x') | KeyCode::Delete | KeyCode::Backspace => {
+                if self.state.active_panel == ActivePanel::Jobs {
+                    self.remove_selected_job();
+                }
+            }
+            _ => {}
         }
-        if key_code == KeyCode::Char('r') && modifiers == KeyModifiers::CONTROL {
-            self.trigger_rescan();
-            return;
-        }
-        if key_code == KeyCode::Char('s') && modifiers == KeyModifiers::CONTROL { // Ctrl+S for Settings
-            self.state.input_mode = InputMode::Settings;
-            self.state.status_message = Some("Entered settings mode. Esc to exit.".to_string());
-            // TODO: Initialize settings focus, e.g., self.state.selected_setting_index = 0;
-            return;
-        }
-        if key_code == KeyCode::Char('h') && modifiers == KeyModifiers::NONE { // 'h' for Help
-            self.state.input_mode = InputMode::Help;
-            self.state.status_message = Some("Displaying Help. Esc to exit.".to_string());
-            return;
-        }
-
-        // Then panel-specific shortcuts
-        match self.state.active_panel {
-            ActivePanel::Sets => match key_code {
-                KeyCode::Down | KeyCode::Char('j') => self.select_next_set(),
-                KeyCode::Up | KeyCode::Char('k') => self.select_previous_set(),
-                KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => self.focus_files_panel(),
-                KeyCode::Char('d') => self.mark_set_for_deletion(),
-                _ => {}
-            },
-            ActivePanel::Files => match key_code {
-                KeyCode::Down | KeyCode::Char('j') => self.select_next_file_in_set(),
-                KeyCode::Up | KeyCode::Char('k') => self.select_previous_file_in_set(),
-                KeyCode::Char('d') => self.set_action_for_selected_file(ActionType::Delete),
-                KeyCode::Char('c') => self.initiate_copy_action(),
-                KeyCode::Char('s') => self.set_selected_file_as_kept(),
-                KeyCode::Char('i') => self.set_action_for_selected_file(ActionType::Ignore),
-                KeyCode::Left | KeyCode::Char('h') => self.state.active_panel = ActivePanel::Sets,
-                _ => {}
-            },
-            ActivePanel::Jobs => match key_code {
-                KeyCode::Down | KeyCode::Char('j') => self.select_next_job(),
-                KeyCode::Up | KeyCode::Char('k') => self.select_previous_job(),
-                KeyCode::Delete | KeyCode::Backspace | KeyCode::Char('x') => self.remove_selected_job(),
-                _ => {}
-            },
-        }
-        // self.validate_selection_indices(); // Already called in on_key
     }
 
     fn handle_settings_mode_key(&mut self, key_event: KeyEvent) {
@@ -998,12 +1033,6 @@ impl App {
         }
     }
 
-    fn handle_regex_input_key(&mut self, _key_event: KeyEvent) {
-        // Implementation of handle_regex_input_key method
-        // This method is not provided in the original file or the new code block
-        // It's assumed to exist as it's called in the on_key method
-    }
-
     fn handle_help_mode_key(&mut self, key_event: KeyEvent) {
         match key_event.code {
             KeyCode::Esc => {
@@ -1124,7 +1153,25 @@ fn run_main_loop(terminal: &mut Terminal<TerminalBackend>, app: &mut App, show_t
     }
 }
 
+fn format_file_size(size: u64, raw_sizes: bool) -> String {
+    if raw_sizes {
+        format!("{} bytes", size)
+    } else {
+        format_size(size, DECIMAL)
+    }
+}
+
 fn ui(frame: &mut Frame, app: &mut App) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),  // Title
+            Constraint::Length(3),  // Status
+            Constraint::Min(0),     // Main content
+            Constraint::Length(1),  // Help bar
+        ])
+        .split(frame.size());
+
     if app.state.is_loading && app.scan_rx.is_some() { // Show loading screen only if async scan is active
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -1289,25 +1336,13 @@ fn ui(frame: &mut Frame, app: &mut App) {
 
     } else {
         // Main UI (3 panels + status bar)
-        let (content_chunk, status_chunk) = {
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Min(0), 
-                    Constraint::Length(if app.state.input_mode == InputMode::Normal { 1 } else { 3 }), 
-                ])
-                .split(frame.size());
-            (chunks[0], chunks[1])
-        };
-
         let main_chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Percentage(33), 
-                Constraint::Percentage(34), 
-                Constraint::Percentage(33), 
-            ].as_ref())
-            .split(content_chunk); 
+                Constraint::Percentage(70),
+                Constraint::Percentage(30),
+            ])
+            .split(chunks[2]);
 
         // Helper to create a block with a title and border, highlighting if active
         let create_block = |title_string: String, is_active: bool| {
@@ -1341,7 +1376,7 @@ fn ui(frame: &mut Frame, app: &mut App) {
                             indent_str,
                             set_hash_preview, 
                             file_count_in_set, 
-                            humansize::format_size(*set_total_size, humansize::DECIMAL)
+                            format_file_size(*set_total_size, app.cli_config.raw_sizes)
                         ),
                         Style::default()
                     )))
@@ -1403,7 +1438,7 @@ fn ui(frame: &mut Frame, app: &mut App) {
         if app.current_selected_set_from_display_list().map_or(false, |s| !s.files.is_empty()) {
             files_list_state.select(Some(app.state.selected_file_index_in_set));
         }
-        frame.render_stateful_widget(files_list, main_chunks[1], &mut files_list_state);
+        frame.render_stateful_widget(files_list, main_chunks[0], &mut files_list_state);
 
         // Right Panel: Jobs
         let jobs_panel_title_string = format!("Jobs ({}) (Ctrl+E: Exec, x:del)", app.state.jobs.len());
@@ -1427,7 +1462,7 @@ fn ui(frame: &mut Frame, app: &mut App) {
         if !app.state.jobs.is_empty() {
             jobs_list_state.select(Some(app.state.selected_job_index));
         }
-        frame.render_stateful_widget(jobs_list_widget, main_chunks[2], &mut jobs_list_state);
+        frame.render_stateful_widget(jobs_list_widget, main_chunks[1], &mut jobs_list_state);
 
         // Status Bar / Input Area
         match app.state.input_mode {
@@ -1436,12 +1471,12 @@ fn ui(frame: &mut Frame, app: &mut App) {
                 let status_bar = Paragraph::new(status_text)
                     .style(Style::default().fg(Color::LightCyan))
                     .alignment(Alignment::Left);
-                frame.render_widget(status_bar, status_chunk);
+                frame.render_widget(status_bar, chunks[3]);
             }
             InputMode::CopyDestination => { 
                 let input_chunks = Layout::default()
                     .direction(Direction::Vertical)
-                    .constraints([Constraint::Length(1), Constraint::Length(1)]).split(status_chunk);
+                    .constraints([Constraint::Length(1), Constraint::Length(1)]).split(chunks[3]);
                 let prompt_text = app.state.status_message.as_deref().unwrap_or("Enter destination path for copy (Enter:confirm, Esc:cancel):");
                 let prompt_p = Paragraph::new(prompt_text).fg(Color::Yellow);
                 frame.render_widget(prompt_p, input_chunks[0]);
@@ -1458,16 +1493,18 @@ fn ui(frame: &mut Frame, app: &mut App) {
                 // The Settings mode has its own full-screen UI, so no specific status bar here.
                 // The hints are part of the settings_paragraph and hint Paragraph already rendered.
             }
-            InputMode::RegexInput => {
-                // Implementation of handle_regex_input_key method
-                // This method is not provided in the original file or the new code block
-                // It's assumed to exist as it's called in the on_key method
-            }
             InputMode::Help => {
                 // The Help mode has its own full-screen UI, so no specific status bar here.
                 // The hints are part of the help_paragraph and footer Paragraph already rendered.
             }
         }
+
+        // Draw help bar at the bottom
+        let help = "h: Help | ↑/↓: Navigate | Space: Toggle | a: Select All | q: Quit";
+        let help = Paragraph::new(help)
+            .style(Style::default().fg(Color::DarkGray))
+            .alignment(Alignment::Center);
+        frame.render_widget(help, chunks[3]);
     }
 }
 
