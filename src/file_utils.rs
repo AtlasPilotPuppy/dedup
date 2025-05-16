@@ -239,8 +239,26 @@ pub fn find_duplicate_files_with_progress(
         }
     };
     
+    // ========== STAGE 0: PRE-SCAN FOR TOTAL COUNT ==========
+    send_status(0, format!("Pre-scan: Counting files in {}", cli.directories[0].display()));
+    
+    // Pre-scan to count total files
+    let total_files = match count_files_in_directory(&cli.directories[0], &filter_rules) {
+        Ok(count) => {
+            send_status(0, format!("Pre-scan complete: Found {} total files", count));
+            count
+        },
+        Err(e) => {
+            log::warn!("[ScanThread] Failed to count files: {}", e);
+            send_status(0, format!("Pre-scan failed: {}", e));
+            0 // Continue without total count
+        }
+    };
+    
     // ========== STAGE 1: FILE DISCOVERY ==========
-    send_status(1, format!("Stage 1/3: Starting file discovery in {}", cli.directories[0].display()));
+    send_status(1, format!("Stage 1/3: 📁 Starting file discovery in {} (0/{} files)", 
+                          cli.directories[0].display(), 
+                          if total_files > 0 { total_files.to_string() } else { "?".to_string() }));
 
     let mut files_by_size: HashMap<u64, Vec<PathBuf>> = HashMap::new();
     let walker = WalkDir::new(&cli.directories[0]).into_iter();
@@ -282,8 +300,15 @@ pub fn find_duplicate_files_with_progress(
                     
                     if (should_update || last_update_time.elapsed() >= update_interval) {
                         last_update_time = std::time::Instant::now();
-                        // Remove file name from status update to reduce repaints
-                        send_status(1, format!("Stage 1/3: Found {} files...", files_scanned_count));
+                        // Show progress percentage if total is known
+                        if total_files > 0 {
+                            let percent = (files_scanned_count as f64 / total_files as f64) * 100.0;
+                            send_status(1, format!("Stage 1/3: 📁 Scanning files: {}/{} ({:.1}%)", 
+                                                 files_scanned_count, total_files, percent));
+                        } else {
+                            // Remove file name from status update to reduce repaints
+                            send_status(1, format!("Stage 1/3: 📁 Found {} files...", files_scanned_count));
+                        }
                     }
                     
                     match fs::metadata(&path) {
@@ -303,8 +328,14 @@ pub fn find_duplicate_files_with_progress(
     let file_count = files_by_size.values().map(|v| v.len()).sum::<usize>();
     let size_group_count = files_by_size.len();
     
-    send_status(1, format!("Stage 1/3: File discovery complete. Found {} files in {} size groups.", 
-        file_count, size_group_count));
+    if total_files > 0 {
+        let percent_found = (files_scanned_count as f64 / total_files as f64) * 100.0;
+        send_status(1, format!("Stage 1/3: 📁 File discovery complete. Found {} files ({:.1}%) in {} size groups.", 
+            file_count, percent_found, size_group_count));
+    } else {
+        send_status(1, format!("Stage 1/3: 📁 File discovery complete. Found {} files in {} size groups.", 
+            file_count, size_group_count));
+    }
     
     log::info!("[ScanThread] Found {} files matching criteria, grouped into {} unique file sizes.", 
         file_count, size_group_count);
@@ -325,7 +356,7 @@ pub fn find_duplicate_files_with_progress(
     let potential_groups = potential_duplicates.len();
     let potential_files: usize = potential_duplicates.iter().map(|(_, paths)| paths.len()).sum();
     
-    send_status(2, format!("Stage 2/3: Found {} size groups with {} potential duplicate files", 
+    send_status(2, format!("Stage 2/3: 🔍 Found {} size groups with {} potential duplicate files", 
                           potential_groups, potential_files));
     
     log::info!("[ScanThread] Found {} sizes with potential duplicates. Calculating hashes...", potential_groups);
@@ -341,7 +372,7 @@ pub fn find_duplicate_files_with_progress(
     let mut groups_hashed_count = 0;
     let total_files_to_hash = potential_duplicates.iter().map(|(_, paths)| paths.len()).sum::<usize>();
     
-    send_status(3, format!("Stage 3/3: Hashing {} files across {} size groups (using {} threads)...", 
+    send_status(3, format!("Stage 3/3: 🔄 Hashing {} files across {} size groups (using {} threads)...", 
         total_files_to_hash, total_groups_to_hash, num_threads));
 
     pool.install(|| {
@@ -428,7 +459,7 @@ pub fn find_duplicate_files_with_progress(
         if should_update || last_update_time.elapsed() >= update_interval {
             last_update_time = std::time::Instant::now();
             let progress_percent = (groups_hashed_count as f64 / total_groups_to_hash as f64) * 100.0;
-            send_status(3, format!("Stage 3/3: Hashed {}/{} groups ({:.1}%)... Found {} duplicate sets", 
+            send_status(3, format!("Stage 3/3: 🔄 Hashed {}/{} groups ({:.1}%)... Found {} duplicate sets", 
                 groups_hashed_count, total_groups_to_hash, progress_percent, actual_duplicate_sets));
         }
     }
@@ -446,20 +477,49 @@ pub fn find_duplicate_files(
     log::info!("Scanning directory (sync): {:?}", cli.directories[0]);
     let filter_rules = FilterRules::new(cli)?;
 
-    // ========== STAGE 1: FILE DISCOVERY ==========
+    // ========== STAGE 0: PRE-SCAN FOR TOTAL COUNT ==========
     let pb_draw_target = if cli.progress { indicatif::ProgressDrawTarget::stderr() } else { indicatif::ProgressDrawTarget::hidden() };
     
     // Create a multi-progress container
     let multi_progress = indicatif::MultiProgress::new();
     multi_progress.set_draw_target(pb_draw_target);
     
-    // Create a progress bar for Stage 1: File Discovery
-    let pb_stage1 = multi_progress.add(ProgressBar::new_spinner());
-    pb_stage1.set_style(ProgressStyle::default_spinner()
-        .template("{spinner:.green} [1/3] File Discovery: {msg:.dim} ({elapsed_precise})")?);
-    if cli.progress { 
-        pb_stage1.enable_steady_tick(std::time::Duration::from_millis(200)); 
+    // Create a progress bar for pre-scan
+    let pb_pre_scan = multi_progress.add(ProgressBar::new_spinner());
+    if cli.progress {
+        pb_pre_scan.set_style(ProgressStyle::default_spinner()
+            .template("{spinner:.green} [0/3] Pre-scan: {msg:.dim} ({elapsed_precise})")?);
+        pb_pre_scan.enable_steady_tick(std::time::Duration::from_millis(100));
+        pb_pre_scan.set_message("Counting total files...");
     }
+    
+    // Pre-scan to count total files
+    let total_files = if cli.progress {
+        let count = count_files_in_directory(&cli.directories[0], &filter_rules)?;
+        pb_pre_scan.finish_with_message(format!("Found {} total files", count));
+        count
+    } else {
+        0 // If no progress display, skip counting
+    };
+    
+    // Create a progress bar for Stage 1: File Discovery
+    let pb_stage1 = if cli.progress && total_files > 0 {
+        let pb = multi_progress.add(ProgressBar::new(total_files as u64));
+        pb.set_style(ProgressStyle::default_bar()
+            .template("{spinner:.green} [1/3] File Discovery: [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({percent}%) {msg:.dim}")?
+            .progress_chars("#=> "));
+        pb.enable_steady_tick(std::time::Duration::from_millis(200));
+        pb
+    } else {
+        // Fall back to spinner if no total count or progress not enabled
+        let pb = multi_progress.add(ProgressBar::new_spinner());
+        pb.set_style(ProgressStyle::default_spinner()
+            .template("{spinner:.green} [1/3] File Discovery: {msg:.dim} ({elapsed_precise})")?);
+        if cli.progress { 
+            pb.enable_steady_tick(std::time::Duration::from_millis(200)); 
+        }
+        pb
+    };
     
     pb_stage1.set_message("Scanning directory for files...");
     
@@ -486,6 +546,10 @@ pub fn find_duplicate_files(
                     let path = entry.path().to_path_buf();
                     file_count += 1;
                     
+                    if cli.progress {
+                        pb_stage1.set_position(file_count as u64);
+                    }
+                    
                     // Determine update frequency based on file count
                     let should_update = if file_count < 100 {
                         file_count % 10 == 0
@@ -505,7 +569,12 @@ pub fn find_duplicate_files(
                     
                     if should_update || last_update_time.elapsed() >= update_interval { 
                         last_update_time = std::time::Instant::now();
-                        pb_stage1.set_message(format!("Found {} files...", file_count));
+                        if total_files > 0 {
+                            let percent = (file_count as f64 / total_files as f64) * 100.0;
+                            pb_stage1.set_message(format!("Processed {:.1}% of files...", percent));
+                        } else {
+                            pb_stage1.set_message(format!("Found {} files...", file_count));
+                        }
                     }
                     
                     match fs::metadata(&path) {
@@ -524,7 +593,14 @@ pub fn find_duplicate_files(
     }
     
     // Complete Stage 1
-    pb_stage1.finish_with_message(format!("File discovery complete: {} files in {} size groups", file_count, size_count));
+    if total_files > 0 {
+        let percent_found = (file_count as f64 / total_files as f64) * 100.0;
+        pb_stage1.finish_with_message(format!("File discovery complete: {} files ({:.1}%) in {} size groups", 
+                                           file_count, percent_found, size_count));
+    } else {
+        pb_stage1.finish_with_message(format!("File discovery complete: {} files in {} size groups", 
+                                           file_count, size_count));
+    }
 
     log::info!("Found {} files (sync) in {} unique size groups.", file_count, size_count);
 
@@ -1164,6 +1240,29 @@ pub fn copy_missing_files(missing_files: &[FileInfo], target_dir: &Path, dry_run
                     log::error!("Failed to copy {:?} to {:?}: {}", file.path, target_path, e);
                     // Decide whether to continue or return an error
                 }
+            }
+        }
+    }
+    
+    Ok(count)
+}
+
+// Add this new function for counting files in a directory
+pub fn count_files_in_directory(directory: &Path, filter_rules: &FilterRules) -> Result<usize> {
+    let mut count = 0;
+    let walker = WalkDir::new(directory).into_iter();
+    
+    for entry_result in walker.filter_entry(|e| {
+        if is_hidden(e) || is_symlink(e) { return false; }
+        if let Some(path_str) = e.path().to_str() {
+            filter_rules.is_match(path_str)
+        } else {
+            false
+        }
+    }) {
+        if let Ok(entry) = entry_result {
+            if entry.file_type().is_file() {
+                count += 1;
             }
         }
     }

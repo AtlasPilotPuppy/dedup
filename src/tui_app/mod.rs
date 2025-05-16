@@ -304,13 +304,19 @@ impl App {
         self.state.selected_file_index_in_set = 0;
         self.state.selected_job_index = 0;
         self.state.is_loading = true;
-        self.state.loading_message = "📁 [1/3] Rescanning with current settings...".to_string();
+        self.state.loading_message = "⏳ [0/3] Preparing for rescan...".to_string();
         self.state.status_message = Some("Starting rescan...".to_string());
         self.state.rescan_needed = false; // Reset flag as we are acting on it
 
         let mut current_cli_for_scan = self.cli_config.clone(); // Use stored cli_config
         current_cli_for_scan.algorithm = self.state.current_algorithm.clone();
         current_cli_for_scan.parallel = self.state.current_parallel;
+        current_cli_for_scan.sort_by = self.state.current_sort_criterion;
+        current_cli_for_scan.sort_order = self.state.current_sort_order;
+        // Always enable progress for TUI mode
+        current_cli_for_scan.progress = true;
+        current_cli_for_scan.progress_tui = true;
+
         // Note: We always use progress for TUI internal scans regardless of initial cli.progress
         // find_duplicate_files_with_progress requires a tx channel.
         // Ensure scan_tx is Some.
@@ -364,6 +370,7 @@ impl App {
                         ScanMessage::StatusUpdate(stage, msg) => {
                             // Format the stage indicator for display
                             let stage_prefix = match stage {
+                                0 => "⏳ [0/3] ",  // Pre-scan stage
                                 1 => "📁 [1/3] ",
                                 2 => "🔍 [2/3] ",
                                 3 => "🔄 [3/3] ",
@@ -1215,7 +1222,12 @@ pub fn run_tui_app(cli: &Cli) -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new(cli);
+    // Create a modified cli config with progress always enabled for TUI mode
+    let mut tui_cli = cli.clone();
+    tui_cli.progress = true;
+    tui_cli.progress_tui = true;
+
+    let mut app = App::new(&tui_cli);
     app.validate_selection_indices(); // Initial validation for sync loaded data if any
     
     // Always enable progress for TUI mode regardless of cli.progress setting
