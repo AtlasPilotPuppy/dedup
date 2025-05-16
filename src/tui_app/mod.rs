@@ -1795,13 +1795,11 @@ impl App {
     }
 
     fn handle_help_mode_key(&mut self, key_event: KeyEvent) {
-        match key_event.code {
-            KeyCode::Esc => {
-                self.state.input_mode = InputMode::Normal;
-                self.state.status_message = Some("Exited help screen.".to_string());
-            }
-            _ => {} // Other keys do nothing in help mode
+        if key_event.code == KeyCode::Esc {
+            self.state.input_mode = InputMode::Normal;
+            self.state.status_message = Some("Exited help screen.".to_string());
         }
+        // Other keys do nothing in help mode
     }
 
     fn rebuild_display_list(&mut self) {
