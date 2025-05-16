@@ -44,7 +44,7 @@ impl std::fmt::Display for SortCriterion {
             Self::FileName => write!(f, "name"),
             Self::FileSize => write!(f, "size"),
             Self::CreatedAt => write!(f, "createdat"),
-            Self::ModifiedAt => write!(f, "modifiedat"),
+            Self::ModifiedAt => write!(f, "modified"),
             Self::PathLength => write!(f, "path"),
         }
     }

@@ -71,7 +71,7 @@ fn default_format() -> String {
 }
 
 fn default_sort_by() -> String {
-    "modifiedat".to_string()
+    "modified".to_string()
 }
 
 fn default_sort_order() -> String {
@@ -182,7 +182,7 @@ mod tests {
         assert_eq!(config.algorithm, "xxhash");
         assert_eq!(config.mode, "newest_modified");
         assert_eq!(config.format, "json");
-        assert_eq!(config.sort_by, "modifiedat");
+        assert_eq!(config.sort_by, "modified");
         assert_eq!(config.sort_order, "descending");
         assert!(config.include.is_empty());
         assert!(config.exclude.is_empty());
