@@ -407,7 +407,30 @@ impl App {
                 self.state.status_message = Some("Displaying Help. Esc to exit.".to_string());
             }
             KeyCode::Char('a') => {
-                // Toggle keep/delete for all files in the current set or folder
+                // Toggle keep/delete for all files in all sets in all folders (global toggle)
+                let files_to_process: Vec<_> = self.state.grouped_data.iter()
+                    .flat_map(|group| group.sets.iter().flat_map(|set| set.files.clone()))
+                    .collect();
+                let all_kept = files_to_process.iter().all(|file| {
+                    self.state.jobs.iter().any(|job| job.file_info.path == file.path && job.action == ActionType::Keep)
+                });
+                let paths: Vec<_> = files_to_process.iter().map(|f| f.path.clone()).collect();
+                self.state.jobs.retain(|job| !paths.contains(&job.file_info.path));
+                let action = if all_kept { ActionType::Delete } else { ActionType::Keep };
+                for file in files_to_process {
+                    self.state.jobs.push(Job {
+                        action: action.clone(),
+                        file_info: file,
+                    });
+                }
+                self.state.status_message = Some(if all_kept {
+                    "All files marked for delete".to_string()
+                } else {
+                    "All files marked to keep".to_string()
+                });
+            }
+            KeyCode::Char('d') => {
+                // Mark all files in the selected set or folder for delete
                 if let Some(selected) = self.state.display_list.get(self.state.selected_display_list_index) {
                     match selected {
                         DisplayListItem::SetEntry { original_group_index, original_set_index_in_group, .. } => {
@@ -416,23 +439,15 @@ impl App {
                             } else {
                                 Vec::new()
                             };
-                            let all_kept = files_to_process.iter().all(|file| {
-                                self.state.jobs.iter().any(|job| job.file_info.path == file.path && job.action == ActionType::Keep)
-                            });
                             let paths: Vec<_> = files_to_process.iter().map(|f| f.path.clone()).collect();
                             self.state.jobs.retain(|job| !paths.contains(&job.file_info.path));
-                            let action = if all_kept { ActionType::Delete } else { ActionType::Keep };
                             for file in files_to_process {
                                 self.state.jobs.push(Job {
-                                    action: action.clone(),
+                                    action: ActionType::Delete,
                                     file_info: file,
                                 });
                             }
-                            self.state.status_message = Some(if all_kept {
-                                "All files in set marked for delete".to_string()
-                            } else {
-                                "All files in set marked to keep".to_string()
-                            });
+                            self.state.status_message = Some("All files in set marked for delete".to_string());
                         }
                         DisplayListItem::Folder { .. } => {
                             // Find the group for this folder
@@ -445,23 +460,59 @@ impl App {
                             } else {
                                 Vec::new()
                             };
-                            let all_kept = files_to_process.iter().all(|file| {
-                                self.state.jobs.iter().any(|job| job.file_info.path == file.path && job.action == ActionType::Keep)
-                            });
                             let paths: Vec<_> = files_to_process.iter().map(|f| f.path.clone()).collect();
                             self.state.jobs.retain(|job| !paths.contains(&job.file_info.path));
-                            let action = if all_kept { ActionType::Delete } else { ActionType::Keep };
                             for file in files_to_process {
                                 self.state.jobs.push(Job {
-                                    action: action.clone(),
+                                    action: ActionType::Delete,
                                     file_info: file,
                                 });
                             }
-                            self.state.status_message = Some(if all_kept {
-                                "All files in folder marked for delete".to_string()
+                            self.state.status_message = Some("All files in folder marked for delete".to_string());
+                        }
+                    }
+                }
+            }
+            KeyCode::Char('k') => {
+                // Mark all files in the selected set or folder for keep
+                if let Some(selected) = self.state.display_list.get(self.state.selected_display_list_index) {
+                    match selected {
+                        DisplayListItem::SetEntry { original_group_index, original_set_index_in_group, .. } => {
+                            let files_to_process = if let Some(group) = self.state.grouped_data.get(*original_group_index) {
+                                group.sets[*original_set_index_in_group].files.clone()
                             } else {
-                                "All files in folder marked to keep".to_string()
-                            });
+                                Vec::new()
+                            };
+                            let paths: Vec<_> = files_to_process.iter().map(|f| f.path.clone()).collect();
+                            self.state.jobs.retain(|job| !paths.contains(&job.file_info.path));
+                            for file in files_to_process {
+                                self.state.jobs.push(Job {
+                                    action: ActionType::Keep,
+                                    file_info: file,
+                                });
+                            }
+                            self.state.status_message = Some("All files in set marked to keep".to_string());
+                        }
+                        DisplayListItem::Folder { .. } => {
+                            // Find the group for this folder
+                            let group_index = self.state.display_list[..=self.state.selected_display_list_index]
+                                .iter()
+                                .filter(|item| matches!(item, DisplayListItem::Folder { .. }))
+                                .count() - 1;
+                            let files_to_process = if let Some(group) = self.state.grouped_data.get(group_index) {
+                                group.sets.iter().flat_map(|set| set.files.clone()).collect::<Vec<_>>()
+                            } else {
+                                Vec::new()
+                            };
+                            let paths: Vec<_> = files_to_process.iter().map(|f| f.path.clone()).collect();
+                            self.state.jobs.retain(|job| !paths.contains(&job.file_info.path));
+                            for file in files_to_process {
+                                self.state.jobs.push(Job {
+                                    action: ActionType::Keep,
+                                    file_info: file,
+                                });
+                            }
+                            self.state.status_message = Some("All files in folder marked to keep".to_string());
                         }
                     }
                 }
@@ -481,17 +532,11 @@ impl App {
                 self.state.input_mode = InputMode::Settings;
                 self.state.status_message = Some("Entered settings mode. Esc to exit.".to_string());
             }
-            KeyCode::Char('d') => {
-                self.mark_set_for_deletion();
-            }
             KeyCode::Char('i') => {
                 self.set_action_for_selected_file(ActionType::Ignore);
             }
             KeyCode::Char('c') => {
                 self.initiate_copy_action();
-            }
-            KeyCode::Char('k') => {
-                self.set_selected_file_as_kept();
             }
             KeyCode::Up => {
                 match self.state.active_panel {
