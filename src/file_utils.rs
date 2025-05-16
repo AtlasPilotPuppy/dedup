@@ -271,7 +271,7 @@ pub fn find_duplicate_files_with_progress(
     log::info!("[ScanThread] Found {} sizes with potential duplicates. Calculating hashes...", potential_duplicates.len());
 
     let num_threads = cli.parallel.unwrap_or_else(num_cpus::get);
-    rayon::ThreadPoolBuilder::new().num_threads(num_threads).build_global()?;
+    let pool = rayon::ThreadPoolBuilder::new().num_threads(num_threads).build()?;
     log::info!("[ScanThread] Using {} threads for hashing.", num_threads);
 
     // For MPSC between hashing threads and this function's aggregation logic
@@ -282,42 +282,44 @@ pub fn find_duplicate_files_with_progress(
     send_status(format!("Hashing {} files across {} size groups (using {} threads)...", 
         total_files_to_hash, total_groups_to_hash, num_threads));
 
-    potential_duplicates
-        .into_par_iter()
-        .for_each_with(local_tx, |thread_local_tx, (size, paths)| {
-            let mut hashes_in_group: HashMap<String, Vec<FileInfo>> = HashMap::new();
-            for path in paths {
-                match calculate_hash(&path, &cli.algorithm) {
-                    Ok(hash_str) => {
-                        let metadata = match fs::metadata(&path) {
-                            Ok(m) => m,
-                            Err(e) => {
-                                log::warn!("Failed to get metadata for {:?}: {}", path, e);
-                                continue;
-                            }
-                        };
-                        let file_info = FileInfo { 
-                            path: path.clone(), 
-                            size, 
-                            hash: Some(hash_str.clone()),
-                            modified_at: metadata.modified().ok(),
-                            created_at: metadata.created().ok(),
-                        };
-                        hashes_in_group.entry(hash_str).or_default().push(file_info);
-                    }
-                    Err(e) => {
-                        log::warn!("[ScanThread] Failed to hash {:?}: {}", path, e);
-                        if thread_local_tx.send(Err(e)).is_err() {
-                            log::error!("[ScanThread] Hashing thread failed to send error (channel closed).");
+    pool.install(|| {
+        potential_duplicates
+            .into_par_iter()
+            .for_each_with(local_tx, |thread_local_tx, (size, paths)| {
+                let mut hashes_in_group: HashMap<String, Vec<FileInfo>> = HashMap::new();
+                for path in paths {
+                    match calculate_hash(&path, &cli.algorithm) {
+                        Ok(hash_str) => {
+                            let metadata = match fs::metadata(&path) {
+                                Ok(m) => m,
+                                Err(e) => {
+                                    log::warn!("Failed to get metadata for {:?}: {}", path, e);
+                                    continue;
+                                }
+                            };
+                            let file_info = FileInfo { 
+                                path: path.clone(), 
+                                size, 
+                                hash: Some(hash_str.clone()),
+                                modified_at: metadata.modified().ok(),
+                                created_at: metadata.created().ok(),
+                            };
+                            hashes_in_group.entry(hash_str).or_default().push(file_info);
                         }
-                        return; 
+                        Err(e) => {
+                            log::warn!("[ScanThread] Failed to hash {:?}: {}", path, e);
+                            if thread_local_tx.send(Err(e)).is_err() {
+                                log::error!("[ScanThread] Hashing thread failed to send error (channel closed).");
+                            }
+                            return; 
+                        }
                     }
                 }
-            }
-            if thread_local_tx.send(Ok(hashes_in_group)).is_err() {
-                 log::error!("[ScanThread] Hashing thread failed to send result (channel closed).");
-            }
-        });
+                if thread_local_tx.send(Ok(hashes_in_group)).is_err() {
+                     log::error!("[ScanThread] Hashing thread failed to send result (channel closed).");
+                }
+            });
+    });
     
     // Drop the sender part for the local channel so `recv` can eventually find it closed
     // drop(local_tx); // Not needed if for_each_with handles sender lifetime correctly.
@@ -431,7 +433,7 @@ pub fn find_duplicate_files(
     log::info!("Found {} sizes (sync) with potential duplicates. Calculating hashes...", potential_duplicates.len());
 
     let num_threads = cli.parallel.unwrap_or_else(num_cpus::get);
-    rayon::ThreadPoolBuilder::new().num_threads(num_threads).build_global()?;
+    let pool = rayon::ThreadPoolBuilder::new().num_threads(num_threads).build()?;
     log::info!("Using {} threads for hashing (sync).", num_threads);
 
     let pb_hashes_draw_target = if cli.progress { indicatif::ProgressDrawTarget::stderr() } else { indicatif::ProgressDrawTarget::hidden() };
@@ -444,38 +446,40 @@ pub fn find_duplicate_files(
     let (local_tx, local_rx) = std::sync::mpsc::channel::<Result<HashMap<String, Vec<FileInfo>>>>();
     let total_groups_to_hash = potential_duplicates.len();
 
-    potential_duplicates
-        .into_par_iter()
-        .for_each_with(local_tx, |thread_local_tx, (size, paths)| {
-            let mut hashes_in_group: HashMap<String, Vec<FileInfo>> = HashMap::new();
-            for path in paths {
-                match calculate_hash(&path, &cli.algorithm) {
-                    Ok(hash_str) => {
-                        let metadata = match fs::metadata(&path) {
-                            Ok(m) => m,
-                            Err(e) => {
-                                log::warn!("Failed to get metadata for {:?}: {}", path, e);
-                                continue;
-                            }
-                        };
-                        let file_info = FileInfo { 
-                            path: path.clone(), 
-                            size, 
-                            hash: Some(hash_str.clone()),
-                            modified_at: metadata.modified().ok(),
-                            created_at: metadata.created().ok(),
-                        };
-                        hashes_in_group.entry(hash_str).or_default().push(file_info);
-                    }
-                    Err(e) => {
-                        log::warn!("Failed to hash {:?} (sync): {}", path, e);
-                        if thread_local_tx.send(Err(e)).is_err() { /* ... */ }
-                        return; 
+    pool.install(|| {
+        potential_duplicates
+            .into_par_iter()
+            .for_each_with(local_tx, |thread_local_tx, (size, paths)| {
+                let mut hashes_in_group: HashMap<String, Vec<FileInfo>> = HashMap::new();
+                for path in paths {
+                    match calculate_hash(&path, &cli.algorithm) {
+                        Ok(hash_str) => {
+                            let metadata = match fs::metadata(&path) {
+                                Ok(m) => m,
+                                Err(e) => {
+                                    log::warn!("Failed to get metadata for {:?}: {}", path, e);
+                                    continue;
+                                }
+                            };
+                            let file_info = FileInfo { 
+                                path: path.clone(), 
+                                size, 
+                                hash: Some(hash_str.clone()),
+                                modified_at: metadata.modified().ok(),
+                                created_at: metadata.created().ok(),
+                            };
+                            hashes_in_group.entry(hash_str).or_default().push(file_info);
+                        }
+                        Err(e) => {
+                            log::warn!("Failed to hash {:?} (sync): {}", path, e);
+                            if thread_local_tx.send(Err(e)).is_err() { /* ... */ }
+                            return; 
+                        }
                     }
                 }
-            }
-            if thread_local_tx.send(Ok(hashes_in_group)).is_err() { /* ... */ }
-        });
+                if thread_local_tx.send(Ok(hashes_in_group)).is_err() { /* ... */ }
+            });
+    });
 
     for i in 0..total_groups_to_hash {
         match local_rx.recv() {

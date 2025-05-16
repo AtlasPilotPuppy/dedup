@@ -1,89 +1,16 @@
-mod file_utils;
-mod tui_app;
+// mod file_utils;
+// mod tui_app;
 
+use std::path::Path;
 use clap::Parser;
-use std::path::{Path, PathBuf};
 use simplelog::LevelFilter;
 use anyhow::Result;
 use humansize::{format_size, DECIMAL};
 use env_logger;
 
-#[derive(Parser, Debug, Clone)]
-#[clap(author, version, about, long_about = None)]
-pub struct Cli {
-    /// The directory to scan for duplicate files.
-    #[clap(required_unless_present = "interactive", default_value = ".")]
-    pub directory: PathBuf,
-
-    /// Automatically delete duplicate files.
-    #[clap(short, long, help = "Delete duplicate files automatically based on selection strategy")]
-    pub delete: bool,
-
-    /// Move duplicate files to the specified folder.
-    #[clap(short = 'M', long, help = "Move duplicate files to a specified directory")]
-    pub move_to: Option<PathBuf>,
-
-    /// Write a log file to the specified path.
-    #[clap(short, long, help = "Log actions and errors to a file (dedup.log)")]
-    pub log: bool,
-
-    /// Write a file containing duplicate information.
-    #[clap(short, long, help = "Output duplicate sets to a file (e.g., duplicates.json)")]
-    pub output: Option<PathBuf>,
-
-    /// Output format for the duplicates file.
-    #[clap(short, long, value_parser = clap::builder::PossibleValuesParser::new(["json", "toml"]), default_value = "json", help = "Format for the output file [json|toml]")]
-    pub format: String,
-
-    /// Hashing algorithm to use for comparing files.
-    #[clap(short, long, value_parser = clap::builder::PossibleValuesParser::new(["md5", "sha256", "blake3"]), default_value = "blake3", help = "Hashing algorithm [md5|sha256|blake3]")]
-    pub algorithm: String,
-
-    /// Number of parallel threads to use for hashing. Defaults to auto-detected number of cores.
-    #[clap(short, long, help = "Number of parallel threads for hashing (default: auto)")]
-    pub parallel: Option<usize>,
-
-    /// Mode for selecting which file to keep/delete in non-interactive mode.
-    #[clap(long, default_value = "newest", help = "Selection strategy for delete/move [newest|oldest|shortest|longest]")]
-    pub mode: String,
-
-    /// Fire up interactive TUI mode.
-    #[clap(short, long, help = "Run in interactive TUI mode")]
-    pub interactive: bool,
-
-    /// Verbosity level.
-    #[clap(short, long, action = clap::ArgAction::Count, help = "Verbosity level (-v, -vv, -vvv)")]
-    pub verbose: u8,
-
-    /// Include files matching the given glob pattern. Can be specified multiple times.
-    #[clap(long, help = "Include specific file patterns (glob)")]
-    pub include: Vec<String>,
-
-    /// Exclude files matching the given glob pattern. Can be specified multiple times.
-    #[clap(long, help = "Exclude specific file patterns (glob)")]
-    pub exclude: Vec<String>,
-
-    /// Read filter rules from a file (similar to rclone filter files).
-    #[clap(long, help = "Load filter rules from a file (one pattern per line, # for comments)")]
-    pub filter_from: Option<PathBuf>,
-
-    /// Show progress information during scanning/hashing.
-    #[clap(long, help = "Show progress bar for CLI scan (TUI has its own progress display)")]
-    pub progress: bool,
-
-    #[clap(long, help = "Show progress during TUI scan (enabled by default for TUI mode)")]
-    pub progress_tui: bool,
-
-    #[clap(long, value_parser = crate::file_utils::SortCriterion::from_str, default_value = "modifiedat", help = "Sort files by criterion [name|size|created|modified|path]")]
-    pub sort_by: crate::file_utils::SortCriterion,
-
-    #[clap(long, value_parser = crate::file_utils::SortOrder::from_str, default_value = "descending", help = "Sort order [asc|desc]")]
-    pub sort_order: crate::file_utils::SortOrder,
-
-    /// Display file sizes in raw bytes instead of human-readable format.
-    #[clap(long, help = "Display file sizes in raw bytes instead of human-readable format")]
-    pub raw_sizes: bool,
-}
+use dedup_tui::Cli;
+use dedup_tui::file_utils;
+use dedup_tui::tui_app;
 
 fn setup_logger(verbosity: u8, log_file: Option<&Path>) -> Result<()> {
     let level = match verbosity {
@@ -109,9 +36,8 @@ fn setup_logger(verbosity: u8, log_file: Option<&Path>) -> Result<()> {
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // Always log to file in TUI mode to avoid interfering with the TUI display
-    let dedup_tui_log = PathBuf::from("dedup_tui.log");
-    let dedup_log = PathBuf::from("dedup.log");
+    let dedup_tui_log = std::path::PathBuf::from("dedup_tui.log");
+    let dedup_log = std::path::PathBuf::from("dedup.log");
     let log_file = if cli.interactive {
         Some(dedup_tui_log.as_path())
     } else if cli.log {
@@ -156,7 +82,6 @@ fn main() -> Result<()> {
                         }
                     }
 
-                    // Output to file if specified
                     if let Some(output_path) = &cli.output {
                         match file_utils::output_duplicates(&duplicate_sets, output_path, &cli.format) {
                             Ok(_) => {
@@ -170,7 +95,6 @@ fn main() -> Result<()> {
                         }
                     }
                     
-                    // Perform actions if requested
                     if cli.delete || cli.move_to.is_some() {
                         let strategy = file_utils::SelectionStrategy::from_str(&cli.mode)?;
                         let mut total_deleted = 0;
