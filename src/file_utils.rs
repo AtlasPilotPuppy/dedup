@@ -207,7 +207,7 @@ pub fn find_duplicate_files_with_progress(
     cli: &Cli,
     tx_progress: StdMpscSender<ScanMessage>,
 ) -> Result<Vec<DuplicateSet>> {
-    log::info!("[ScanThread] Starting scan with progress updates for directory: {:?}", cli.directory);
+    log::info!("[ScanThread] Starting scan with progress updates for directory: {:?}", cli.directories[0]);
     let filter_rules = FilterRules::new(cli)?;
 
     let send_status = |msg: String| {
@@ -215,10 +215,10 @@ pub fn find_duplicate_files_with_progress(
             log::warn!("[ScanThread] Failed to send status update to TUI (channel closed).");
         }
     };
-    send_status(format!("Starting scan in {}", cli.directory.display()));
+    send_status(format!("Starting scan in {}", cli.directories[0].display()));
 
     let mut files_by_size: HashMap<u64, Vec<PathBuf>> = HashMap::new();
-    let walker = WalkDir::new(&cli.directory).into_iter();
+    let walker = WalkDir::new(&cli.directories[0]).into_iter();
     let mut files_scanned_count = 0;
     let mut last_update_time = std::time::Instant::now();
     let update_interval = std::time::Duration::from_millis(250); // Update UI at most 4 times per second
@@ -377,11 +377,11 @@ pub fn find_duplicate_files(
 ) -> Result<Vec<DuplicateSet>> {
     // This version is for non-TUI or TUI sync mode.
     // It uses indicatif progress bars if cli.progress is true.
-    log::info!("Scanning directory (sync): {:?}", cli.directory);
+    log::info!("Scanning directory (sync): {:?}", cli.directories[0]);
     let filter_rules = FilterRules::new(cli)?;
 
     let mut files_by_size: HashMap<u64, Vec<PathBuf>> = HashMap::new();
-    let walker = WalkDir::new(&cli.directory).into_iter();
+    let walker = WalkDir::new(&cli.directories[0]).into_iter();
     
     let pb_files_draw_target = if cli.progress { indicatif::ProgressDrawTarget::stderr() } else { indicatif::ProgressDrawTarget::hidden() };
     let pb_files = ProgressBar::with_draw_target(Some(0), pb_files_draw_target);
@@ -756,9 +756,273 @@ pub(crate) fn sort_file_infos(files: &mut Vec<FileInfo>, criterion: SortCriterio
     });
 }
 
-// TODO: Implement action functions (delete, move)
-// TODO: Implement output generation (JSON, TOML) 
-// TODO: Implement output generation (JSON, TOML) 
+// Structure to represent file comparison results between directories
+pub struct DirectoryComparisonResult {
+    pub missing_in_target: Vec<FileInfo>, // Files in source but not in target
+    pub duplicates: Vec<DuplicateSet>,    // Duplicate files across directories
+}
+
+// Determine target directory from CLI arguments
+pub fn determine_target_directory(cli: &Cli) -> Result<PathBuf> {
+    if let Some(target) = &cli.target {
+        // User explicitly specified a target directory
+        if !target.exists() {
+            return Err(anyhow::anyhow!("Specified target directory does not exist: {:?}", target));
+        }
+        if !target.is_dir() {
+            return Err(anyhow::anyhow!("Specified target path is not a directory: {:?}", target));
+        }
+        Ok(target.clone())
+    } else if cli.directories.len() > 1 {
+        // Use the last directory as target by default
+        let target = cli.directories.last().unwrap().clone();
+        if !target.exists() {
+            return Err(anyhow::anyhow!("Last specified directory (default target) does not exist: {:?}", target));
+        }
+        if !target.is_dir() {
+            return Err(anyhow::anyhow!("Last specified path is not a directory: {:?}", target));
+        }
+        Ok(target)
+    } else {
+        Err(anyhow::anyhow!("No target directory specified and only one directory provided"))
+    }
+}
+
+// Get source directories from CLI arguments
+pub fn get_source_directories(cli: &Cli, target: &Path) -> Vec<PathBuf> {
+    if let Some(t) = &cli.target {
+        // If target is explicitly specified, all directories are sources
+        cli.directories.iter().filter(|d| d != &t).cloned().collect()
+    } else {
+        // Otherwise, all but the last directory are sources
+        cli.directories.iter().filter(|d| d.as_path() != target).cloned().collect()
+    }
+}
+
+// Compare directories to find missing files and optionally duplicates
+pub fn compare_directories(cli: &Cli) -> Result<DirectoryComparisonResult> {
+    let target_dir = determine_target_directory(cli)?;
+    let source_dirs = get_source_directories(cli, &target_dir);
+    
+    log::info!("Comparing directories: Sources: {:?}, Target: {:?}", source_dirs, target_dir);
+    
+    if source_dirs.is_empty() {
+        return Err(anyhow::anyhow!("No source directories specified"));
+    }
+    
+    // Create a modified CLI for target directory scan
+    let mut target_cli = cli.clone();
+    target_cli.directories = vec![target_dir.clone()];
+    
+    // Scan target directory
+    log::info!("Scanning target directory: {:?}", target_dir);
+    let target_files = scan_directory(&target_cli, &target_dir)?;
+    log::info!("Found {} files in target directory", target_files.len());
+    
+    // Map of target file hashes for quick lookup
+    let target_hash_map: HashMap<String, &FileInfo> = target_files.iter()
+        .filter_map(|file| {
+            file.hash.as_ref().map(|hash| (hash.clone(), file))
+        })
+        .collect();
+    
+    let mut missing_files = Vec::new();
+    let mut all_duplicate_sets = Vec::new();
+    
+    // Scan each source directory and find missing files
+    for source_dir in &source_dirs {
+        log::info!("Scanning source directory: {:?}", source_dir);
+        
+        // Create a modified CLI for source directory scan
+        let mut source_cli = cli.clone();
+        source_cli.directories = vec![source_dir.clone()];
+        
+        let source_files = scan_directory(&source_cli, source_dir)?;
+        log::info!("Found {} files in source directory: {:?}", source_files.len(), source_dir);
+        
+        // Find files missing in target
+        for file in &source_files {
+            // Skip files with no hash
+            if let Some(hash) = &file.hash {
+                if !target_hash_map.contains_key(hash) {
+                    missing_files.push(file.clone());
+                    log::debug!("File missing in target: {:?}", file.path);
+                }
+                
+                // If deduplication is enabled, collect duplicate sets
+                if cli.deduplicate {
+                    // This part will be expanded if deduplication is requested
+                    // For now we'll just identify duplicates across directories
+                }
+            }
+        }
+    }
+    
+    // If deduplication is requested, we need additional processing
+    if cli.deduplicate {
+        // Scan all directories together to find duplicates across them
+        let mut all_dirs_cli = cli.clone();
+        let mut all_dirs = source_dirs.clone();
+        all_dirs.push(target_dir.clone());
+        all_dirs_cli.directories = all_dirs;
+        
+        log::info!("Finding duplicates across all directories for deduplication");
+        let duplicates = find_duplicate_files(&all_dirs_cli)?;
+        
+        // Filter for duplicate sets that span across source and target
+        let cross_dir_duplicates: Vec<DuplicateSet> = duplicates.into_iter()
+            .filter(|set| {
+                // Check if this set has files from both source and target
+                let has_source_file = set.files.iter().any(|file| 
+                    source_dirs.iter().any(|source_dir| 
+                        file.path.starts_with(source_dir)
+                    )
+                );
+                
+                let has_target_file = set.files.iter().any(|file| 
+                    file.path.starts_with(&target_dir)
+                );
+                
+                has_source_file && has_target_file
+            })
+            .collect();
+        
+        all_duplicate_sets = cross_dir_duplicates;
+        log::info!("Found {} duplicate sets spanning source and target directories", 
+                  all_duplicate_sets.len());
+    }
+    
+    Ok(DirectoryComparisonResult {
+        missing_in_target: missing_files,
+        duplicates: all_duplicate_sets,
+    })
+}
+
+// Scans a single directory and returns FileInfo objects with hashes
+fn scan_directory(cli: &Cli, directory: &Path) -> Result<Vec<FileInfo>> {
+    let filter_rules = FilterRules::new(cli)?;
+    
+    let mut files = Vec::new();
+    let walker = WalkDir::new(directory).into_iter();
+    
+    for entry_result in walker.filter_entry(|e| {
+        if is_hidden(e) || is_symlink(e) { return false; }
+        if let Some(path_str) = e.path().to_str() {
+            filter_rules.is_match(path_str)
+        } else {
+            log::warn!("Path {:?} is not valid UTF-8, excluding.", e.path());
+            false
+        }
+    }) {
+        match entry_result {
+            Ok(entry) => {
+                if entry.file_type().is_file() {
+                    let path = entry.path().to_path_buf();
+                    match fs::metadata(&path) {
+                        Ok(metadata) => {
+                            if metadata.len() > 0 {
+                                let size = metadata.len();
+                                
+                                // Calculate hash
+                                let hash = match calculate_hash(&path, &cli.algorithm) {
+                                    Ok(h) => Some(h),
+                                    Err(e) => {
+                                        log::warn!("Failed to hash file {:?}: {}", path, e);
+                                        None
+                                    }
+                                };
+                                
+                                let file_info = FileInfo {
+                                    path,
+                                    size,
+                                    hash,
+                                    modified_at: metadata.modified().ok(),
+                                    created_at: metadata.created().ok(),
+                                };
+                                
+                                files.push(file_info);
+                            }
+                        }
+                        Err(e) => log::warn!("Failed to get metadata for {:?}: {}", path, e),
+                    }
+                }
+            }
+            Err(e) => log::warn!("Error walking directory: {}", e),
+        }
+    }
+    
+    log::info!("Found {} files in directory: {:?}", files.len(), directory);
+    Ok(files)
+}
+
+// Copy missing files to target directory
+pub fn copy_missing_files(missing_files: &[FileInfo], target_dir: &Path, dry_run: bool) -> Result<usize> {
+    let mut count = 0;
+    
+    if !target_dir.exists() {
+        if dry_run {
+            log::info!("[DRY RUN] Target directory {:?} does not exist. Would create it.", target_dir);
+        } else {
+            log::info!("Target directory {:?} does not exist. Creating it.", target_dir);
+            fs::create_dir_all(target_dir)?;
+        }
+    } else if !target_dir.is_dir() {
+        return Err(anyhow::anyhow!("Target path {:?} exists but is not a directory.", target_dir));
+    }
+    
+    if dry_run {
+        log::info!("[DRY RUN] Would copy {} missing files to {:?}", missing_files.len(), target_dir);
+        for file in missing_files {
+            let relative_path = match file.path.strip_prefix(file.path.parent().unwrap().parent().unwrap()) {
+                Ok(rel) => rel.to_path_buf(),
+                Err(_) => {
+                    // If we can't determine a good relative path, just use the filename
+                    PathBuf::from(file.path.file_name().unwrap_or_default())
+                }
+            };
+            
+            let target_path = target_dir.join(relative_path);
+            
+            log::info!("[DRY RUN] Would copy {:?} to {:?}", file.path, target_path);
+            count += 1;
+        }
+    } else {
+        log::info!("Copying {} missing files to {:?}", missing_files.len(), target_dir);
+        
+        for file in missing_files {
+            let relative_path = match file.path.strip_prefix(file.path.parent().unwrap().parent().unwrap()) {
+                Ok(rel) => rel.to_path_buf(),
+                Err(_) => {
+                    // If we can't determine a good relative path, just use the filename
+                    PathBuf::from(file.path.file_name().unwrap_or_default())
+                }
+            };
+            
+            let target_path = target_dir.join(relative_path);
+            
+            // Ensure parent directory exists
+            if let Some(parent) = target_path.parent() {
+                if !parent.exists() {
+                    fs::create_dir_all(parent)?;
+                    log::debug!("Created parent directory: {:?}", parent);
+                }
+            }
+            
+            match fs::copy(&file.path, &target_path) {
+                Ok(_) => {
+                    log::info!("Copied: {:?} -> {:?}", file.path, target_path);
+                    count += 1;
+                }
+                Err(e) => {
+                    log::error!("Failed to copy {:?} to {:?}: {}", file.path, target_path, e);
+                    // Decide whether to continue or return an error
+                }
+            }
+        }
+    }
+    
+    Ok(count)
+}
 
 #[cfg(test)]
 mod tests {

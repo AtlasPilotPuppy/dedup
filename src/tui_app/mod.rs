@@ -174,11 +174,11 @@ impl App {
         };
 
         // Always perform async scan for TUI
-        log::info!("Initializing TUI with directory: {:?}", cli_args.directory);
+        log::info!("Initializing TUI with directory: {:?}", cli_args.directories[0]);
         let (tx, rx) = std_mpsc::channel::<ScanMessage>();
         
         // Send an immediate status update to show we're properly initialized
-        tx.send(ScanMessage::StatusUpdate(format!("Starting scan of {}...", cli_args.directory.display())))
+        tx.send(ScanMessage::StatusUpdate(format!("Starting scan of {}...", cli_args.directories[0].display())))
             .unwrap_or_else(|e| log::error!("Failed to send initial status update: {}", e));
         
         let mut current_cli_for_scan = cli_args.clone();
@@ -1329,7 +1329,7 @@ fn ui(frame: &mut Frame, app: &mut App) {
         let gauge = Gauge::default()
             .block(Block::default().borders(Borders::ALL).title("Progress"))
             .gauge_style(Style::default().fg(Color::Blue).bg(Color::Black))
-            .label(format!("Scanning: {}...", app.cli_config.directory.display()))
+            .label(format!("Scanning: {}...", app.cli_config.directories[0].display()))
             .ratio(pulse);
             
         let progress_area = Layout::default()

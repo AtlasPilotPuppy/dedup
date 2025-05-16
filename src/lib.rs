@@ -31,9 +31,21 @@ use crate::file_utils::{SortCriterion, SortOrder};
 #[derive(Parser, Debug, Clone)]
 #[clap(author, version, about, long_about = None)]
 pub struct Cli {
-    /// The directory to scan for duplicate files.
-    #[clap(required_unless_present = "interactive", default_value = ".")]
-    pub directory: PathBuf,
+    /// The directories to scan for duplicate or missing files.
+    /// When multiple directories are specified, the last one is treated as the target
+    /// for copying missing files, unless --target is specified.
+    #[clap(required_unless_present = "interactive")]
+    pub directories: Vec<PathBuf>,
+
+    /// Specifies the target directory for copying missing files or deduplication.
+    /// Overrides the default behavior of using the last specified directory as target.
+    #[clap(long)]
+    pub target: Option<PathBuf>,
+
+    /// Whether to deduplicate between source and target directories 
+    /// instead of just copying missing files.
+    #[clap(long, help = "Deduplicate between source and target directories")]
+    pub deduplicate: bool,
 
     /// Automatically delete duplicate files.
     #[clap(short, long, help = "Delete duplicate files automatically based on selection strategy")]
@@ -64,7 +76,7 @@ pub struct Cli {
     pub parallel: Option<usize>,
 
     /// Mode for selecting which file to keep/delete in non-interactive mode.
-    #[clap(long, default_value = "newest", help = "Selection strategy for delete/move [newest|oldest|shortest|longest]")]
+    #[clap(long, default_value = "newest_modified", help = "Selection strategy for delete/move [newest_modified|oldest_modified|shortest_path|longest_path]")]
     pub mode: String,
 
     /// Fire up interactive TUI mode.

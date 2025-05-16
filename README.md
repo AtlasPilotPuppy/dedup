@@ -51,7 +51,71 @@ dedup_tui -i
 dedup_tui /path/to/directory
 
 # Find and delete duplicates (non-interactive)
-dedup_tui /path/to/directory --delete --mode newest
+dedup_tui /path/to/directory --delete --mode newest_modified
+```
+
+### Multi-Directory Operations
+
+```bash
+# Copy missing files from source to target directory
+dedup_tui /source/directory /target/directory
+
+# Explicitly specify a target directory (can be useful with multiple source directories)
+dedup_tui /source/dir1 /source/dir2 --target /target/directory
+
+# Deduplicate between directories and copy missing files
+dedup_tui /source/directory /target/directory --deduplicate
+
+# Find duplicates in both source and target (without copying)
+# and save the results to a file
+dedup_tui /source/directory /target/directory --deduplicate -o duplicates.json
+
+# Copy missing files from multiple source directories to a target
+dedup_tui /source/dir1 /source/dir2 /source/dir3 /target/directory
+
+# First deduplicate the target, then copy unique files from source
+# (run as separate commands)
+dedup_tui /target/directory --delete --mode newest_modified
+dedup_tui /source/directory /target/directory
+```
+
+### Common Workflows
+
+#### Single Directory Cleanup
+
+```bash
+# Find and list duplicates only
+dedup_tui /path/to/photos
+
+# Find and immediately delete duplicates, keeping newest files
+dedup_tui /path/to/photos --delete --mode newest_modified
+
+# Move duplicates to a separate folder instead of deleting
+dedup_tui /path/to/photos --move-to /path/to/duplicates --mode shortest_path
+
+# Export a report of duplicates for review
+dedup_tui /path/to/photos -o duplicates.json
+```
+
+#### Synchronizing Directories
+
+```bash
+# Scenario 1: Safely copy missing files from source to target
+dedup_tui /source/photos /target/backup
+
+# Scenario 2: Full synchronization with deduplication
+# Step 1: Clean duplicates in the target directory
+dedup_tui /target/backup --delete --mode newest_modified
+# Step 2: Clean duplicates in the source directory
+dedup_tui /source/photos --delete --mode newest_modified
+# Step 3: Copy missing files from source to target
+dedup_tui /source/photos /target/backup
+
+# Scenario 3: One-step operation to deduplicate between directories
+dedup_tui /source/photos /target/backup --deduplicate
+
+# Scenario 4: Multiple source directories to one target
+dedup_tui /photos/2020 /photos/2021 /photos/2022 /backup/all_photos
 ```
 
 ### Available Options
@@ -71,7 +135,7 @@ OPTIONS:
     -f, --format <format>        Format for the output file [json|toml] [default: json]
     -a, --algorithm <algorithm>  Hashing algorithm [md5|sha1|sha256|blake3] [default: blake3]
     -p, --parallel <parallel>    Number of parallel threads for hashing (default: auto)
-        --mode <mode>            Selection strategy for delete/move [newest|oldest|shortest|longest] [default: newest]
+        --mode <mode>            Selection strategy for delete/move [newest_modified|oldest_modified|shortest_path|longest_path] [default: newest_modified]
     -i, --interactive            Run in interactive TUI mode
     -v, --verbose...             Verbosity level (-v, -vv, -vvv)
         --include <include>...   Include specific file patterns (glob)

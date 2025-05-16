@@ -187,7 +187,9 @@ impl TestEnv {
 
     fn default_cli_args(&self) -> Cli {
         Cli {
-            directory: self.root_path.clone(),
+            directories: vec![self.root_path.clone()],
+            target: None,
+            deduplicate: false,
             delete: false,
             move_to: None,
             log: false, // Avoid log file creation during tests unless specific test needs it
@@ -497,6 +499,257 @@ mod integration {
         } else {
             assert!(!toml_output_path.exists(), "TOML output file was created unexpectedly for empty actionable duplicates.");
         }
+        
+        Ok(())
+    }
+
+    #[test]
+    fn test_copy_missing_files_integration() -> Result<()> {
+        // Create a test environment with two separate directories
+        let env = TestEnv::new();
+        let source_dir = env.create_subdir("source");
+        let target_dir = env.create_subdir("target");
+        
+        // Create some unique files in source
+        env.create_file_with_content_and_time(&source_dir.join("unique1.txt"), "unique_content_1", None);
+        env.create_file_with_content_and_time(&source_dir.join("unique2.txt"), "unique_content_2", None);
+        
+        // Create some files in both source and target (with same content)
+        env.create_file_with_content_and_time(&source_dir.join("common1.txt"), "common_content_1", None);
+        env.create_file_with_content_and_time(&target_dir.join("common1_target.txt"), "common_content_1", None);
+        
+        // Create duplicates within source
+        env.create_file_with_content_and_time(&source_dir.join("dup_a.txt"), "duplicate_content", None);
+        env.create_file_with_content_and_time(&source_dir.join("dup_b.txt"), "duplicate_content", None);
+        
+        // Count initial files
+        let initial_source_files = fs::read_dir(&source_dir)?.count();
+        let initial_target_files = fs::read_dir(&target_dir)?.count();
+        
+        assert_eq!(initial_source_files, 5, "Source should have 5 initial files");
+        assert_eq!(initial_target_files, 1, "Target should have 1 initial file");
+        
+        // Set up CLI args to copy missing files (no deduplication)
+        let mut cli_args = env.default_cli_args();
+        cli_args.directories = vec![source_dir.clone(), target_dir.clone()];
+        cli_args.target = Some(target_dir.clone());
+        cli_args.deduplicate = false;
+        
+        // Run the operation
+        let duplicate_sets = file_utils::find_duplicate_files(&cli_args)?;
+        
+        // Find missing files in target compared to source
+        let missing_files = file_utils::find_files_missing_in_target(&cli_args)?;
+        
+        // Only unique files should be missing (not duplicates)
+        assert_eq!(missing_files.len(), 3, "There should be 3 files missing in target (unique1, unique2, and one of the duplicates)");
+        
+        // Copy the missing files
+        file_utils::copy_missing_files(&missing_files, &target_dir, false)?;
+        
+        // Verify the results
+        let final_target_files = fs::read_dir(&target_dir)?.count();
+        assert_eq!(final_target_files, 4, "Target should now have 4 files after copying");
+        
+        // Check if specific files exist in the target
+        assert!(target_dir.join("unique1.txt").exists(), "unique1.txt should have been copied");
+        assert!(target_dir.join("unique2.txt").exists(), "unique2.txt should have been copied");
+        
+        // At least one of the duplicate files should have been copied (but not both)
+        let dup_a_exists = target_dir.join("dup_a.txt").exists();
+        let dup_b_exists = target_dir.join("dup_b.txt").exists();
+        assert!(dup_a_exists || dup_b_exists, "At least one of the duplicate files should have been copied");
+        assert!(!(dup_a_exists && dup_b_exists), "Both duplicate files should not have been copied");
+        
+        Ok(())
+    }
+    
+    #[test]
+    fn test_deduplicate_between_directories_integration() -> Result<()> {
+        // Create a test environment with two separate directories
+        let env = TestEnv::new();
+        let source_dir = env.create_subdir("source_dedup");
+        let target_dir = env.create_subdir("target_dedup");
+        
+        // Create files with duplicate content across directories
+        env.create_file_with_content_and_time(&source_dir.join("source1.txt"), "cross_dir_duplicate", None);
+        env.create_file_with_content_and_time(&target_dir.join("target1.txt"), "cross_dir_duplicate", None);
+        
+        // Create duplicates within source
+        env.create_file_with_content_and_time(&source_dir.join("source_dup1.txt"), "source_duplicate", None);
+        env.create_file_with_content_and_time(&source_dir.join("source_dup2.txt"), "source_duplicate", None);
+        
+        // Create duplicates within target
+        env.create_file_with_content_and_time(&target_dir.join("target_dup1.txt"), "target_duplicate", None);
+        env.create_file_with_content_and_time(&target_dir.join("target_dup2.txt"), "target_duplicate", None);
+        
+        // Create unique files
+        env.create_file_with_content_and_time(&source_dir.join("unique_source.txt"), "unique_in_source", None);
+        env.create_file_with_content_and_time(&target_dir.join("unique_target.txt"), "unique_in_target", None);
+        
+        // Set up CLI args with deduplication flag
+        let mut cli_args = env.default_cli_args();
+        cli_args.directories = vec![source_dir.clone(), target_dir.clone()];
+        cli_args.target = Some(target_dir.clone());
+        cli_args.deduplicate = true;
+        
+        // Find duplicate sets across both directories
+        let duplicate_sets = file_utils::find_duplicate_files(&cli_args)?;
+        
+        // We should find 3 duplicate sets:
+        // 1. cross_dir_duplicate (source1.txt and target1.txt)
+        // 2. source_duplicate (source_dup1.txt and source_dup2.txt)
+        // 3. target_duplicate (target_dup1.txt and target_dup2.txt)
+        
+        let cross_dir_dups = duplicate_sets.iter().find(|set| 
+            set.files.len() == 2 && 
+            set.files.iter().any(|f| f.path.file_name().unwrap() == "source1.txt") &&
+            set.files.iter().any(|f| f.path.file_name().unwrap() == "target1.txt")
+        );
+        
+        assert!(cross_dir_dups.is_some(), "Should find duplicates across directories");
+        
+        // Verify internal source duplicates
+        let source_dups = duplicate_sets.iter().find(|set| 
+            set.files.len() == 2 && 
+            set.files.iter().all(|f| f.path.starts_with(&source_dir)) &&
+            set.files.iter().any(|f| f.path.file_name().unwrap() == "source_dup1.txt")
+        );
+        
+        assert!(source_dups.is_some(), "Should find duplicates within source directory");
+        
+        // Verify internal target duplicates
+        let target_dups = duplicate_sets.iter().find(|set| 
+            set.files.len() == 2 && 
+            set.files.iter().all(|f| f.path.starts_with(&target_dir)) &&
+            set.files.iter().any(|f| f.path.file_name().unwrap() == "target_dup1.txt")
+        );
+        
+        assert!(target_dups.is_some(), "Should find duplicates within target directory");
+        
+        // Now check that we don't copy duplicate files
+        let missing_files = file_utils::find_files_missing_in_target(&cli_args)?;
+        
+        // With deduplication enabled and one duplicate already in target,
+        // we should only copy the unique file from source
+        assert_eq!(missing_files.len(), 1, "Only unique_source.txt should be missing in target");
+        assert_eq!(missing_files[0].path.file_name().unwrap(), "unique_source.txt", 
+                  "The missing file should be unique_source.txt");
+        
+        // Copy the missing files
+        file_utils::copy_missing_files(&missing_files, &target_dir, false)?;
+        
+        // Verify unique_source.txt was copied
+        assert!(target_dir.join("unique_source.txt").exists(), "unique_source.txt should have been copied");
+        
+        Ok(())
+    }
+    
+    #[test]
+    fn test_deduplicate_and_copy_integration() -> Result<()> {
+        // Create a test environment with two separate directories
+        let env = TestEnv::new();
+        let source_dir = env.create_subdir("source_complex");
+        let target_dir = env.create_subdir("target_complex");
+        
+        // Set 1: Files with same content in both directories
+        env.create_file_with_content_and_time(&source_dir.join("common_s1.txt"), "common_content_1", None);
+        env.create_file_with_content_and_time(&source_dir.join("common_s2.txt"), "common_content_1", None);
+        env.create_file_with_content_and_time(&target_dir.join("common_t1.txt"), "common_content_1", None);
+        
+        // Set 2: Multiple duplicates in source, none in target
+        env.create_file_with_content_and_time(&source_dir.join("source_dup_a.txt"), "source_only_duplicate", None);
+        env.create_file_with_content_and_time(&source_dir.join("source_dup_b.txt"), "source_only_duplicate", None);
+        env.create_file_with_content_and_time(&source_dir.join("source_dup_c.txt"), "source_only_duplicate", None);
+        
+        // Set 3: Unique files in source
+        env.create_file_with_content_and_time(&source_dir.join("unique1.txt"), "unique_content_1", None);
+        env.create_file_with_content_and_time(&source_dir.join("unique2.txt"), "unique_content_2", None);
+        
+        // Count initial files
+        let initial_source_files = fs::read_dir(&source_dir)?.count();
+        let initial_target_files = fs::read_dir(&target_dir)?.count();
+        
+        assert_eq!(initial_source_files, 7, "Source should have 7 initial files");
+        assert_eq!(initial_target_files, 1, "Target should have 1 initial file");
+        
+        // First step: Deduplicate the source directory
+        let mut source_dedup_cli = env.default_cli_args();
+        source_dedup_cli.directories = vec![source_dir.clone()];
+        source_dedup_cli.delete = true;
+        source_dedup_cli.mode = "newest_modified".to_string();
+        
+        // Get duplicate sets in source
+        let source_duplicate_sets = file_utils::find_duplicate_files(&source_dedup_cli)?;
+        
+        // Count duplicate sets with at least 2 files
+        let actionable_sets = source_duplicate_sets.iter()
+            .filter(|set| set.files.len() >= 2)
+            .count();
+        
+        assert_eq!(actionable_sets, 2, "Should find 2 duplicate sets in source");
+        
+        // Process deletion in source based on duplicate sets
+        let mut files_to_delete: Vec<FileInfo> = Vec::new();
+        
+        for set in &source_duplicate_sets {
+            if set.files.len() >= 2 {
+                match file_utils::determine_action_targets(set, SelectionStrategy::NewestModified) {
+                    Ok((kept, to_action)) => {
+                        files_to_delete.extend(to_action);
+                    }
+                    Err(e) => {
+                        eprintln!("Warning: Could not determine action targets: {}", e);
+                    }
+                }
+            }
+        }
+        
+        let delete_count = if !files_to_delete.is_empty() {
+            let (count, _) = file_utils::delete_files(&files_to_delete, false)?;
+            count
+        } else {
+            0
+        };
+        
+        assert_eq!(delete_count, 3, "Should delete 3 duplicate files in source");
+        
+        // Verify source directory after deduplication
+        let deduped_source_files = fs::read_dir(&source_dir)?.count();
+        assert_eq!(deduped_source_files, 4, "Source should have 4 files after deduplication");
+        
+        // Second step: Copy files to target with deduplication flag
+        let mut copy_cli = env.default_cli_args();
+        copy_cli.directories = vec![source_dir.clone(), target_dir.clone()];
+        copy_cli.target = Some(target_dir.clone());
+        copy_cli.deduplicate = true;
+        
+        // Find missing files in target after considering duplicates
+        let missing_files = file_utils::find_files_missing_in_target(&copy_cli)?;
+        
+        // We should have 3 missing files:
+        // 1. One from the source_only_duplicate set
+        // 2. unique1.txt
+        // 3. unique2.txt
+        assert_eq!(missing_files.len(), 3, "Should have 3 files to copy from source to target");
+        
+        // Copy missing files
+        file_utils::copy_missing_files(&missing_files, &target_dir, false)?;
+        
+        // Verify final target state
+        let final_target_files = fs::read_dir(&target_dir)?.count();
+        assert_eq!(final_target_files, 4, "Target should have 4 files after copying");
+        
+        // Verify specific files in target
+        assert!(target_dir.join("unique1.txt").exists(), "unique1.txt should be copied to target");
+        assert!(target_dir.join("unique2.txt").exists(), "unique2.txt should be copied to target");
+        
+        // At least one file from the source_only_duplicate set should be copied
+        let source_dup_files = ["source_dup_a.txt", "source_dup_b.txt", "source_dup_c.txt"];
+        let copied_source_dup = source_dup_files.iter()
+            .any(|name| target_dir.join(name).exists());
+        
+        assert!(copied_source_dup, "One of the source duplicate files should be copied to target");
         
         Ok(())
     }
