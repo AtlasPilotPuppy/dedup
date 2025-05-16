@@ -136,12 +136,14 @@ impl From<FileInfo> for MediaFileInfo {
 pub fn detect_media_type(path: &Path) -> MediaKind {
     // First try with infer (content-based detection)
     if let Ok(content) = std::fs::read(path) {
-        if let Some(info) = infer::get(&content) { match info.mime_type() {
-            m if m.starts_with("image/") => return MediaKind::Image,
-            m if m.starts_with("video/") => return MediaKind::Video,
-            m if m.starts_with("audio/") => return MediaKind::Audio,
-            _ => {}
-        } }
+        if let Some(info) = infer::get(&content) {
+            match info.mime_type() {
+                m if m.starts_with("image/") => return MediaKind::Image,
+                m if m.starts_with("video/") => return MediaKind::Video,
+                m if m.starts_with("audio/") => return MediaKind::Audio,
+                _ => {}
+            }
+        }
     }
 
     // Fall back to extension-based detection if content analysis failed
@@ -700,10 +702,7 @@ pub fn convert_to_duplicate_sets(
             }
 
             // Create a fake "hash" for media sets based on the first file in the group
-            let hash = format!(
-                "media_{}",
-                group[0].file_info.path.to_string_lossy()
-            );
+            let hash = format!("media_{}", group[0].file_info.path.to_string_lossy());
             let size = group[0].file_info.size;
 
             duplicate_sets.push(DuplicateSet {

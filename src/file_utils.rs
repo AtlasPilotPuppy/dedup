@@ -6,9 +6,9 @@ use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::time::SystemTime;
 use walkdir::WalkDir;
-use std::str::FromStr;
 
 use crate::tui_app::ScanMessage;
 use crate::Cli;
@@ -378,20 +378,23 @@ pub fn find_duplicate_files_with_progress(
     let mut last_update_time = std::time::Instant::now();
     let update_interval = std::time::Duration::from_millis(400); // Less frequent updates (400ms)
 
-    for entry in walker.filter_entry(|e| {
-        if is_hidden(e) || is_symlink(e) {
-            return false;
-        }
-        if let Some(path_str) = e.path().to_str() {
-            filter_rules.is_match(path_str)
-        } else {
-            log::warn!(
-                "[ScanThread] Path {:?} is not valid UTF-8, excluding.",
-                e.path()
-            );
-            false
-        }
-    }).flatten() {
+    for entry in walker
+        .filter_entry(|e| {
+            if is_hidden(e) || is_symlink(e) {
+                return false;
+            }
+            if let Some(path_str) = e.path().to_str() {
+                filter_rules.is_match(path_str)
+            } else {
+                log::warn!(
+                    "[ScanThread] Path {:?} is not valid UTF-8, excluding.",
+                    e.path()
+                );
+                false
+            }
+        })
+        .flatten()
+    {
         if entry.file_type().is_file() {
             let path = entry.path().to_path_buf();
             files_scanned_count += 1;
@@ -783,20 +786,23 @@ fn find_similar_media_files_with_progress(
     let mut file_infos = Vec::new();
     let walker = WalkDir::new(&cli.directories[0]).into_iter();
 
-    for entry in walker.filter_entry(|e| {
-        if is_hidden(e) || is_symlink(e) {
-            return false;
-        }
-        if let Some(path_str) = e.path().to_str() {
-            filter_rules.is_match(path_str)
-        } else {
-            log::warn!(
-                "[ScanThread] Path {:?} is not valid UTF-8, excluding.",
-                e.path()
-            );
-            false
-        }
-    }).flatten() {
+    for entry in walker
+        .filter_entry(|e| {
+            if is_hidden(e) || is_symlink(e) {
+                return false;
+            }
+            if let Some(path_str) = e.path().to_str() {
+                filter_rules.is_match(path_str)
+            } else {
+                log::warn!(
+                    "[ScanThread] Path {:?} is not valid UTF-8, excluding.",
+                    e.path()
+                );
+                false
+            }
+        })
+        .flatten()
+    {
         if entry.file_type().is_file() {
             let path = entry.path().to_path_buf();
 
@@ -1196,11 +1202,7 @@ pub fn move_files(
 }
 
 // Helper function to sort a Vec<FileInfo>
-pub(crate) fn sort_file_infos(
-    files: &mut [FileInfo],
-    criterion: SortCriterion,
-    order: SortOrder,
-) {
+pub(crate) fn sort_file_infos(files: &mut [FileInfo], criterion: SortCriterion, order: SortOrder) {
     files.sort_by(|a, b| {
         let mut comparison = match criterion {
             SortCriterion::FileName => a.path.file_name().cmp(&b.path.file_name()),
@@ -1402,16 +1404,19 @@ fn scan_directory(cli: &Cli, directory: &Path) -> Result<Vec<FileInfo>> {
     let mut files = Vec::new();
     let walker = WalkDir::new(directory).into_iter();
 
-    for entry in walker.filter_entry(|e| {
-        if is_hidden(e) || is_symlink(e) {
-            return false;
-        }
-        if let Some(path_str) = e.path().to_str() {
-            filter_rules.is_match(path_str)
-        } else {
-            false
-        }
-    }).flatten() {
+    for entry in walker
+        .filter_entry(|e| {
+            if is_hidden(e) || is_symlink(e) {
+                return false;
+            }
+            if let Some(path_str) = e.path().to_str() {
+                filter_rules.is_match(path_str)
+            } else {
+                false
+            }
+        })
+        .flatten()
+    {
         if entry.file_type().is_file() {
             let path = entry.path().to_path_buf();
             match fs::metadata(&path) {
@@ -1577,16 +1582,19 @@ pub fn count_files_in_directory(directory: &Path, filter_rules: &FilterRules) ->
     let mut count = 0;
     let walker = WalkDir::new(directory).into_iter();
 
-    for entry in walker.filter_entry(|e| {
-        if is_hidden(e) || is_symlink(e) {
-            return false;
-        }
-        if let Some(path_str) = e.path().to_str() {
-            filter_rules.is_match(path_str)
-        } else {
-            false
-        }
-    }).flatten() {
+    for entry in walker
+        .filter_entry(|e| {
+            if is_hidden(e) || is_symlink(e) {
+                return false;
+            }
+            if let Some(path_str) = e.path().to_str() {
+                filter_rules.is_match(path_str)
+            } else {
+                false
+            }
+        })
+        .flatten()
+    {
         if entry.file_type().is_file() {
             count += 1;
         }

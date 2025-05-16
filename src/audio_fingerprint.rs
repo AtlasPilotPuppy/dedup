@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
+use base64::Engine;
 use std::path::Path;
 use std::process::Command;
-use base64::Engine;
 
 /// Simple audio fingerprinting module using chromaprint/fpcalc if available
 /// or ffmpeg's ebur128 filter as a fallback

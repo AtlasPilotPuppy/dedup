@@ -14,12 +14,12 @@ use ratatui::widgets::*;
 use std::collections::HashMap; // For grouping
 use std::io::{stdout, Stdout};
 use std::path::{Path, PathBuf}; // Ensure Path is imported here
+use std::str::FromStr;
 use std::sync::mpsc as std_mpsc; // Alias to avoid conflict if crate::mpsc is used elsewhere
 use std::thread as std_thread; // Alias for clarity
 use std::time::{Duration, Instant};
 use tui_input::backend::crossterm::EventHandler; // For tui-input
 use tui_input::Input;
-use std::str::FromStr;
 
 use crate::file_utils::{
     self, delete_files, move_files, DuplicateSet, FileInfo, SelectionStrategy, SortCriterion,
@@ -1690,7 +1690,6 @@ impl App {
                                     dest_path.display(),
                                     size
                                 ));
-                                
                             })
                             .map_err(|e| {
                                 let error_msg = format!(

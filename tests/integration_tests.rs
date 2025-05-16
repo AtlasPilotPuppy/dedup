@@ -526,7 +526,8 @@ mod integration {
             let mut found_map = HashMap::new();
             for entry in fs::read_dir(&target_move_dir)? {
                 let entry = entry?;
-                if entry.path().is_file() && entry
+                if entry.path().is_file()
+                    && entry
                         .path()
                         .file_name()
                         .unwrap_or_default()
@@ -536,7 +537,8 @@ mod integration {
                                 .file_stem()
                                 .unwrap_or_default()
                                 .to_string_lossy(),
-                        ) {
+                        )
+                {
                     moved_correctly_count += 1;
                     *found_map.entry(original_path.clone()).or_insert(0) += 1;
                 }
