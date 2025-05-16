@@ -11,13 +11,10 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::SystemTime;
 use walkdir::WalkDir;
-use itertools::Itertools;
-use anyhow::Context;
+use std::sync::mpsc::Sender as StdMpscSender;
 
 use crate::tui_app::ScanMessage;
 use crate::Cli;
-use std::sync::mpsc as stdmpsc;
-use std::sync::mpsc::Sender as StdMpscSender;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortCriterion {
@@ -293,7 +290,7 @@ pub fn find_duplicate_files_with_progress(
         "[ScanThread] Starting scan with progress updates for directory: {:?}",
         cli.directories[0]
     );
-    let filter_rules = FilterRules::new(cli)?;
+    let _filter_rules = FilterRules::new(cli)?;
 
     // Initialize file cache if using fast mode
     let file_cache = if cli.fast_mode && cli.cache_location.is_some() {
@@ -1836,10 +1833,10 @@ mod tests {
 use crate::ssh_utils::RemoteLocation;
 
 /// Determines if a path is a remote SSH path
-pub fn is_remote_path(path: &Path) -> bool {
+pub fn is_remote_path(_path: &Path) -> bool {
     #[cfg(feature = "ssh")]
     {
-        if let Some(path_str) = path.to_str() {
+        if let Some(path_str) = _path.to_str() {
             return RemoteLocation::is_ssh_path(path_str);
         }
     }
