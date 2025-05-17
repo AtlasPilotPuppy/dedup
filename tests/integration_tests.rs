@@ -239,6 +239,12 @@ impl TestEnv {
             server_mode: false,
             #[cfg(feature = "ssh")]
             port: 0,
+            #[cfg(feature = "proto")]
+            use_protobuf: true,
+            #[cfg(feature = "proto")]
+            use_compression: true,
+            #[cfg(feature = "proto")]
+            compression_level: 3,
         }
     }
 }
@@ -1251,14 +1257,62 @@ mod integration {
             println!("\nTesting strategy: {}", strategy);
             
             // Create CLI args for this test
-            let mut options = DedupOptions::default();
-            options.delete = true;
-            options.mode = strategy.to_string();
-            options.directories = vec![test_dir.path().to_path_buf()];
-            options.algorithm = "xxhash".to_string(); // Use a consistent hash algorithm
-            options.include = vec!["*.txt".to_string()]; // Only include .txt files
-            let mut cli = Cli::from_options(&options);
-            cli.directories = vec![test_dir.path().to_path_buf()];
+            let mut cli = Cli {
+                directories: vec![test_dir.path().to_path_buf()],
+                target: None,
+                deduplicate: false,
+                delete: true, // Enable deletion
+                move_to: None,
+                log: false,
+                log_file: None,
+                output: None,
+                format: "json".to_string(),
+                json: false,
+                algorithm: "xxhash".to_string(), // Use a consistent hash algorithm
+                parallel: Some(1),
+                mode: strategy.to_string(), // Set current strategy
+                interactive: false,
+                verbose: 0,
+                include: vec!["*.txt".to_string()], // Only include .txt files
+                exclude: Vec::new(),
+                filter_from: None,
+                progress: false,
+                progress_tui: false,
+                sort_by: SortCriterion::ModifiedAt,
+                sort_order: SortOrder::Descending,
+                raw_sizes: false,
+                config_file: None,
+                dry_run: false,
+                cache_location: None,
+                fast_mode: false,
+                media_mode: false,
+                media_resolution: "highest".to_string(),
+                media_formats: Vec::new(),
+                media_similarity: 90,
+                media_dedup_options: MediaDedupOptions::default(),
+                #[cfg(feature = "ssh")]
+                allow_remote_install: true,
+                #[cfg(feature = "ssh")]
+                ssh_options: Vec::new(),
+                #[cfg(feature = "ssh")]
+                rsync_options: Vec::new(),
+                #[cfg(feature = "ssh")]
+                use_remote_dedups: true,
+                #[cfg(feature = "ssh")]
+                use_sudo: false,
+                #[cfg(feature = "ssh")]
+                use_ssh_tunnel: true,
+                #[cfg(feature = "ssh")]
+                server_mode: false,
+                #[cfg(feature = "ssh")]
+                port: 0,
+                #[cfg(feature = "proto")]
+                use_protobuf: true,
+                #[cfg(feature = "proto")]
+                use_compression: true,
+                #[cfg(feature = "proto")]
+                compression_level: 3,
+            };
             
             println!("CLI options:");
             println!("  Directories: {:?}", cli.directories);

@@ -308,7 +308,7 @@ jobs:
           
           # Set architecture-specific flags
           if [[ "${{ matrix.target }}" == "x86_64-unknown-linux-gnu" ]]; then
-            export RUSTFLAGS="-C target-cpu=x86-64-v3"
+            export RUSTFLAGS="-C target-cpu=x86-64-v3 -C target-feature=+aes,+sse2"
           elif [[ "${{ matrix.target }}" == "aarch64-unknown-linux-gnu" ]]; then
             export RUSTFLAGS="-C target-cpu=generic -C target-feature=+neon"
             # Set cross-compilation environment variables

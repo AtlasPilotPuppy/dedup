@@ -211,8 +211,9 @@ impl FilterRules {
     }
 
     pub fn is_match(&self, path_str: &str) -> bool {
+        let path = Path::new(path_str);
         // 1. Check excludes: if any exclude pattern matches, path is excluded.
-        if self.excludes.iter().any(|p| p.matches(path_str)) {
+        if self.excludes.iter().any(|p| p.matches_path(path)) {
             return false;
         }
 
@@ -220,7 +221,7 @@ impl FilterRules {
         //    - If include patterns exist, path must match at least one.
         //    - If no include patterns exist, path is included by default (if not excluded).
         if !self.includes.is_empty() {
-            return self.includes.iter().any(|p| p.matches(path_str));
+            return self.includes.iter().any(|p| p.matches_path(path));
         }
 
         true // Not excluded, and no include rules to restrict further OR matches an include rule.
@@ -1487,56 +1488,69 @@ pub fn compare_directories(cli: &Cli) -> Result<DirectoryComparisonResult> {
 // Scans a single directory and returns FileInfo objects with hashes
 fn scan_directory(cli: &Cli, directory: &Path) -> Result<Vec<FileInfo>> {
     let filter_rules = FilterRules::new(cli)?;
-
     let mut files = Vec::new();
     let walker = WalkDir::new(directory).into_iter();
 
-    for entry in walker
-        .filter_entry(|e| {
-            if is_hidden(e) || is_symlink(e) {
-                return false;
-            }
-            if let Some(path_str) = e.path().to_str() {
-                filter_rules.is_match(path_str)
-            } else {
-                false
-            }
-        })
-        .flatten()
-    {
-        if entry.file_type().is_file() {
-            let path = entry.path().to_path_buf();
-            match fs::metadata(&path) {
-                Ok(metadata) => {
-                    if metadata.len() > 0 {
-                        let size = metadata.len();
+    // First, collect all relevant file entries
+    let mut collected_file_paths = Vec::new();
 
-                        // Calculate hash
-                        let hash = match calculate_hash(&path, &cli.algorithm) {
-                            Ok(h) => Some(h),
-                            Err(e) => {
-                                log::warn!("Failed to hash file {:?}: {}", path, e);
-                                None
-                            }
-                        };
+    for entry_result in walker {
+        match entry_result {
+            Ok(entry) => {
+                if is_hidden(&entry) || is_symlink(&entry) {
+                    continue; 
+                }
 
-                        let file_info = FileInfo {
-                            path,
-                            size,
-                            hash,
-                            modified_at: metadata.modified().ok(),
-                            created_at: metadata.created().ok(),
-                        };
-
-                        files.push(file_info);
+                if entry.file_type().is_file() {
+                    if let Some(path_str) = entry.path().to_str() {
+                        if filter_rules.is_match(path_str) { // is_match uses matches_path
+                            collected_file_paths.push(entry.path().to_path_buf());
+                        }
+                    } else {
+                        log::warn!("[ScanThread] Path {:?} is not valid UTF-8, excluding.", entry.path());
                     }
                 }
-                Err(e) => log::warn!("Failed to get metadata for {:?}: {}", path, e),
+            }
+            Err(err) => {
+                log::warn!(
+                    "Skipping entry due to error: {}. Path: {:?}",
+                    err,
+                    err.path().unwrap_or_else(|| Path::new("unknown"))
+                );
             }
         }
     }
 
-    log::info!("Found {} files in directory: {:?}", files.len(), directory);
+    // Now process the collected file paths to create FileInfo
+    for path in collected_file_paths {
+        match fs::metadata(&path) {
+            Ok(metadata) => {
+                if metadata.len() > 0 {
+                    let size = metadata.len();
+                    let hash = match calculate_hash(&path, &cli.algorithm) {
+                        Ok(h) => Some(h),
+                        Err(e) => {
+                            log::warn!("Failed to hash file {:?}: {}", path, e);
+                            None
+                        }
+                    };
+                    let file_info = FileInfo {
+                        path,
+                        size,
+                        hash,
+                        modified_at: file_time_to_system_time(metadata.modified()),
+                        created_at: file_time_to_system_time(metadata.created()),
+                    };
+                    files.push(file_info);
+                }
+            }
+            Err(e) => {
+                log::warn!("Failed to get metadata for {:?}: {}", path, e);
+            }
+        }
+    }
+
+    log::info!("Found {} files in directory: {:?} matching filters", files.len(), directory);
     Ok(files)
 }
 
