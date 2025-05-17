@@ -5,15 +5,14 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
-
-// Assuming your crate's main library functions are accessible via `dedups::`
+use std::str::FromStr;
+use dedups::options::DedupOptions;
 use dedups::file_utils::{self, FileInfo, SelectionStrategy, SortCriterion, SortOrder};
 use dedups::media_dedup::MediaDedupOptions;
-use dedups::Cli; // Assuming Cli is public or pub(crate) and accessible // Import MediaDedupOptions directly
-                 // use dedups::tui_app::AppState; // Remove unused import
+use dedups::Cli;
 
 // --- Test Constants ---
 // const TEST_BASE_DIR_NAME: &str = "dedup_integration_tests"; // Remove unused constant
@@ -1192,6 +1191,161 @@ mod integration {
         // Write to file so we can see the output
         fs::write(&output_file, &json_str)?;
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_duplicate_deletion_keeps_one_copy() -> Result<()> {
+        // Create a temporary directory for this test only
+        let test_dir = tempfile::tempdir()?;
+        println!("Created test directory: {:?}", test_dir.path());
+        
+        // Create test files with known content
+        let content = "test content";
+        let paths = vec![
+            test_dir.path().join("dir1/file1.txt"),
+            test_dir.path().join("dir1/file2.txt"),
+            test_dir.path().join("dir2/file3.txt"),
+        ];
+        
+        // Create directories and files
+        for path in &paths {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+                println!("Created directory: {:?}", parent);
+            }
+            std::fs::write(path, content)?;
+            println!("Created file: {:?}", path);
+            
+            // Verify file was written correctly
+            let mut file = std::fs::File::open(path)?;
+            let mut actual_content = String::new();
+            file.read_to_string(&mut actual_content)?;
+            assert_eq!(actual_content, content, "File content mismatch for {:?}", path);
+            println!("Verified file content: {:?}", path);
+            
+            // Ensure file is written and flushed
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(path)?
+                .sync_all()?;
+        }
+        
+        // List all files in test directory
+        println!("\nListing all files in test directory:");
+        for entry in walkdir::WalkDir::new(test_dir.path()) {
+            if let Ok(entry) = entry {
+                println!("Found: {:?}", entry.path());
+            }
+        }
+        
+        // Test each selection strategy
+        let strategies = vec![
+            "shortest_path",
+            "longest_path",
+            "newest_modified",
+            "oldest_modified",
+        ];
+        
+        for strategy in strategies {
+            println!("\nTesting strategy: {}", strategy);
+            
+            // Create CLI args for this test
+            let mut options = DedupOptions::default();
+            options.delete = true;
+            options.mode = strategy.to_string();
+            options.directories = vec![test_dir.path().to_path_buf()];
+            options.algorithm = "xxhash".to_string(); // Use a consistent hash algorithm
+            options.include = vec!["*.txt".to_string()]; // Only include .txt files
+            let mut cli = Cli::from_options(&options);
+            cli.directories = vec![test_dir.path().to_path_buf()];
+            
+            println!("CLI options:");
+            println!("  Directories: {:?}", cli.directories);
+            println!("  Algorithm: {}", cli.algorithm);
+            println!("  Mode: {}", cli.mode);
+            println!("  Include patterns: {:?}", cli.include);
+            
+            // Find duplicates
+            let (tx, _rx) = std::sync::mpsc::channel();
+            let duplicate_sets = file_utils::find_duplicate_files_with_progress(&cli, tx)?;
+            
+            // Print debug info
+            println!("Found {} duplicate sets:", duplicate_sets.len());
+            for (i, set) in duplicate_sets.iter().enumerate() {
+                println!("Set {}:", i);
+                println!("  Hash: {}", set.hash);
+                println!("  Size: {}", set.size);
+                for file in &set.files {
+                    println!("  File: {:?}", file.path);
+                    println!("  Size: {}", file.size);
+                    
+                    // Verify file still exists and has correct content
+                    let mut file_content = String::new();
+                    std::fs::File::open(&file.path)?.read_to_string(&mut file_content)?;
+                    assert_eq!(file_content, content, "File content mismatch for {:?}", file.path);
+                }
+            }
+            
+            // There should be exactly one duplicate set since all files have the same content
+            assert_eq!(duplicate_sets.len(), 1, "Should find exactly one duplicate set");
+            assert_eq!(duplicate_sets[0].files.len(), 3, "Duplicate set should contain all three files");
+            
+            // Process the duplicate set
+            let set = &duplicate_sets[0];
+            let (kept_file, files_to_delete) = file_utils::determine_action_targets(
+                set,
+                SelectionStrategy::from_str(strategy)?
+            )?;
+            
+            println!("\nAction targets:");
+            println!("  Keeping: {:?}", kept_file.path);
+            println!("  Deleting: {:?}", files_to_delete.iter().map(|f| &f.path).collect::<Vec<_>>());
+            
+            // Verify one file is kept and others are marked for deletion
+            assert_eq!(files_to_delete.len(), 2, "Should mark exactly two files for deletion");
+            assert!(!files_to_delete.iter().any(|f| f.path == kept_file.path), 
+                    "Kept file should not be in the delete list");
+            
+            // Actually delete the files
+            let (delete_count, _) = file_utils::delete_files(&files_to_delete, false)?;
+            assert_eq!(delete_count, 2, "Should delete exactly two files");
+            
+            // Verify only one file remains and it's the kept file
+            assert!(kept_file.path.exists(), "Kept file should still exist");
+            let remaining_files: Vec<_> = walkdir::WalkDir::new(test_dir.path())
+                .into_iter()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().is_file())
+                .collect();
+            assert_eq!(remaining_files.len(), 1, "Should have exactly one file remaining");
+            assert_eq!(remaining_files[0].path(), kept_file.path, "Remaining file should be the kept file");
+            
+            println!("\nVerification after deletion:");
+            println!("  Kept file exists: {}", kept_file.path.exists());
+            println!("  Remaining files: {:?}", remaining_files.iter().map(|e| e.path()).collect::<Vec<_>>());
+            
+            // Clean up for next strategy test
+            for path in &paths {
+                if path.exists() {
+                    std::fs::remove_file(path)?;
+                    println!("Removed file: {:?}", path);
+                }
+                std::fs::write(path, content)?;
+                println!("Recreated file: {:?}", path);
+                // Ensure file is written and flushed
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(path)?
+                    .sync_all()?;
+                
+                // Verify file was recreated correctly
+                let mut file_content = String::new();
+                std::fs::File::open(path)?.read_to_string(&mut file_content)?;
+                assert_eq!(file_content, content, "File content mismatch after recreation for {:?}", path);
+            }
+        }
+        
         Ok(())
     }
 }

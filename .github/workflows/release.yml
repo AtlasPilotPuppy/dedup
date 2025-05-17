@@ -141,6 +141,7 @@ jobs:
       # Install Linux dependencies
       - name: Install Linux dependencies
         if: matrix.os == 'ubuntu-latest'
+        shell: bash
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -173,6 +174,7 @@ jobs:
       # Set up x86_64 Homebrew for Intel builds
       - name: Set up x86_64 Homebrew
         if: matrix.os == 'macos-latest' && matrix.target == 'x86_64-apple-darwin'
+        shell: bash
         run: |
           # Remove existing Homebrew if any
           sudo rm -rf /usr/local/Homebrew /usr/local/Caskroom /usr/local/Cellar /usr/local/bin/brew
@@ -209,6 +211,7 @@ jobs:
       # Install macOS x86_64 dependencies
       - name: Install macOS x86_64 dependencies
         if: matrix.os == 'macos-latest' && matrix.target == 'x86_64-apple-darwin'
+        shell: bash
         run: |
           # Use x86_64 Homebrew
           eval "$(/usr/local/bin/brew shellenv)"
@@ -252,6 +255,7 @@ jobs:
       # Install macOS ARM64 dependencies
       - name: Install macOS ARM64 dependencies
         if: matrix.os == 'macos-latest' && matrix.target == 'aarch64-apple-darwin'
+        shell: bash
         run: |
           # Use ARM64 Homebrew
           eval "$(/opt/homebrew/bin/brew shellenv)"
@@ -287,12 +291,14 @@ jobs:
       # Set up cross-compilation for ARM on macOS
       - name: Install cross-compilation tools for macOS ARM
         if: matrix.target == 'aarch64-apple-darwin'
+        shell: bash
         run: |
           rustup target add aarch64-apple-darwin
       
       # Build with Linux-specific flags
       - name: Build (Linux)
         if: matrix.os == 'ubuntu-latest'
+        shell: bash
         run: |
           # Verify environment
           echo "OpenSSL Dir: $OPENSSL_DIR"
@@ -321,6 +327,7 @@ jobs:
       # Build with macOS ARM flags
       - name: Build (macOS ARM)
         if: matrix.target == 'aarch64-apple-darwin'
+        shell: bash
         run: |
           cargo build --release --target ${{ matrix.target }} ${{ matrix.features_flag }}
         env:
@@ -329,6 +336,7 @@ jobs:
       # Build with macOS x86_64 flags
       - name: Build (macOS x86_64)
         if: matrix.os == 'macos-latest' && matrix.target == 'x86_64-apple-darwin'
+        shell: bash
         run: |
           # Use x86_64 Homebrew environment
           eval "$(/usr/local/bin/brew shellenv)"
@@ -348,21 +356,23 @@ jobs:
           OPENSSL_STATIC: "0"
           RUSTFLAGS: "-C target-cpu=x86-64-v2"
       
-      # Build with Windows-specific flags
+      # Build with Windows-specific flags - Fixed PowerShell syntax
       - name: Build (Windows)
         if: matrix.os == 'windows-latest'
+        shell: pwsh
         run: |
           # Set architecture-specific flags
-          if [[ "${{ matrix.target }}" == "x86_64-pc-windows-msvc" ]]; then
-            export RUSTFLAGS="-C target-cpu=x86-64-v2"
-          elif [[ "${{ matrix.target }}" == "aarch64-pc-windows-msvc" ]]; then
-            export RUSTFLAGS="-C target-feature=+neon"
-          fi
+          if ("${{ matrix.target }}" -eq "x86_64-pc-windows-msvc") {
+            $env:RUSTFLAGS="-C target-cpu=x86-64-v2"
+          } elseif ("${{ matrix.target }}" -eq "aarch64-pc-windows-msvc") {
+            $env:RUSTFLAGS="-C target-feature=+neon"
+          }
           cargo build --release --target ${{ matrix.target }} ${{ matrix.features_flag }}
       
       # Prepare artifact on Linux/macOS
-      - name: Prepare artifact
+      - name: Prepare artifact (Unix)
         if: matrix.os != 'windows-latest'
+        shell: bash
         run: |
           cd target/${{ matrix.target }}/release
           cp ${{ matrix.binary_name }} ${{ matrix.artifact_name }}
@@ -371,9 +381,10 @@ jobs:
       # Prepare artifact on Windows (no strip command)
       - name: Prepare artifact (Windows)
         if: matrix.os == 'windows-latest'
+        shell: pwsh
         run: |
           cd target/${{ matrix.target }}/release
-          cp ${{ matrix.binary_name }} ${{ matrix.artifact_name }}
+          Copy-Item ${{ matrix.binary_name }} ${{ matrix.artifact_name }}
       
       # Upload the artifact
       - name: Upload artifact
@@ -395,6 +406,7 @@ jobs:
           path: artifacts
       
       - name: Move all artifacts to root
+        shell: bash
         run: |
           for dir in artifacts/*/; do
             cp "$dir"/* .
