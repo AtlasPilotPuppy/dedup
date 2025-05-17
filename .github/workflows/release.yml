@@ -151,8 +151,10 @@ jobs:
             zlib1g-dev \
             libssh2-1-dev \
             openssl \
-            gcc-aarch64-linux-gnu
-          
+            gcc-aarch64-linux-gnu \
+            libssl-dev:amd64 \
+            libssl-dev:arm64
+
           # Install protobuf compiler if proto feature is enabled
           if [[ "${{ matrix.features }}" == *"proto"* ]]; then
             sudo apt-get install -y protobuf-compiler
@@ -164,12 +166,32 @@ jobs:
           echo "OPENSSL_LIB_DIR=/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
           echo "OPENSSL_INCLUDE_DIR=/usr/include" >> $GITHUB_ENV
           
+          # Create symlinks if needed
+          sudo mkdir -p /usr/include/openssl
+          sudo ln -sf /usr/include/x86_64-linux-gnu/openssl/opensslconf.h /usr/include/openssl/ || true
+          sudo ln -sf /usr/include/x86_64-linux-gnu/openssl/configuration.h /usr/include/openssl/ || true
+          
           # Verify OpenSSL installation
           pkg-config --libs openssl
           pkg-config --modversion openssl
+          ls -la /usr/include/openssl/
+          ls -la /usr/lib/x86_64-linux-gnu/
           
-          # Set pkg-config path
-          echo "PKG_CONFIG_PATH=/usr/lib/x86_64-linux-gnu/pkgconfig" >> $GITHUB_ENV
+          # Set pkg-config paths
+          echo "PKG_CONFIG_PATH=/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/lib/pkgconfig" >> $GITHUB_ENV
+          
+          # For ARM64 cross-compilation
+          if [[ "${{ matrix.target }}" == "aarch64-unknown-linux-gnu" ]]; then
+            sudo apt-get install -y \
+              gcc-aarch64-linux-gnu \
+              g++-aarch64-linux-gnu \
+              libc6-dev-arm64-cross
+            
+            # Set up ARM64 OpenSSL
+            sudo mkdir -p /usr/aarch64-linux-gnu/include/openssl
+            sudo ln -sf /usr/include/aarch64-linux-gnu/openssl/opensslconf.h /usr/aarch64-linux-gnu/include/openssl/ || true
+            sudo ln -sf /usr/include/aarch64-linux-gnu/openssl/configuration.h /usr/aarch64-linux-gnu/include/openssl/ || true
+          fi
 
       # Set up x86_64 Homebrew for Intel builds
       - name: Set up x86_64 Homebrew
@@ -367,7 +389,25 @@ jobs:
           } elseif ("${{ matrix.target }}" -eq "aarch64-pc-windows-msvc") {
             $env:RUSTFLAGS="-C target-feature=+neon"
           }
+
+          # Configure vcpkg for OpenSSL
+          $env:VCPKG_ROOT = "$env:GITHUB_WORKSPACE\vcpkg"
+          git clone https://github.com/Microsoft/vcpkg.git $env:VCPKG_ROOT
+          Set-Location $env:VCPKG_ROOT
+          .\bootstrap-vcpkg.bat
+          .\vcpkg.exe install openssl:${{ matrix.target == 'aarch64-pc-windows-msvc' && 'arm64-windows' || 'x64-windows-static' }}
+          
+          # Set OpenSSL environment variables
+          $env:OPENSSL_NO_VENDOR = "1"
+          $env:OPENSSL_STATIC = "1"
+          $env:OPENSSL_DIR = "$env:VCPKG_ROOT\installed\${{ matrix.target == 'aarch64-pc-windows-msvc' && 'arm64-windows' || 'x64-windows-static' }}"
+          
+          # Return to workspace and build
+          Set-Location $env:GITHUB_WORKSPACE
           cargo build --release --target ${{ matrix.target }} ${{ matrix.features_flag }}
+        env:
+          OPENSSL_NO_VENDOR: "1"
+          OPENSSL_STATIC: "1"
       
       # Prepare artifact on Linux/macOS
       - name: Prepare artifact (Unix)
