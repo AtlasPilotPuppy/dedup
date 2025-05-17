@@ -61,7 +61,14 @@ pub struct Cli {
     /// When multiple directories are specified, the last one is treated as the target
     /// for copying missing files, unless --target is specified.
     /// Supports SSH paths in the format ssh:host:/path, ssh:user@host:/path, or ssh:user@host:port:/path.
-    #[clap(required_unless_present = "interactive")]
+    #[cfg_attr(
+        feature = "ssh",
+        clap(required_unless_present_any = ["interactive", "server_mode"])
+    )]
+    #[cfg_attr(
+        not(feature = "ssh"),
+        clap(required_unless_present = "interactive")
+    )]
     pub directories: Vec<PathBuf>,
 
     /// Specifies the target directory for copying missing files or deduplication.

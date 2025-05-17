@@ -747,12 +747,20 @@ impl SshProtocol {
             }
         };
 
+        // If the original CLI had a directory, pass it to the remote server (for legacy/compat)
+        let remote_dir_arg = if !cli.directories.is_empty() {
+            format!(" {}", cli.directories[0].to_string_lossy())
+        } else {
+            String::new()
+        };
+
         let server_cmd_for_remote_shell = format!(
-            r#"{rust_log_export} export PATH="$HOME/.local/bin:$PATH"; if [ -f "$HOME/.bashrc" ]; then source "$HOME/.bashrc"; fi; echo "INFO: Dedups server starting on remote port {port} via SSH tunnel command."; {dedups_bin} {server_flags}"#,
+            r#"{rust_log_export} export PATH=\"$HOME/.local/bin:$PATH\"; if [ -f \"$HOME/.bashrc\" ]; then source \"$HOME/.bashrc\"; fi; echo \"INFO: Dedups server starting on remote port {port} via SSH tunnel command.\"; {dedups_bin} {server_flags}{remote_dir_arg}"#,
             rust_log_export = rust_log_export,
             port = local_port,
             dedups_bin = remote_dedups_bin,
-            server_flags = server_flags.join(" ")
+            server_flags = server_flags.join(" "),
+            remote_dir_arg = remote_dir_arg
         );
 
         let server_cmd = format!(
