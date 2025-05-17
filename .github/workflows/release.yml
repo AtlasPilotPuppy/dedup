@@ -12,6 +12,11 @@ on:
 permissions:
   contents: write
 
+env:
+  MACOSX_DEPLOYMENT_TARGET: "11.0"  # Set minimum macOS version
+  OPENSSL_DIR: "/usr/local/opt/openssl@3"  # x86_64 OpenSSL path
+  OPENSSL_ROOT_DIR: "/usr/local/opt/openssl@3"  # Required by some build scripts
+
 jobs:
   build:
     name: Build
@@ -33,7 +38,7 @@ jobs:
             features: "ssh"
             features_flag: "--features ssh"
           
-          # macOS builds - standard and SSH
+          # macOS x86_64 builds - standard and SSH
           - os: macos-latest
             target: x86_64-apple-darwin
             artifact_name: dedups-macos-x86_64
@@ -103,18 +108,33 @@ jobs:
             sudo apt-get install -y libssh2-1-dev
           fi
 
-      # Install macOS dependencies
-      - name: Install macOS dependencies
-        if: matrix.os == 'macos-latest'
+      # Install macOS dependencies (x86_64)
+      - name: Install macOS x86_64 dependencies
+        if: matrix.os == 'macos-latest' && matrix.target == 'x86_64-apple-darwin'
         run: |
-          brew update
+          # Install x86_64 OpenSSL
           brew install openssl@3
-          echo "OPENSSL_DIR=$(brew --prefix openssl@3)" >> $GITHUB_ENV
+          echo "OPENSSL_DIR=/usr/local/opt/openssl@3" >> $GITHUB_ENV
+          echo "OPENSSL_ROOT_DIR=/usr/local/opt/openssl@3" >> $GITHUB_ENV
           if [[ "${{ matrix.features }}" == *"ssh"* ]]; then
             brew install libssh2
-            echo "LIBSSH2_DIR=$(brew --prefix libssh2)" >> $GITHUB_ENV
+            echo "LIBSSH2_DIR=/usr/local/opt/libssh2" >> $GITHUB_ENV
           fi
-          echo "PKG_CONFIG_ALLOW_CROSS=1" >> $GITHUB_ENV
+          echo "PKG_CONFIG_PATH=/usr/local/opt/openssl@3/lib/pkgconfig:/usr/local/opt/libssh2/lib/pkgconfig" >> $GITHUB_ENV
+
+      # Install macOS dependencies (ARM64)
+      - name: Install macOS ARM64 dependencies
+        if: matrix.os == 'macos-latest' && matrix.target == 'aarch64-apple-darwin'
+        run: |
+          # Install ARM64 OpenSSL
+          arch -arm64 brew install openssl@3
+          echo "OPENSSL_DIR=/opt/homebrew/opt/openssl@3" >> $GITHUB_ENV
+          echo "OPENSSL_ROOT_DIR=/opt/homebrew/opt/openssl@3" >> $GITHUB_ENV
+          if [[ "${{ matrix.features }}" == *"ssh"* ]]; then
+            arch -arm64 brew install libssh2
+            echo "LIBSSH2_DIR=/opt/homebrew/opt/libssh2" >> $GITHUB_ENV
+          fi
+          echo "PKG_CONFIG_PATH=/opt/homebrew/opt/openssl@3/lib/pkgconfig:/opt/homebrew/opt/libssh2/lib/pkgconfig" >> $GITHUB_ENV
                   
       # Set up cross-compilation for ARM on macOS
       - name: Install cross-compilation tools for macOS ARM
@@ -138,15 +158,20 @@ jobs:
           cargo build --release --target ${{ matrix.target }} ${{ matrix.features_flag }}
         env:
           RUSTFLAGS: "-C target-feature=+aes,+neon"
-          PKG_CONFIG_PATH: "${{ env.OPENSSL_DIR }}/lib/pkgconfig:${{ env.LIBSSH2_DIR }}/lib/pkgconfig"
       
-      # Standard build for other platforms
-      - name: Build (Standard)
-        if: matrix.os != 'ubuntu-latest' && matrix.target != 'aarch64-apple-darwin'
+      # Build with macOS x86_64 flags
+      - name: Build (macOS x86_64)
+        if: matrix.os == 'macos-latest' && matrix.target == 'x86_64-apple-darwin'
         run: |
           cargo build --release --target ${{ matrix.target }} ${{ matrix.features_flag }}
         env:
-          PKG_CONFIG_PATH: "${{ env.OPENSSL_DIR }}/lib/pkgconfig:${{ env.LIBSSH2_DIR }}/lib/pkgconfig"
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+      
+      # Standard build for Windows
+      - name: Build (Windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          cargo build --release --target ${{ matrix.target }} ${{ matrix.features_flag }}
       
       # Prepare artifact on Linux/macOS
       - name: Prepare artifact
