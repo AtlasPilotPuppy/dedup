@@ -1,13 +1,7 @@
 #[cfg(feature = "ssh")]
 use anyhow::{Context, Result};
-#[cfg(feature = "ssh")]
-use ssh2::Session;
-#[cfg(feature = "ssh")]
-use std::io::Read;
-#[cfg(feature = "ssh")]
-use std::net::TcpStream;
-#[cfg(feature = "ssh")]
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 /// Represents a remote location parsed from an SSH URI
 #[cfg(feature = "ssh")]

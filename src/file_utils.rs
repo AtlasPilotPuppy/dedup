@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use glob::{Pattern, PatternError};
 use num_cpus;
 use rayon::prelude::*;
@@ -1899,7 +1899,7 @@ pub fn handle_directory(cli: &crate::Cli, dir_path: &Path) -> Result<Vec<FileInf
         
         // Parse the remote location
         let remote_location = crate::ssh_utils::RemoteLocation::parse(path_str)
-            .context(format!("Failed to parse remote path: {}. Format should be ssh:host:/path", path_str))?;
+            .with_context(|| format!("Failed to parse remote path: {}. Format should be ssh:host:/path", path_str))?;
         
         // Check if the directory exists
         match remote_location.check_directory_exists() {
@@ -2136,4 +2136,16 @@ fn handle_remote_fallback(cli: &crate::Cli, remote: &crate::ssh_utils::RemoteLoc
 // Helper function to convert std::io::Result<FileTime> to Option<SystemTime>
 fn file_time_to_system_time(time_result: std::io::Result<SystemTime>) -> Option<SystemTime> {
     time_result.ok()
+}
+
+#[cfg(feature = "ssh")]
+pub fn handle_remote_path(path: &Path) -> Result<Vec<FileInfo>> {
+    let path_str = path.to_string_lossy();
+    if let Some(path_str) = path_str.strip_prefix("ssh:") {
+        let remote_location = crate::ssh_utils::RemoteLocation::parse(path_str)
+            .with_context(|| format!("Failed to parse remote path: {}. Format should be ssh:host:/path", path_str))?;
+        // ... rest of the function ...
+    } else {
+        Err(anyhow::anyhow!("Not a valid SSH path: {}", path_str))
+    }
 }
