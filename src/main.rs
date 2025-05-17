@@ -88,6 +88,13 @@ fn main() -> Result<()> {
     log::info!("Logger initialized. Application starting.");
     log::debug!("CLI args: {:#?}", cli);
 
+    // Check if we should run in server mode
+    #[cfg(feature = "ssh")]
+    if cli.server_mode {
+        log::info!("Starting in server mode on port {}", cli.port);
+        return start_server_mode(&cli);
+    }
+
     // Log config file path for debugging
     if let Some(config_path) = &cli.config_file {
         log::info!("Using custom config file: {:?}", config_path);
@@ -732,4 +739,30 @@ fn handle_duplicate_sets(cli: &Cli, duplicate_sets: &[file_utils::DuplicateSet])
     } else {
         Ok(None)
     }
+}
+
+// Start server mode to handle commands from remote clients
+#[cfg(feature = "ssh")]
+fn start_server_mode(cli: &Cli) -> Result<()> {
+    use dedups::protocol::find_available_port;
+    use dedups::server::run_server;
+    
+    // If port is 0, find an available port
+    let port = if cli.port == 0 {
+        find_available_port(10000, 20000)?
+    } else {
+        cli.port
+    };
+    
+    log::info!("Starting dedups server on port {}", port);
+    
+    // Print the port so the client can connect
+    if cli.verbose > 0 {
+        println!("DEDUPS_SERVER_PORT={}", port);
+    }
+    
+    // Run the server
+    run_server(port)?;
+    
+    Ok(())
 }

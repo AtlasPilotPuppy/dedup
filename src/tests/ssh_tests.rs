@@ -9,16 +9,16 @@ mod ssh_tests {
         let location = RemoteLocation::parse("ssh:localhost:/tmp").unwrap();
         assert_eq!(location.host, "localhost");
         assert_eq!(location.path, PathBuf::from("/tmp"));
-        assert!(location.user.is_none());
+        assert!(location.username.is_none());
         assert!(location.port.is_none());
         assert!(location.ssh_options.is_empty());
         assert!(location.rsync_options.is_empty());
 
         // With username
-        let location = RemoteLocation::parse("ssh:user@localhost:/tmp").unwrap();
+        let location = RemoteLocation::parse("ssh:username@localhost:/tmp").unwrap();
         assert_eq!(location.host, "localhost");
         assert_eq!(location.path, PathBuf::from("/tmp"));
-        assert_eq!(location.user, Some("user".to_string()));
+        assert_eq!(location.username, Some("username".to_string()));
         assert!(location.port.is_none());
 
         // With port
@@ -28,10 +28,10 @@ mod ssh_tests {
         assert_eq!(location.port, Some(2222));
 
         // With username and port
-        let location = RemoteLocation::parse("ssh:user@localhost:2222:/tmp").unwrap();
+        let location = RemoteLocation::parse("ssh:username@localhost:2222:/tmp").unwrap();
         assert_eq!(location.host, "localhost");
         assert_eq!(location.path, PathBuf::from("/tmp"));
-        assert_eq!(location.user, Some("user".to_string()));
+        assert_eq!(location.username, Some("username".to_string()));
         assert_eq!(location.port, Some(2222));
 
         // With SSH options
@@ -69,9 +69,9 @@ mod ssh_tests {
         assert_eq!(cmd, vec!["ssh", "-p", "2222", "localhost"]);
 
         // With username
-        let location = RemoteLocation::parse("ssh:user@localhost:/tmp").unwrap();
+        let location = RemoteLocation::parse("ssh:username@localhost:/tmp").unwrap();
         let cmd = location.ssh_command();
-        assert_eq!(cmd, vec!["ssh", "user@localhost"]);
+        assert_eq!(cmd, vec!["ssh", "username@localhost"]);
 
         // With options
         let location = RemoteLocation::parse("ssh:localhost:/tmp:-v,-o,StrictHostKeyChecking=no:").unwrap();
@@ -93,9 +93,9 @@ mod ssh_tests {
         assert_eq!(cmd, vec!["rsync", "-avz", "localhost:/remote/path", "/local/path"]);
 
         // With username
-        let location = RemoteLocation::parse("ssh:user@localhost:/remote/path").unwrap();
+        let location = RemoteLocation::parse("ssh:username@localhost:/remote/path").unwrap();
         let cmd = location.rsync_command(&source, &dest, false);
-        assert_eq!(cmd, vec!["rsync", "-avz", "/local/path", "user@localhost:/remote/path"]);
+        assert_eq!(cmd, vec!["rsync", "-avz", "/local/path", "username@localhost:/remote/path"]);
 
         // With port
         let location = RemoteLocation::parse("ssh:localhost:2222:/remote/path").unwrap();

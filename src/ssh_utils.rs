@@ -3,12 +3,14 @@ use anyhow::{Context, Result};
 #[cfg(feature = "ssh")]
 use ssh2::Session;
 use std::path::{Path, PathBuf};
+use serde::{Deserialize, Serialize};
+use std::process::{Command, Output, Stdio};
 
 /// Represents a remote location parsed from an SSH URI
 #[cfg(feature = "ssh")]
 #[derive(Debug, Clone)]
 pub struct RemoteLocation {
-    pub user: Option<String>,
+    pub username: Option<String>,
     pub host: String,
     pub port: Option<u16>,
     pub path: PathBuf,
@@ -45,7 +47,7 @@ impl RemoteLocation {
 
         // Parse host and optional user
         let host_part = parts[0];
-        let (user, host) = if host_part.contains('@') {
+        let (username, host) = if host_part.contains('@') {
             let host_parts: Vec<&str> = host_part.split('@').collect();
             (Some(host_parts[0].to_string()), host_parts[1].to_string())
         } else {
@@ -81,7 +83,7 @@ impl RemoteLocation {
         }
 
         Ok(RemoteLocation {
-            user,
+            username,
             host,
             port,
             path,
@@ -109,7 +111,7 @@ impl RemoteLocation {
         cmd.extend(self.ssh_options.clone());
         
         // Add host with optional user
-        let host = if let Some(user) = &self.user {
+        let host = if let Some(user) = &self.username {
             format!("{}@{}", user, self.host)
         } else {
             self.host.clone()
@@ -138,7 +140,7 @@ impl RemoteLocation {
         cmd.extend(self.rsync_options.clone());
         
         // Format source and destination with proper remote syntax
-        let host_prefix = if let Some(user) = &self.user {
+        let host_prefix = if let Some(user) = &self.username {
             format!("{}@{}", user, self.host)
         } else {
             self.host.clone()
@@ -164,53 +166,138 @@ impl RemoteLocation {
 
     /// Run a command on the remote system
     pub fn run_command(&self, command: &str) -> Result<String> {
-        // Build SSH command with proper options
-        let mut ssh_cmd = vec!["ssh".to_string()];
-        
-        // Add port if specified
-        if let Some(port) = self.port {
-            ssh_cmd.extend(vec!["-p".to_string(), port.to_string()]);
-        }
-        
-        // Always use system SSH config by default
-        ssh_cmd.extend(vec!["-F".to_string(), shellexpand::tilde("~/.ssh/config").into_owned()]);
-        
-        // Add any custom SSH options
-        ssh_cmd.extend(self.ssh_options.clone());
-        
-        // Add host with optional user
-        let host = if let Some(user) = &self.user {
-            format!("{}@{}", user, self.host)
+        // Check if SSH_COMMAND environment variable is set to use custom SSH command
+        if let Ok(ssh_command) = std::env::var("SSH_COMMAND") {
+            log::debug!("Using SSH command from environment: {}", ssh_command);
+            
+            // Build full command with custom SSH command
+            let host_part = if let Some(user) = &self.username {
+                if let Some(port) = self.port {
+                    format!("{}@{}:{}", user, self.host, port)
+                } else {
+                    format!("{}@{}", user, self.host)
+                }
+            } else {
+                if let Some(port) = self.port {
+                    format!("{}:{}", self.host, port)
+                } else {
+                    self.host.clone()
+                }
+            };
+            
+            // Execute with custom SSH wrapper
+            let output = std::process::Command::new(&ssh_command)
+                .arg(&host_part)
+                .arg(command)
+                .output()
+                .with_context(|| format!("Failed to execute SSH command using wrapper. Please verify SSH access to host '{}' is configured correctly.", self.host))?;
+            
+            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+            
+            log::debug!("SSH command stdout: {}", stdout);
+            log::debug!("SSH command stderr: {}", stderr);
+            
+            if !output.status.success() {
+                log::error!("SSH command failed. Stderr: {}", stderr);
+                log::error!("SSH command stdout: {}", stdout);
+                return Err(anyhow::anyhow!(
+                    "SSH command failed on host '{}': {}",
+                    self.host,
+                    stderr
+                ));
+            }
+            
+            Ok(stdout)
         } else {
-            self.host.clone()
-        };
-        ssh_cmd.push(host);
-        
-        // Add the command
-        ssh_cmd.push(command.to_string());
-        
-        // Log the command being executed
-        log::debug!("Executing SSH command: {}", ssh_cmd.join(" "));
-        
-        // Execute the command
-        let output = std::process::Command::new(&ssh_cmd[0])
-            .args(&ssh_cmd[1..])
-            .output()
-            .with_context(|| format!("Failed to execute SSH command. Please verify SSH access to host '{}' is configured correctly.", self.host))?;
-        
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            log::error!("SSH command failed. Stderr: {}", stderr);
-            log::error!("SSH command stdout: {}", stdout);
-            return Err(anyhow::anyhow!(
-                "SSH command failed on host '{}': {}",
-                self.host,
-                stderr
-            ));
+            // Standard SSH approach
+            let mut ssh_cmd = vec!["ssh".to_string()];
+            
+            // Add port if specified
+            if let Some(port) = self.port {
+                ssh_cmd.extend(vec!["-p".to_string(), port.to_string()]);
+            }
+            
+            // Add SSH config file if specified in environment
+            if let Ok(config_file) = std::env::var("SSH_CONFIG_FILE") {
+                if !config_file.is_empty() {
+                    log::debug!("Using SSH config file from environment: {}", config_file);
+                    ssh_cmd.extend(vec!["-F".to_string(), config_file]);
+                }
+            } else {
+                // Always use system SSH config by default
+                ssh_cmd.extend(vec!["-F".to_string(), shellexpand::tilde("~/.ssh/config").into_owned()]);
+            }
+            
+            // Add any custom SSH options
+            for opt in &self.ssh_options {
+                // Check if it's a key=value pair
+                if opt.contains('=') {
+                    let parts: Vec<&str> = opt.split('=').collect();
+                    if parts.len() == 2 {
+                        let key = parts[0];
+                        let value = parts[1];
+                        
+                        // Special handling for common options
+                        match key {
+                            "IdentityFile" => {
+                                ssh_cmd.push("-i".to_string());
+                                ssh_cmd.push(value.to_string());
+                            },
+                            _ => {
+                                // Generic option
+                                ssh_cmd.push("-o".to_string());
+                                ssh_cmd.push(format!("{}={}", key, value));
+                            }
+                        }
+                    } else {
+                        // Not a proper key=value, add as-is
+                        ssh_cmd.push(opt.clone());
+                    }
+                } else {
+                    // Not a key=value, add as-is
+                    ssh_cmd.push(opt.clone());
+                }
+            }
+            
+            // Add host with optional user
+            let host = if let Some(user) = &self.username {
+                format!("{}@{}", user, self.host)
+            } else {
+                self.host.clone()
+            };
+            ssh_cmd.push(host);
+            
+            // Add the command
+            ssh_cmd.push(command.to_string());
+            
+            // Log the command being executed
+            log::debug!("Executing SSH command: {}", ssh_cmd.join(" "));
+            
+            // Execute the command
+            let output = std::process::Command::new(&ssh_cmd[0])
+                .args(&ssh_cmd[1..])
+                .output()
+                .with_context(|| format!("Failed to execute SSH command. Please verify SSH access to host '{}' is configured correctly.", self.host))?;
+            
+            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+            
+            log::debug!("SSH command stdout: {}", stdout);
+            log::debug!("SSH command stderr: {}", stderr);
+            
+            if !output.status.success() {
+                log::error!("SSH command failed. Stderr: {}", stderr);
+                log::error!("SSH command stdout: {}", stdout);
+                return Err(anyhow::anyhow!(
+                    "SSH command failed on host '{}': {}",
+                    self.host,
+                    stderr
+                ));
+            }
+            
+            Ok(stdout)
         }
-        
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
     
     /// Check if dedups is installed on the remote system
@@ -465,7 +552,7 @@ impl SshProtocol {
         }
         
         // Add host with optional user
-        let host = if let Some(user) = &self.remote.user {
+        let host = if let Some(user) = &self.remote.username {
             log::debug!("Using username: {}", user);
             format!("{}@{}", user, self.remote.host)
         } else {
@@ -523,208 +610,115 @@ impl SshProtocol {
     /// Uses a dedicated socket/tunnel approach for better streaming
     pub fn execute_dedups(&self, args: &[&str], cli: &crate::Cli) -> Result<String> {
         // Check if we're using JSON output to adjust approach
-        let using_json = args.contains(&"--json");
-
+        let using_json = args.iter().any(|&a| a == "--json") || cli.json;
+        
+        // If we're using JSON output and SSH tunnel is enabled in config, use tunnel-based approach
         if using_json && cli.use_ssh_tunnel {
-            log::debug!("Using SSH tunnel for JSON streaming (use_ssh_tunnel=true)");
             self.execute_dedups_with_tunnel(args, cli)
         } else {
-            if using_json {
-                log::debug!("Using standard SSH for JSON (use_ssh_tunnel=false)");
-            }
+            // Fall back to standard approach
+            log::info!("Using standard SSH for command execution (no tunneling)");
             self.execute_dedups_standard(args, cli)
         }
     }
 
-    /// Execute dedups command using a socket tunnel for reliable JSON streaming
-    fn execute_dedups_with_tunnel(&self, args: &[&str], cli: &crate::Cli) -> Result<String> {
-        log::debug!("Executing remote dedups with tunnel for reliable JSON streaming");
+    /// Execute dedups via an SSH tunnel for better JSON streaming
+    pub fn execute_dedups_with_tunnel(&self, args: &[&str], cli: &crate::Cli) -> Result<String> {
+        use crate::client::DedupClient;
+        use crate::protocol::find_available_port;
+        use std::collections::HashMap;
         
-        // First check if netcat is available on the remote system
-        let check_nc_cmd = r#"
-            command -v nc >/dev/null 2>&1 || command -v netcat >/dev/null 2>&1 || 
-            { echo "MISSING"; exit 1; }
-        "#;
+        log::debug!("Executing dedups via SSH tunnel");
         
-        match self.remote.run_command(check_nc_cmd) {
-            Ok(output) => {
-                if output.trim() == "MISSING" {
-                    log::warn!("netcat (nc) not found on remote system, falling back to standard SSH");
-                    return self.execute_dedups_standard(args, cli);
-                }
-            },
-            Err(e) => {
-                log::warn!("Failed to check for netcat: {}, falling back to standard SSH", e);
-                return self.execute_dedups_standard(args, cli);
-            }
-        }
-        
-        // Find a free local port for the tunnel
-        let local_port = find_available_port()?;
-        log::debug!("Using local port {} for SSH tunnel", local_port);
+        // Find an available local port for the tunnel
+        let local_port = find_available_port(10000, 11000)
+            .context("Could not find an available port for SSH tunnel")?;
         
         // Forward RUST_LOG if set
         let rust_log_export = if let Ok(val) = std::env::var("RUST_LOG") {
             format!("export RUST_LOG=\"{}\";", val)
         } else { String::new() };
-
-        // Set up the socket server on the remote system
-        let socket_setup_cmd = format!(
-            r#"
-            # Create a temporary directory for the socket
-            SOCKET_DIR=$(mktemp -d)
-            echo "Socket directory: $SOCKET_DIR"
-            
-            # Start a background process to run dedups and write to a fifo
-            (
-                # Set up environment
-                export PATH="$HOME/.local/bin:$PATH"
-                {rust_log_export}
-                [ -f "$HOME/.bashrc" ] && source "$HOME/.bashrc"
-                [ -f "$HOME/.profile" ] && source "$HOME/.profile"
-                
-                # Create the command with proper JSON formatting
-                DEDUPS_CMD="dedups {}"
-                echo "Running command: $DEDUPS_CMD"
-                
-                # Execute and redirect output to netcat listening on our port
-                # Use stdbuf to disable buffering
-                stdbuf -o0 $DEDUPS_CMD | nc -l {} -q 0
-                
-                # Clean up
-                rm -rf "$SOCKET_DIR"
-            ) &
-            
-            # Give the server time to start
-            sleep 1
-            
-            # Return the temporary directory path so it can be cleaned up later
-            echo "$SOCKET_DIR"
-            "#,
-            args.join(" "),
-            local_port,
-            rust_log_export = rust_log_export
-        );
         
-        // Build SSH tunnel command
-        let mut tunnel_cmd = vec!["ssh".to_string()];
+        // Set up tunnel in background
+        let _host = self.remote.host.clone();
+        let _username = self.remote.username.clone().unwrap_or_default();
+        let _port = self.remote.port;
         
-        // Add port if specified
-        if let Some(port) = self.remote.port {
-            tunnel_cmd.extend(vec!["-p".to_string(), port.to_string()]);
-        }
+        // Set up a temporary port forwarding with SSH
+        let port_forwarding = format!("{}:localhost:{}", local_port, local_port);
+        let mut ssh_opts = vec!["-L", &port_forwarding];
+        let ssh_options = self.get_ssh_options(cli);
+        ssh_opts.extend(ssh_options.iter().map(|s| s.as_str()));
         
-        // Add tunnel option
-        tunnel_cmd.push("-L".to_string());
-        tunnel_cmd.push(format!("{}:localhost:{}", local_port, local_port));
-        
-        // Add custom SSH options
-        tunnel_cmd.extend(self.remote.ssh_options.clone());
-        
-        // Add host with optional user
-        let host = if let Some(user) = &self.remote.user {
-            format!("{}@{}", user, self.remote.host)
+        let remote_addr = if let Some(user) = &self.remote.username {
+            if let Some(port) = self.remote.port {
+                format!("{}@{}:{}", user, self.remote.host, port)
+            } else {
+                format!("{}@{}", user, self.remote.host)
+            }
         } else {
             self.remote.host.clone()
         };
-        tunnel_cmd.push(host);
         
-        // Add the socket setup command
-        tunnel_cmd.push(socket_setup_cmd);
+        // Start the server process on the remote system
+        let server_cmd = format!(
+            r#"ssh {ssh_options} {remote_addr} bash -c '{rust_log_export} export PATH="$HOME/.local/bin:$PATH"; if [ -f "$HOME/.bashrc" ]; then source "$HOME/.bashrc"; fi; dedups --server-mode --port {port}'"#,
+            ssh_options = ssh_opts.join(" "),
+            remote_addr = remote_addr,
+            rust_log_export = rust_log_export,
+            port = local_port
+        );
         
-        // Execute the tunnel command
-        log::debug!("Starting SSH tunnel with command: {}", tunnel_cmd.join(" "));
-        let tunnel_process = std::process::Command::new(&tunnel_cmd[0])
-            .args(&tunnel_cmd[1..])
-            .output()
-            .with_context(|| format!("Failed to set up SSH tunnel to host '{}'", self.remote.host))?;
+        log::debug!("Starting SSH tunnel and server with command: {}", server_cmd);
         
-        if !tunnel_process.status.success() {
-            let stderr = String::from_utf8_lossy(&tunnel_process.stderr);
-            log::error!("Failed to set up SSH tunnel: {}", stderr);
-            return Err(anyhow::anyhow!("Failed to set up SSH tunnel: {}", stderr));
+        // Start the SSH tunnel in background
+        let mut child = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(&server_cmd)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .context("Failed to start SSH tunnel")?;
+        
+        // Give server time to start
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        
+        // Connect to the server via the tunnel
+        let mut client = DedupClient::new("localhost".to_string(), local_port);
+        if let Err(e) = client.connect() {
+            // Kill the tunnel process if connection failed
+            let _ = child.kill();
+            return Err(e);
         }
         
-        // The socket directory path is the last line of the output
-        let socket_dir = String::from_utf8_lossy(&tunnel_process.stdout)
-            .trim()
-            .lines()
-            .last()
-            .unwrap_or("")
-            .to_string();
+        // Convert &[&str] to Vec<String>
+        let args_vec: Vec<String> = args.iter().map(|&s| s.to_string()).collect();
         
-        log::debug!("SSH tunnel established, socket directory: {}", socket_dir);
+        // Set up environment variables to pass through
+        let mut options = HashMap::new();
+        if let Ok(log_val) = std::env::var("RUST_LOG") {
+            options.insert("ENV_RUST_LOG".to_string(), log_val);
+        }
         
-        // Connect to the local port to read the JSON output
-        let stream = match std::net::TcpStream::connect(format!("localhost:{}", local_port)) {
-            Ok(s) => s,
+        // Execute command and get output
+        let output = match client.execute_command("dedups".to_string(), args_vec, options) {
+            Ok(out) => out,
             Err(e) => {
-                log::error!("Failed to connect to local port {}: {}", local_port, e);
-                return Err(anyhow::anyhow!("Failed to connect to local port {}: {}", local_port, e));
+                // Kill the tunnel process if command failed
+                let _ = child.kill();
+                return Err(e);
             }
         };
         
-        // Set a read timeout
-        stream.set_read_timeout(Some(std::time::Duration::from_secs(2)))?;
-        
-        // Read from the stream
-        let mut reader = std::io::BufReader::new(stream);
-        let mut output = String::new();
-        let mut buf = [0; 4096];
-        
-        // Process the output in chunks
-        loop {
-            use std::io::Read;
-            match reader.read(&mut buf) {
-                Ok(0) => break, // End of stream
-                Ok(n) => {
-                    let chunk = std::str::from_utf8(&buf[0..n])?;
-                    
-                    // Stream JSON lines to stdout
-                    for line in chunk.lines() {
-                        if line.trim().starts_with('{') {
-                            println!("{}", line);
-                        }
-                    }
-                    
-                    output.push_str(chunk);
-                },
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    // Timeout - check if we have any output and if so, we're done
-                    if !output.is_empty() {
-                        break;
-                    }
-                },
-                Err(e) => {
-                    log::error!("Error reading from stream: {}", e);
-                    return Err(anyhow::anyhow!("Error reading from stream: {}", e));
-                }
-            }
-        }
-        
-        // Clean up the remote socket directory
-        if !socket_dir.is_empty() {
-            let cleanup_cmd = format!("rm -rf {}", socket_dir);
-            let _ = self.remote.run_command(&cleanup_cmd);
-        }
-        
-        if output.is_empty() {
-            log::warn!("No output received from remote dedups via tunnel");
-            let error_json = format!("{{\"type\":\"error\",\"message\":\"No output received from remote dedups\",\"code\":1}}");
-            println!("{}", error_json);
-            output = error_json;
-        }
-        
-        // Extract JSON lines if mixed output
-        if let Some(json_only) = Self::extract_json_lines(&output) {
-            return Ok(json_only);
-        }
+        // Clean up
+        let _ = client.disconnect();
+        let _ = child.kill();
         
         Ok(output)
     }
     
     /// Standard execution method for non-JSON commands
-    fn execute_dedups_standard(&self, args: &[&str], cli: &crate::Cli) -> Result<String> {
+    fn execute_dedups_standard(&self, args: &[&str], _cli: &crate::Cli) -> Result<String> {
         // Build SSH command
         let mut ssh_cmd = vec!["ssh".to_string()];
         
@@ -752,7 +746,7 @@ impl SshProtocol {
         }
         
         // Add host with optional user
-        let host = if let Some(user) = &self.remote.user {
+        let host = if let Some(user) = &self.remote.username {
             format!("{}@{}", user, self.remote.host)
         } else {
             self.remote.host.clone()
@@ -944,6 +938,41 @@ impl SshProtocol {
             }
         }
         self.session = None;
+    }
+
+    /// Get SSH options from CLI, remote location, and default settings
+    pub fn get_ssh_options(&self, cli: &crate::Cli) -> Vec<String> {
+        let mut options = Vec::new();
+        
+        // Add options from the CLI
+        #[cfg(feature = "ssh")]
+        {
+            options.extend(cli.ssh_options.clone());
+        }
+        
+        // Add SSH config file option if found in regular locations
+        if Path::new("/Users/anant/.ssh/config").exists() {
+            options.push("-F".to_string());
+            options.push("/Users/anant/.ssh/config".to_string());
+        } else if Path::new("/etc/ssh/ssh_config").exists() {
+            options.push("-F".to_string());
+            options.push("/etc/ssh/ssh_config".to_string());
+        }
+        
+        // Add default options for better SSH experience
+        options.push("-o".to_string());
+        options.push("BatchMode=yes".to_string());
+        
+        // Add SSH config file from environment variable if set
+        if let Ok(config_file) = std::env::var("SSH_CONFIG_FILE") {
+            if !config_file.is_empty() {
+                log::debug!("Using SSH config file from environment: {}", config_file);
+                options.push("-F".to_string());
+                options.push(config_file);
+            }
+        }
+        
+        options
     }
 }
 

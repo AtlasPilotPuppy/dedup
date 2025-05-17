@@ -261,6 +261,16 @@ pub struct Cli {
     #[cfg(feature = "ssh")]
     #[clap(long, default_value_t = true, help = "Use SSH tunneling for JSON streaming (more reliable)")]
     pub use_ssh_tunnel: bool,
+
+    /// Run in server mode to listen for commands over a socket/stdin
+    #[cfg(feature = "ssh")]
+    #[clap(long, help = "Run in server mode on the specified port")]
+    pub server_mode: bool,
+    
+    /// Port to use for server mode
+    #[cfg(feature = "ssh")]
+    #[clap(long, default_value = "0", help = "Port to use for server mode (0 = auto)")]
+    pub port: u16,
 }
 
 impl Cli {
@@ -451,3 +461,14 @@ mod tests {
     #[cfg(feature = "ssh")]
     mod ssh_tests;
 }
+
+// Add the new protocol-related modules conditionally when SSH feature is enabled
+#[cfg(feature = "ssh")]
+pub mod protocol;
+#[cfg(feature = "ssh")]
+pub mod server;
+#[cfg(feature = "ssh")]
+pub mod client;
+
+// Export the primary types
+pub use config::DedupConfig as Config;

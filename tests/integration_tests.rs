@@ -236,6 +236,10 @@ impl TestEnv {
             use_sudo: false,
             #[cfg(feature = "ssh")]
             use_ssh_tunnel: true,
+            #[cfg(feature = "ssh")]
+            server_mode: false,
+            #[cfg(feature = "ssh")]
+            port: 0,
         }
     }
 }
