@@ -639,7 +639,40 @@ impl SshProtocol {
             if cli.verbose >= 3 {
                 log::info!("Using tunnel-based SSH API communication (protocol mode)");
             }
-            self.execute_dedups_with_tunnel(args, cli)
+
+            // First verify remote dedups is available
+            let remote_dedups = tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(self.remote.check_dedups_installed())?;
+
+            match remote_dedups {
+                Some(path) => {
+                    log::info!("Found remote dedups at {}, attempting tunnel mode", path);
+                    match self.execute_dedups_with_tunnel(args, cli) {
+                        Ok(result) => Ok(result),
+                        Err(e) => {
+                            log::error!("Tunnel mode failed: {}", e);
+                            if cli.media_mode {
+                                // Media mode requires tunnel mode
+                                return Err(anyhow::anyhow!(
+                                    "Media mode requires working tunnel mode communication. Error: {}", e
+                                ));
+                            }
+                            log::warn!("Falling back to standard SSH mode (less reliable for JSON streaming)");
+                            self.execute_dedups_standard(args, cli)
+                        }
+                    }
+                }
+                None => {
+                    if cli.media_mode {
+                        return Err(anyhow::anyhow!(
+                            "Media mode requires dedups to be installed on the remote system"
+                        ));
+                    }
+                    log::warn!("Remote dedups not found, using standard SSH mode");
+                    self.execute_dedups_standard(args, cli)
+                }
+            }
         } else {
             // Fall back to standard approach
             log::info!("Using standard SSH for command execution (no tunneling)");
@@ -655,23 +688,19 @@ impl SshProtocol {
         use std::io::{BufRead, BufReader};
 
         if cli.verbose >= 2 {
-            log::info!("Executing dedups via SSH tunnel API protocol (not parsing stdout)");
-        } else {
-            log::debug!("Executing dedups via SSH tunnel");
+            log::info!("Executing dedups via SSH tunnel API protocol");
         }
 
-        // Always enable tunnel API mode for SSH tunnels, regardless of CLI flag
+        // Always enable tunnel API mode for SSH tunnels
         let tunnel_api_mode = true;
         
         // Use the configured port from options or find an available one
         let local_port = if cli.port > 0 {
-            // Use the configured port from CLI/options
             if cli.verbose >= 2 {
                 log::info!("Using configured port {} for API communication", cli.port);
             }
             cli.port
         } else {
-            // Find a port in the dynamic range
             let port = find_available_port(10000, 11000)
                 .context("Could not find an available port for SSH tunnel")?;
             if cli.verbose >= 2 {
@@ -679,6 +708,12 @@ impl SshProtocol {
             }
             port
         };
+
+        // Get the remote dedups path (we know it exists since we checked earlier)
+        let remote_dedups_bin = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(self.remote.check_dedups_installed())?
+            .ok_or_else(|| anyhow::anyhow!("Remote dedups not found"))?;
 
         log::info!("Setting up SSH tunnel on port {} for API communication", local_port);
 
@@ -735,27 +770,17 @@ impl SshProtocol {
         if cli.verbose > 0 {
             server_flags.extend(std::iter::repeat_n("-v", cli.verbose as usize));
         }
-        
-        // Determine the remote dedups binary path so we can invoke it explicitly (avoid relying on PATH)
-        let remote_dedups_bin: String = {
-            match tokio::runtime::Runtime::new()
-                .unwrap()
-                .block_on(self.remote.check_dedups_installed())
-            {
-                Ok(Some(path)) if !path.trim().is_empty() => path.trim().to_string(),
-                _ => "dedups".to_string(), // Fallback
-            }
-        };
 
-        // If the original CLI had a directory, pass it to the remote server (for legacy/compat)
+        // If the original CLI had a directory, pass it to the remote server
         let remote_dir_arg = if !cli.directories.is_empty() {
             format!(" {}", cli.directories[0].to_string_lossy())
         } else {
             String::new()
         };
 
+        // Construct the remote shell command carefully to avoid parse errors
         let server_cmd_for_remote_shell = format!(
-            r#"{rust_log_export} export PATH=\"$HOME/.local/bin:$PATH\"; if [ -f \"$HOME/.bashrc\" ]; then source \"$HOME/.bashrc\"; fi; echo \"INFO: Dedups server starting on remote port {port} via SSH tunnel command.\"; {dedups_bin} {server_flags}{remote_dir_arg}"#,
+            r#"export PATH="$HOME/.local/bin:$PATH"; {rust_log_export} if [ -f "$HOME/.bashrc" ]; then source "$HOME/.bashrc"; fi; echo "INFO: Starting dedups server on remote port {port}"; {dedups_bin} {server_flags}{remote_dir_arg}"#,
             rust_log_export = rust_log_export,
             port = local_port,
             dedups_bin = remote_dedups_bin,
@@ -764,16 +789,14 @@ impl SshProtocol {
         );
 
         let server_cmd = format!(
-            r#"ssh {ssh_options} {remote_addr} bash -c "{shell_command}""#,
+            r#"ssh {ssh_options} {remote_addr} bash -c '{shell_command}'"#,
             ssh_options = ssh_opts.join(" "), // ssh_opts contains the -L for tunnel
             remote_addr = remote_addr,
-            shell_command = server_cmd_for_remote_shell.replace('\"', "\\\"") // Escape quotes for the shell command
+            shell_command = server_cmd_for_remote_shell.replace('\'', "'\\''") // Properly escape single quotes
         );
 
-        if cli.verbose >= 1 { // Log this important command more readily
-            log::info!("Attempting to spawn SSH tunnel and server with command: [{}]", server_cmd);
-        } else if cli.verbose >= 3 { // Fallback for older verbosity setting if any
-             log::debug!("Attempting to spawn SSH tunnel and server with command: [{}]", server_cmd);
+        if cli.verbose >= 1 {
+            log::info!("Starting SSH tunnel and remote server with command: [{}]", server_cmd);
         }
 
         // Start the SSH tunnel in background with better piping
