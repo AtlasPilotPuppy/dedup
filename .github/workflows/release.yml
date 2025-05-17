@@ -127,15 +127,34 @@ jobs:
       - name: Install macOS x86_64 dependencies
         if: matrix.os == 'macos-latest' && matrix.target == 'x86_64-apple-darwin'
         run: |
+          # Remove any existing OpenSSL installations
+          brew uninstall --ignore-dependencies openssl@3 openssl@1.1 || true
+          
           # Install x86_64 OpenSSL
-          brew install openssl@3
+          arch -x86_64 brew install openssl@3
+          arch -x86_64 brew install pkg-config
+          
+          # Set OpenSSL environment variables
           echo "OPENSSL_DIR=/usr/local/opt/openssl@3" >> $GITHUB_ENV
           echo "OPENSSL_ROOT_DIR=/usr/local/opt/openssl@3" >> $GITHUB_ENV
+          echo "OPENSSL_INCLUDE_DIR=/usr/local/opt/openssl@3/include" >> $GITHUB_ENV
+          echo "OPENSSL_LIB_DIR=/usr/local/opt/openssl@3/lib" >> $GITHUB_ENV
+          echo "PKG_CONFIG_PATH=/usr/local/opt/openssl@3/lib/pkgconfig" >> $GITHUB_ENV
+          
           if [[ "${{ matrix.features }}" == *"ssh"* ]]; then
-            brew install libssh2
+            # Install libssh2 with x86_64 architecture
+            arch -x86_64 brew install libssh2
             echo "LIBSSH2_DIR=/usr/local/opt/libssh2" >> $GITHUB_ENV
+            echo "PKG_CONFIG_PATH=/usr/local/opt/openssl@3/lib/pkgconfig:/usr/local/opt/libssh2/lib/pkgconfig" >> $GITHUB_ENV
           fi
-          echo "PKG_CONFIG_PATH=/usr/local/opt/openssl@3/lib/pkgconfig:/usr/local/opt/libssh2/lib/pkgconfig" >> $GITHUB_ENV
+          
+          # Verify OpenSSL installation
+          pkg-config --libs openssl
+          pkg-config --modversion openssl
+          ls -la /usr/local/opt/openssl@3/lib/
+          
+          # Link OpenSSL properly
+          ln -sf /usr/local/opt/openssl@3/lib/pkgconfig/* /usr/local/lib/pkgconfig/ || true
 
       # Install macOS dependencies (ARM64)
       - name: Install macOS ARM64 dependencies
@@ -186,9 +205,20 @@ jobs:
       - name: Build (macOS x86_64)
         if: matrix.os == 'macos-latest' && matrix.target == 'x86_64-apple-darwin'
         run: |
-          cargo build --release --target ${{ matrix.target }} ${{ matrix.features_flag }}
+          # Verify environment
+          echo "OpenSSL Dir: $OPENSSL_DIR"
+          echo "OpenSSL Root Dir: $OPENSSL_ROOT_DIR"
+          echo "OpenSSL Include Dir: $OPENSSL_INCLUDE_DIR"
+          echo "OpenSSL Lib Dir: $OPENSSL_LIB_DIR"
+          echo "PKG_CONFIG_PATH: $PKG_CONFIG_PATH"
+          
+          # Build with OpenSSL configuration
+          OPENSSL_NO_VENDOR=1 cargo build --release --target ${{ matrix.target }} ${{ matrix.features_flag }}
         env:
           MACOSX_DEPLOYMENT_TARGET: "11.0"
+          OPENSSL_NO_VENDOR: "1"
+          OPENSSL_STATIC: "0"
+          RUSTFLAGS: "-C target-feature=+crt-static"
       
       # Standard build for Windows
       - name: Build (Windows)
