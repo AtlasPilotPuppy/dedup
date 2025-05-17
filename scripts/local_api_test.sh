@@ -22,15 +22,21 @@ if [[ -z "$HAS_PROTO_FEATURES" ]]; then
     echo ""
 fi
 
+# Create a dummy directory for scanning
+mkdir -p /tmp/api_test
+touch /tmp/api_test/file1.txt
+touch /tmp/api_test/file2.txt
+touch /tmp/api_test/file3.txt
+
 # Step 1: Start the server
 echo "Step 1: Starting dedups server on port $SERVER_PORT"
 echo "=================================================================="
-echo "$ ./target/release/dedups --server-mode --port $SERVER_PORT"
+echo "$ ./target/release/dedups --server-mode --port $SERVER_PORT /tmp/api_test"
 echo "=================================================================="
 echo "Starting server in background..."
 
 # Start the server in background
-./target/release/dedups --server-mode --port $SERVER_PORT --verbose > server.log 2>&1 &
+./target/release/dedups --server-mode --port $SERVER_PORT --verbose /tmp/api_test > server.log 2>&1 &
 SERVER_PID=$!
 echo "Server started with PID: $SERVER_PID"
 echo ""
@@ -56,12 +62,6 @@ echo "Step 2: Sending a command to the server"
 echo "=================================================================="
 echo "$ ./target/release/dedups /tmp --use-protobuf --use-compression --json --port $CLIENT_PORT"
 echo "=================================================================="
-
-# Create a dummy directory for scanning
-mkdir -p /tmp/api_test
-touch /tmp/api_test/file1.txt
-touch /tmp/api_test/file2.txt
-touch /tmp/api_test/file3.txt
 
 # Run the client with appropriate options
 if [[ -n "$HAS_PROTO_FEATURES" ]]; then
@@ -116,7 +116,7 @@ if [[ "$1" == "--advanced" ]]; then
     
     # Start server again
     echo "Starting server for advanced testing..."
-    ./target/release/dedups --server-mode --port $SERVER_PORT --verbose > server.log 2>&1 &
+    ./target/release/dedups --server-mode --port $SERVER_PORT --verbose /tmp/api_test > server.log 2>&1 &
     SERVER_PID=$!
     sleep 1
     

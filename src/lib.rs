@@ -312,12 +312,12 @@ pub struct Cli {
 
     /// Use Protobuf for protocol communication (instead of JSON)
     #[cfg(feature = "proto")]
-    #[clap(long, help = "Use Protobuf for network communication")]
+    #[clap(long, help = "Use Protobuf for network communication", default_value_t = true)]
     pub use_protobuf: bool,
 
     /// Use ZSTD compression for network communication
     #[cfg(feature = "proto")]
-    #[clap(long, help = "Use ZSTD compression for network communication")]
+    #[clap(long, help = "Use ZSTD compression for network communication", default_value_t = true)]
     pub use_compression: bool,
 
     /// ZSTD compression level (1-22, higher = more compression but slower)

@@ -24,6 +24,7 @@ use prost::Message;
 #[cfg(all(feature = "ssh", feature = "proto"))]
 use zstd::{decode_all, encode_all};
 
+
 // Message types for client/server communication
 #[cfg(feature = "ssh")]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -105,13 +106,16 @@ pub trait ProtocolHandler: Send {
 pub struct JsonProtocolHandler {
     pub stream: TcpStream,
     reader: BufReader<TcpStream>,
+    _use_protobuf: bool,
+    _use_compression: bool,
+    _compression_level: u32,
 }
 
 #[cfg(feature = "ssh")]
 impl JsonProtocolHandler {
     pub fn new(stream: TcpStream) -> Result<Self> {
         let reader = BufReader::new(stream.try_clone()?);
-        Ok(Self { stream, reader })
+        Ok(Self { stream, reader, _use_protobuf: false, _use_compression: false, _compression_level: 0 })
     }
 }
 
@@ -169,6 +173,9 @@ impl Clone for JsonProtocolHandler {
         Self {
             stream: self.stream.try_clone().expect("Failed to clone stream"),
             reader: BufReader::new(self.stream.try_clone().expect("Failed to clone stream")),
+            _use_protobuf: false,
+            _use_compression: false,
+            _compression_level: 0,
         }
     }
 }

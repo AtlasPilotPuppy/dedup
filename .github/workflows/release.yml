@@ -301,7 +301,7 @@ jobs:
           MACOSX_DEPLOYMENT_TARGET: "11.0"
           OPENSSL_NO_VENDOR: "1"
           OPENSSL_STATIC: "0"
-          RUSTFLAGS: "-C target-cpu=x86-64-v2 -C target-feature=+neon -C target-feature=+aes,+sse2"
+          RUSTFLAGS: "-C target-cpu=x86-64-v2 -C target-feature=+aes,+sse2"
 
       # Build with macOS ARM flags
       - name: Build (macOS ARM)
@@ -310,7 +310,7 @@ jobs:
         run: |
           cargo build --release --target ${{ matrix.target }} ${{ matrix.features_flag }}
         env:
-          RUSTFLAGS: "-C target-feature=+neon -C target-feature=+aes,+sse2"
+          RUSTFLAGS: "-C target-feature=+neon"
 
       # Build with Windows-specific flags
       - name: Build (Windows)
@@ -326,6 +326,28 @@ jobs:
           Set-Location $env:VCPKG_ROOT
           .\bootstrap-vcpkg.bat
           .\vcpkg.exe install openssl:x64-windows-static
+          
+          # Install protobuf if proto feature is enabled
+          if ("${{ matrix.features }}" -like "*proto*") {
+            # Download and install protoc
+            $protocVersion = "25.1"
+            $protocUrl = "https://github.com/protocolbuffers/protobuf/releases/download/v${protocVersion}/protoc-${protocVersion}-win64.zip"
+            $protocZip = "protoc.zip"
+            $protocDir = "protoc"
+            
+            # Download protoc
+            Invoke-WebRequest -Uri $protocUrl -OutFile $protocZip
+            
+            # Extract protoc
+            Expand-Archive -Path $protocZip -DestinationPath $protocDir
+            
+            # Add protoc to PATH
+            $env:PATH = "$env:GITHUB_WORKSPACE\$protocDir\bin;$env:PATH"
+            $env:PROTOC = "$env:GITHUB_WORKSPACE\$protocDir\bin\protoc.exe"
+            
+            # Verify protoc installation
+            protoc --version
+          }
           
           # Set OpenSSL environment variables
           $env:OPENSSL_NO_VENDOR = "1"

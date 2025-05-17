@@ -677,3 +677,84 @@ compression_level = 3  # Default is 3, range is 1-22
 3. Client/server capabilities detection
 
 When communicating with older versions of remote `dedups`, the system will automatically fall back to JSON.
+
+# SSH API Communication
+
+When working with remote SSH paths, there are two modes of communication:
+
+1. **Standard mode** (stdout parsing): Used when tunnel mode is explicitly disabled.
+
+2. **Tunnel API mode** (DEFAULT): Creates an SSH tunnel and communicates with a dedicated API server on the remote host for more reliable operation.
+
+## Using Tunnel API Mode
+
+Tunnel API mode is the default for SSH communication. The system automatically:
+- Establishes an SSH tunnel
+- Starts a dedups server on the remote host
+- Communicates using Protocol Buffers (when available)
+- Applies compression for better performance
+- Terminates the server when the client disconnects
+
+For optimal performance, compile with both SSH and protocol features:
+
+```bash
+cargo build --release --features ssh,proto
+```
+
+With this build, all optimal settings are enabled by default:
+```bash
+dedups ssh:host:/path
+```
+
+You can be explicit about using these features:
+```bash
+dedups ssh:host:/path --use-ssh-tunnel --tunnel-api-mode --use-protobuf --use-compression
+```
+
+Or disable the tunnel mode (not recommended):
+```bash
+dedups ssh:host:/path --no-use-ssh-tunnel
+```
+
+## Run the Example
+
+To test this functionality, run the included example script:
+
+```bash
+bash scripts/ssh_api_example.sh
+```
+
+This demonstrates both modes of operation and explains the advantages of tunnel API mode.
+
+## Troubleshooting SSH Connections
+
+If you encounter SSH connection issues:
+
+1. Make sure the host is configured in your `~/.ssh/config`
+2. Verify you have SSH key access to the host
+3. Ensure the host is reachable
+4. Check that the remote path exists
+
+# Local API Server Mode
+
+You can also run dedups in server mode locally for direct API communication:
+
+```bash
+# Start a dedups server on port 29876
+dedups --server-mode --port 29876 /path/to/directory
+
+# Connect to the server (in another terminal)
+dedups /path/to/directory --port 29876 --json
+```
+
+To test this functionality and see protocol communication in action:
+
+```bash
+# Run the local API test script
+./scripts/local_api_test.sh
+
+# For advanced protocol testing
+./scripts/local_api_test.sh --advanced
+```
+
+This demonstrates the same API protocol that is used automatically when working with SSH paths. For detailed protocol documentation, see [docs/api-protocol.md](docs/api-protocol.md).
