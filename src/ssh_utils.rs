@@ -503,25 +503,41 @@ impl SshProtocol {
         Ok(())
     }
     
+    /// Helper: extract JSON lines from mixed output
+    fn extract_json_lines(text: &str) -> Option<String> {
+        let mut json_lines = Vec::new();
+        for line in text.lines() {
+            let trimmed = line.trim_start_matches('\u{1e}').trim(); // strip RS char if present
+            if trimmed.starts_with('{') && trimmed.ends_with('}') {
+                json_lines.push(trimmed);
+            }
+        }
+        if json_lines.is_empty() {
+            None
+        } else {
+            Some(json_lines.join("\n"))
+        }
+    }
+
     /// Execute dedups command on remote system with support for streaming JSON output
     /// Uses a dedicated socket/tunnel approach for better streaming
     pub fn execute_dedups(&self, args: &[&str], cli: &crate::Cli) -> Result<String> {
         // Check if we're using JSON output to adjust approach
         let using_json = args.contains(&"--json");
-        
+
         if using_json && cli.use_ssh_tunnel {
             log::debug!("Using SSH tunnel for JSON streaming (use_ssh_tunnel=true)");
-            self.execute_dedups_with_tunnel(args)
+            self.execute_dedups_with_tunnel(args, cli)
         } else {
             if using_json {
                 log::debug!("Using standard SSH for JSON (use_ssh_tunnel=false)");
             }
-            self.execute_dedups_standard(args)
+            self.execute_dedups_standard(args, cli)
         }
     }
 
     /// Execute dedups command using a socket tunnel for reliable JSON streaming
-    fn execute_dedups_with_tunnel(&self, args: &[&str]) -> Result<String> {
+    fn execute_dedups_with_tunnel(&self, args: &[&str], cli: &crate::Cli) -> Result<String> {
         log::debug!("Executing remote dedups with tunnel for reliable JSON streaming");
         
         // First check if netcat is available on the remote system
@@ -534,12 +550,12 @@ impl SshProtocol {
             Ok(output) => {
                 if output.trim() == "MISSING" {
                     log::warn!("netcat (nc) not found on remote system, falling back to standard SSH");
-                    return self.execute_dedups_standard(args);
+                    return self.execute_dedups_standard(args, cli);
                 }
             },
             Err(e) => {
                 log::warn!("Failed to check for netcat: {}, falling back to standard SSH", e);
-                return self.execute_dedups_standard(args);
+                return self.execute_dedups_standard(args, cli);
             }
         }
         
@@ -547,6 +563,11 @@ impl SshProtocol {
         let local_port = find_available_port()?;
         log::debug!("Using local port {} for SSH tunnel", local_port);
         
+        // Forward RUST_LOG if set
+        let rust_log_export = if let Ok(val) = std::env::var("RUST_LOG") {
+            format!("export RUST_LOG=\"{}\";", val)
+        } else { String::new() };
+
         // Set up the socket server on the remote system
         let socket_setup_cmd = format!(
             r#"
@@ -558,6 +579,7 @@ impl SshProtocol {
             (
                 # Set up environment
                 export PATH="$HOME/.local/bin:$PATH"
+                {rust_log_export}
                 [ -f "$HOME/.bashrc" ] && source "$HOME/.bashrc"
                 [ -f "$HOME/.profile" ] && source "$HOME/.profile"
                 
@@ -580,7 +602,8 @@ impl SshProtocol {
             echo "$SOCKET_DIR"
             "#,
             args.join(" "),
-            local_port
+            local_port,
+            rust_log_export = rust_log_export
         );
         
         // Build SSH tunnel command
@@ -687,21 +710,21 @@ impl SshProtocol {
         
         if output.is_empty() {
             log::warn!("No output received from remote dedups via tunnel");
-            
-            // Generate a JSON error
-            let error_json = format!(
-                "{{\"type\":\"error\",\"message\":\"No output received from remote dedups\",\"code\":1}}"
-            );
-            
+            let error_json = format!("{{\"type\":\"error\",\"message\":\"No output received from remote dedups\",\"code\":1}}");
             println!("{}", error_json);
             output = error_json;
+        }
+        
+        // Extract JSON lines if mixed output
+        if let Some(json_only) = Self::extract_json_lines(&output) {
+            return Ok(json_only);
         }
         
         Ok(output)
     }
     
     /// Standard execution method for non-JSON commands
-    fn execute_dedups_standard(&self, args: &[&str]) -> Result<String> {
+    fn execute_dedups_standard(&self, args: &[&str], cli: &crate::Cli) -> Result<String> {
         // Build SSH command
         let mut ssh_cmd = vec!["ssh".to_string()];
         
@@ -737,15 +760,13 @@ impl SshProtocol {
         ssh_cmd.push(host);
         
         // Set up environment and command
-        let setup_env = r#"
-            export PATH="$HOME/.local/bin:$PATH"
-            if [ -f "$HOME/.bashrc" ]; then
-                source "$HOME/.bashrc"
-            fi
-            if [ -f "$HOME/.profile" ]; then
-                source "$HOME/.profile"
-            fi
-        "#;
+        let rust_log_export = std::env::var("RUST_LOG").ok();
+        let setup_env = format!(
+            "export PATH=\"$HOME/.local/bin:$PATH\"; {} if [ -f \"$HOME/.bashrc\" ]; then source \"$HOME/.bashrc\"; fi; if [ -f \"$HOME/.profile\" ]; then source \"$HOME/.profile\"; fi;",
+            rust_log_export
+                .map(|v| format!("export RUST_LOG=\"{}\";", v))
+                .unwrap_or_default()
+        );
         
         // Build the command, adding unbuffer for JSON mode
         let command = if using_json {
@@ -767,9 +788,9 @@ impl SshProtocol {
             )
         } else {
             format!(
-                "{}\ndedups {}",
-                setup_env,
-                args.join(" ")
+            "{}\ndedups {}",
+            setup_env,
+            args.join(" ")
             )
         };
         
@@ -858,43 +879,45 @@ impl SshProtocol {
             if Self::is_valid_json(&output) {
                 log::debug!("Received valid JSON from remote dedups");
                 return Ok(output);
+            } else if let Some(json_only) = Self::extract_json_lines(&output) {
+                log::debug!("Extracted {} JSON lines from mixed output", json_only.lines().count());
+                return Ok(json_only);
             } else {
-                log::warn!("Remote output not valid JSON, creating error response");
-                // Format as an error response
+                log::warn!("Remote output did not contain JSON, creating error response");
                 let error_json = format!("{{\"type\":\"error\",\"message\":\"Remote output not valid JSON\",\"code\":1}}");
                 println!("{}", error_json);
                 return Ok(error_json);
             }
         } else {
             // Standard non-JSON execution
-            let output = std::process::Command::new(&ssh_cmd[0])
-                .args(&ssh_cmd[1..])
-                .output()
-                .with_context(|| format!("Failed to execute command on host '{}'", self.remote.host))?;
-                
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                
-                if !stderr.is_empty() {
-                    log::error!("Remote command failed with stderr: {}", stderr);
-                    return Err(anyhow::anyhow!(
-                        "Remote dedups command failed: {}",
-                        stderr
-                    ));
-                } else {
-                    log::error!("Remote command failed with output: {}", stdout);
-                    return Err(anyhow::anyhow!(
-                        "Remote dedups command failed: {}",
-                        stdout
-                    ));
-                }
-            }
+        let output = std::process::Command::new(&ssh_cmd[0])
+            .args(&ssh_cmd[1..])
+            .output()
+            .with_context(|| format!("Failed to execute command on host '{}'", self.remote.host))?;
             
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
             let stdout = String::from_utf8_lossy(&output.stdout);
-            log::debug!("Command output: {}", stdout);
             
-            Ok(stdout.into_owned())
+            if !stderr.is_empty() {
+                log::error!("Remote command failed with stderr: {}", stderr);
+                return Err(anyhow::anyhow!(
+                    "Remote dedups command failed: {}",
+                    stderr
+                ));
+            } else {
+                log::error!("Remote command failed with output: {}", stdout);
+                return Err(anyhow::anyhow!(
+                    "Remote dedups command failed: {}",
+                    stdout
+                ));
+            }
+        }
+        
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        log::debug!("Command output: {}", stdout);
+        
+        Ok(stdout.into_owned())
         }
     }
     

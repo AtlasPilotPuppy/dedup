@@ -39,13 +39,13 @@ jobs:
       if: matrix.os == 'ubuntu-latest'
       run: |
         sudo apt-get update
-        sudo apt-get install -y libssl-dev pkg-config docker.io
+        sudo apt-get install -y libssl-dev pkg-config docker.io netcat-openbsd coreutils
 
     - name: Install macOS dependencies
       if: matrix.os == 'macos-latest'
       run: |
         brew update
-        brew install openssl@3 docker
+        brew install openssl@3 docker netcat coreutils
         echo "OPENSSL_DIR=$(brew --prefix openssl@3)" >> $GITHUB_ENV
 
     # Start Docker service on Linux
@@ -80,29 +80,52 @@ jobs:
     - name: Run SSH integration tests (Unix)
       if: matrix.os != 'windows-latest'
       run: |
-        # Build test container
+        # Build and start test container
         docker build -t dedups-test -f Dockerfile.test .
+        docker run -d --name dedups-test-container -p 2222:22 dedups-test
         
-        # Set up test environment
-        chmod +x test_env/setup_test_env.sh
-        ./test_env/setup_test_env.sh
+        # Wait for SSH to be ready
+        attempts=0
+        while ! nc -z localhost 2222 && [ $attempts -lt 15 ]; do
+          sleep 1
+          ((attempts++))
+        done
+        
+        # Set up SSH key
+        mkdir -p ~/.ssh
+        ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519 -N ""
+        
+        # Fix permissions on SSH keys
+        chmod 600 ~/.ssh/id_ed25519
+        chmod 644 ~/.ssh/id_ed25519.pub
+        
+        # Add container to known hosts
+        ssh-keyscan -p 2222 localhost >> ~/.ssh/known_hosts
+        
+        # Copy SSH key to container
+        docker cp ~/.ssh/id_ed25519.pub dedups-test-container:/home/testuser/.ssh/authorized_keys
+        docker exec dedups-test-container bash -c "chown testuser:testuser /home/testuser/.ssh/authorized_keys && chmod 600 /home/testuser/.ssh/authorized_keys"
+        
+        # Create test files
+        docker exec dedups-test-container bash -c "mkdir -p /home/testuser/test_data && touch /home/testuser/test_data/test1.txt /home/testuser/test_data/test2.txt"
         
         # Run SSH tests
-        cargo test --features ssh --test ssh_integration_tests -- --ignored --nocapture
+        cargo test --features ssh --test ssh_integration_tests
+        cargo test --features ssh --test ssh_json_streaming_test
       env:
         DOCKER_BUILDKIT: 1
 
     # Run standard integration tests (OS-specific)
     - name: Run integration tests (Ubuntu)
       if: matrix.os == 'ubuntu-latest'
-      run: cargo test --test '*' --features linux
+      run: cargo test --test integration_tests --features all
       env:
         RUSTFLAGS: "-C target-cpu=native"
 
     - name: Run integration tests (macOS)
       if: matrix.os == 'macos-latest'
-      run: cargo test --test '*' --features linux
+      run: cargo test --test integration_tests --features all
 
     - name: Run integration tests (Windows)
       if: matrix.os == 'windows-latest'
-      run: cargo test --test '*' --features test_mode 
+      run: cargo test --test integration_tests --features test_mode 
