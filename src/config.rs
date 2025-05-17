@@ -40,7 +40,7 @@ pub struct DedupConfig {
     /// Default output format
     #[serde(default = "default_format")]
     pub format: String,
-    
+
     /// Whether to output results in JSON format to stdout
     #[serde(default)]
     pub json: bool,

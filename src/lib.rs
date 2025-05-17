@@ -105,7 +105,7 @@ pub struct Cli {
     /// Output format for the duplicates file.
     #[clap(short, long, value_parser = clap::builder::PossibleValuesParser::new(["json", "toml"]), default_value = "json", help = "Format for the output file [json|toml]")]
     pub format: String,
-    
+
     /// Output results in JSON format to stdout
     #[clap(long, help = "Output results in JSON format to stdout")]
     pub json: bool,
@@ -234,42 +234,67 @@ pub struct Cli {
 
     /// Allow installation of dedups on remote systems if not found
     #[cfg(feature = "ssh")]
-    #[clap(long, default_value_t = true, help = "Allow installation of dedups on remote systems")]
+    #[clap(
+        long,
+        default_value_t = true,
+        help = "Allow installation of dedups on remote systems"
+    )]
     pub allow_remote_install: bool,
 
     /// SSH specific options for remote connections (comma-separated)
     #[cfg(feature = "ssh")]
-    #[clap(long, help = "SSH options to pass to the ssh command (comma-separated)")]
+    #[clap(
+        long,
+        help = "SSH options to pass to the ssh command (comma-separated)"
+    )]
     pub ssh_options: Vec<String>,
 
     /// Rsync specific options for file transfers (comma-separated)
     #[cfg(feature = "ssh")]
-    #[clap(long, help = "Rsync options to pass to the rsync command (comma-separated)")]
+    #[clap(
+        long,
+        help = "Rsync options to pass to the rsync command (comma-separated)"
+    )]
     pub rsync_options: Vec<String>,
 
     /// Whether to attempt to use the remote dedups (if available) for operations
     #[cfg(feature = "ssh")]
-    #[clap(long, default_value_t = true, help = "Use remote dedups instance if available")]
+    #[clap(
+        long,
+        default_value_t = true,
+        help = "Use remote dedups instance if available"
+    )]
     pub use_remote_dedups: bool,
 
     /// Whether to use sudo for remote installation (if available)
     #[cfg(feature = "ssh")]
-    #[clap(long, help = "Use sudo for remote installation (will prompt for password)")]
+    #[clap(
+        long,
+        help = "Use sudo for remote installation (will prompt for password)"
+    )]
     pub use_sudo: bool,
 
     /// Whether to use SSH tunneling for JSON streaming (more reliable than plain SSH)
     #[cfg(feature = "ssh")]
-    #[clap(long, default_value_t = true, help = "Use SSH tunneling for JSON streaming (more reliable)")]
+    #[clap(
+        long,
+        default_value_t = true,
+        help = "Use SSH tunneling for JSON streaming (more reliable)"
+    )]
     pub use_ssh_tunnel: bool,
 
     /// Run in server mode to listen for commands over a socket/stdin
     #[cfg(feature = "ssh")]
     #[clap(long, help = "Run in server mode on the specified port")]
     pub server_mode: bool,
-    
+
     /// Port to use for server mode
     #[cfg(feature = "ssh")]
-    #[clap(long, default_value = "0", help = "Port to use for server mode (0 = auto)")]
+    #[clap(
+        long,
+        default_value = "0",
+        help = "Port to use for server mode (0 = auto)"
+    )]
     pub port: u16,
 }
 
@@ -332,7 +357,7 @@ impl Cli {
         if self.format.is_empty() {
             self.format = config.format;
         }
-        
+
         // Apply JSON setting from config if not explicitly set on command line
         // Note: Since json is a bool, we need to check if the config value is true
         // and the CLI value is false (default)
@@ -400,22 +425,22 @@ impl Cli {
             if self.ssh_options.is_empty() && !config.ssh.ssh_options.is_empty() {
                 self.ssh_options = config.ssh.ssh_options.clone();
             }
-            
+
             if self.rsync_options.is_empty() && !config.ssh.rsync_options.is_empty() {
                 self.rsync_options = config.ssh.rsync_options.clone();
             }
-            
+
             // Boolean options should use config value if not explicitly changed
             if self.allow_remote_install == true && config.ssh.allow_remote_install == false {
                 // If config is false but CLI default is true, use config value
                 self.allow_remote_install = config.ssh.allow_remote_install;
             }
-            
+
             if self.use_remote_dedups == true && config.ssh.use_remote_dedups == false {
                 // If config is false but CLI default is true, use config value
                 self.use_remote_dedups = config.ssh.use_remote_dedups;
             }
-            
+
             if self.use_ssh_tunnel == true && config.ssh.use_ssh_tunnel == false {
                 // If config is false but CLI default is true, use config value
                 self.use_ssh_tunnel = config.ssh.use_ssh_tunnel;
@@ -464,11 +489,11 @@ mod tests {
 
 // Add the new protocol-related modules conditionally when SSH feature is enabled
 #[cfg(feature = "ssh")]
+pub mod client;
+#[cfg(feature = "ssh")]
 pub mod protocol;
 #[cfg(feature = "ssh")]
 pub mod server;
-#[cfg(feature = "ssh")]
-pub mod client;
 
 // Export the primary types
 pub use config::DedupConfig as Config;

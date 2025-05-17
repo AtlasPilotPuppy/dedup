@@ -10,6 +10,8 @@ use log;
 #[cfg(feature = "ssh")]
 use serde_json;
 #[cfg(feature = "ssh")]
+use std::io::{BufRead, BufReader, Write};
+#[cfg(feature = "ssh")]
 use std::net::{TcpListener, TcpStream};
 #[cfg(feature = "ssh")]
 use std::process::{Command, Stdio};
@@ -22,8 +24,6 @@ use std::sync::{
 use std::thread;
 #[cfg(feature = "ssh")]
 use std::time::Duration;
-#[cfg(feature = "ssh")]
-use std::io::{BufRead, BufReader, Write};
 
 /// Server implementation that listens for client commands and executes dedups operations
 #[cfg(feature = "ssh")]
@@ -43,10 +43,8 @@ impl DedupServer {
 
     /// Start the server on the given port
     pub fn start(&mut self) -> Result<()> {
-        let listener =
-            TcpListener::bind(format!("127.0.0.1:{}", self.port)).with_context(|| {
-                format!("Failed to bind to port {} for dedups server", self.port)
-            })?;
+        let listener = TcpListener::bind(format!("127.0.0.1:{}", self.port))
+            .with_context(|| format!("Failed to bind to port {} for dedups server", self.port))?;
 
         listener
             .set_nonblocking(true)
@@ -101,7 +99,10 @@ impl DedupServer {
                         Self::handle_command(&mut protocol, &message)?;
                     }
                     _ => {
-                        log::warn!("Received unexpected message type: {:?}", message.message_type);
+                        log::warn!(
+                            "Received unexpected message type: {:?}",
+                            message.message_type
+                        );
                         Self::send_error(
                             &mut protocol,
                             "Unexpected message type, expected command",
@@ -248,4 +249,4 @@ pub fn run_server(port: u16) -> Result<()> {
 #[cfg(feature = "ssh")]
 pub fn check_server_running(port: u16) -> bool {
     TcpStream::connect(format!("127.0.0.1:{}", port)).is_ok()
-} 
+}

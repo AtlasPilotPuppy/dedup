@@ -1,9 +1,9 @@
 #[cfg(feature = "ssh")]
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 #[cfg(feature = "ssh")]
 use ssh2::Session;
 use std::path::{Path, PathBuf};
-use serde::{Deserialize, Serialize};
 use std::process::{Command, Output, Stdio};
 
 /// Represents a remote location parsed from an SSH URI
@@ -100,23 +100,23 @@ impl RemoteLocation {
     /// Generate SSH command with options
     pub fn ssh_command(&self) -> Vec<String> {
         let mut cmd = vec!["ssh".to_string()];
-        
+
         // Add port if specified
         if let Some(port) = self.port {
             cmd.push("-p".to_string());
             cmd.push(port.to_string());
         }
-        
+
         // Add custom SSH options
         cmd.extend(self.ssh_options.clone());
-        
+
         // Add host with optional user
         let host = if let Some(user) = &self.username {
             format!("{}@{}", user, self.host)
         } else {
             self.host.clone()
         };
-        
+
         cmd.push(host);
         cmd
     }
@@ -124,7 +124,7 @@ impl RemoteLocation {
     /// Generate Rsync command with options for copying files
     pub fn rsync_command(&self, source: &Path, dest: &Path, is_remote_source: bool) -> Vec<String> {
         let mut cmd = vec!["rsync".to_string(), "-avz".to_string()];
-        
+
         // Add port if specified
         if let Some(port) = self.port {
             cmd.push("-e".to_string());
@@ -135,32 +135,32 @@ impl RemoteLocation {
             cmd.push("-e".to_string());
             cmd.push(format!("ssh {}", ssh_opts));
         }
-        
+
         // Add custom Rsync options
         cmd.extend(self.rsync_options.clone());
-        
+
         // Format source and destination with proper remote syntax
         let host_prefix = if let Some(user) = &self.username {
             format!("{}@{}", user, self.host)
         } else {
             self.host.clone()
         };
-        
+
         let source_str = if is_remote_source {
             format!("{}:{}", host_prefix, source.display())
         } else {
             source.display().to_string()
         };
-        
+
         let dest_str = if !is_remote_source {
             format!("{}:{}", host_prefix, dest.display())
         } else {
             dest.display().to_string()
         };
-        
+
         cmd.push(source_str);
         cmd.push(dest_str);
-        
+
         cmd
     }
 
@@ -169,7 +169,7 @@ impl RemoteLocation {
         // Check if SSH_COMMAND environment variable is set to use custom SSH command
         if let Ok(ssh_command) = std::env::var("SSH_COMMAND") {
             log::debug!("Using SSH command from environment: {}", ssh_command);
-            
+
             // Build full command with custom SSH command
             let host_part = if let Some(user) = &self.username {
                 if let Some(port) = self.port {
@@ -184,20 +184,20 @@ impl RemoteLocation {
                     self.host.clone()
                 }
             };
-            
+
             // Execute with custom SSH wrapper
             let output = std::process::Command::new(&ssh_command)
                 .arg(&host_part)
                 .arg(command)
                 .output()
                 .with_context(|| format!("Failed to execute SSH command using wrapper. Please verify SSH access to host '{}' is configured correctly.", self.host))?;
-            
+
             let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
             let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-            
+
             log::debug!("SSH command stdout: {}", stdout);
             log::debug!("SSH command stderr: {}", stderr);
-            
+
             if !output.status.success() {
                 log::error!("SSH command failed. Stderr: {}", stderr);
                 log::error!("SSH command stdout: {}", stdout);
@@ -207,17 +207,17 @@ impl RemoteLocation {
                     stderr
                 ));
             }
-            
+
             Ok(stdout)
         } else {
             // Standard SSH approach
             let mut ssh_cmd = vec!["ssh".to_string()];
-            
+
             // Add port if specified
             if let Some(port) = self.port {
                 ssh_cmd.extend(vec!["-p".to_string(), port.to_string()]);
             }
-            
+
             // Add SSH config file if specified in environment
             if let Ok(config_file) = std::env::var("SSH_CONFIG_FILE") {
                 if !config_file.is_empty() {
@@ -226,9 +226,12 @@ impl RemoteLocation {
                 }
             } else {
                 // Always use system SSH config by default
-                ssh_cmd.extend(vec!["-F".to_string(), shellexpand::tilde("~/.ssh/config").into_owned()]);
+                ssh_cmd.extend(vec![
+                    "-F".to_string(),
+                    shellexpand::tilde("~/.ssh/config").into_owned(),
+                ]);
             }
-            
+
             // Add any custom SSH options
             for opt in &self.ssh_options {
                 // Check if it's a key=value pair
@@ -237,13 +240,13 @@ impl RemoteLocation {
                     if parts.len() == 2 {
                         let key = parts[0];
                         let value = parts[1];
-                        
+
                         // Special handling for common options
                         match key {
                             "IdentityFile" => {
                                 ssh_cmd.push("-i".to_string());
                                 ssh_cmd.push(value.to_string());
-                            },
+                            }
                             _ => {
                                 // Generic option
                                 ssh_cmd.push("-o".to_string());
@@ -259,7 +262,7 @@ impl RemoteLocation {
                     ssh_cmd.push(opt.clone());
                 }
             }
-            
+
             // Add host with optional user
             let host = if let Some(user) = &self.username {
                 format!("{}@{}", user, self.host)
@@ -267,25 +270,25 @@ impl RemoteLocation {
                 self.host.clone()
             };
             ssh_cmd.push(host);
-            
+
             // Add the command
             ssh_cmd.push(command.to_string());
-            
+
             // Log the command being executed
             log::debug!("Executing SSH command: {}", ssh_cmd.join(" "));
-            
+
             // Execute the command
             let output = std::process::Command::new(&ssh_cmd[0])
                 .args(&ssh_cmd[1..])
                 .output()
                 .with_context(|| format!("Failed to execute SSH command. Please verify SSH access to host '{}' is configured correctly.", self.host))?;
-            
+
             let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
             let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-            
+
             log::debug!("SSH command stdout: {}", stdout);
             log::debug!("SSH command stderr: {}", stderr);
-            
+
             if !output.status.success() {
                 log::error!("SSH command failed. Stderr: {}", stderr);
                 log::error!("SSH command stdout: {}", stdout);
@@ -295,15 +298,18 @@ impl RemoteLocation {
                     stderr
                 ));
             }
-            
+
             Ok(stdout)
         }
     }
-    
+
     /// Check if dedups is installed on the remote system
     pub async fn check_dedups_installed(&self) -> Result<Option<String>> {
-        log::info!("Checking if dedups is installed on remote host '{}'...", self.host);
-        
+        log::info!(
+            "Checking if dedups is installed on remote host '{}'...",
+            self.host
+        );
+
         // Set up environment and check for dedups
         let check_cmd = r#"
             export PATH="$HOME/.local/bin:$PATH"
@@ -315,13 +321,17 @@ impl RemoteLocation {
             fi
             which dedups 2>/dev/null || echo 'not found'
         "#;
-        
+
         match self.run_command(check_cmd) {
             Ok(output) => {
                 let output_trim = output.trim();
                 // Sometimes 'which' may output messages before 'not found'. Check if any line contains dedups path.
                 if !output_trim.is_empty() && !output_trim.contains("not found") {
-                    log::info!("Found dedups on remote host '{}' at: {}", self.host, output_trim);
+                    log::info!(
+                        "Found dedups on remote host '{}' at: {}",
+                        self.host,
+                        output_trim
+                    );
                     // Take first line as path
                     let first_line = output_trim.lines().next().unwrap_or("").to_string();
                     Ok(Some(first_line))
@@ -336,11 +346,14 @@ impl RemoteLocation {
             }
         }
     }
-    
+
     /// Install dedups on the remote system
     pub fn install_dedups(&self, cli: &crate::Cli) -> Result<String> {
-        log::info!("Attempting to install dedups on remote host '{}'...", self.host);
-        
+        log::info!(
+            "Attempting to install dedups on remote host '{}'...",
+            self.host
+        );
+
         // First check if we want to use sudo and if it's available
         let has_sudo = if cli.use_sudo {
             match self.run_command("sudo -n true 2>/dev/null && echo 'yes' || echo 'no'") {
@@ -361,16 +374,19 @@ impl RemoteLocation {
             log::info!("Will install to user's ~/.local/bin");
             "~/.local/bin"
         };
-        
+
         // Create install directory if it doesn't exist
         let mkdir_cmd = if has_sudo {
-            format!("sudo mkdir -p {} && sudo chown $USER {}", install_dir, install_dir)
+            format!(
+                "sudo mkdir -p {} && sudo chown $USER {}",
+                install_dir, install_dir
+            )
         } else {
             format!("mkdir -p {}", install_dir)
         };
         log::debug!("Creating installation directory: {}", install_dir);
         self.run_command(&mkdir_cmd)?;
-        
+
         // Set up PATH for both current session and future sessions
         let path_setup = r#"
             if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
@@ -380,17 +396,17 @@ impl RemoteLocation {
                 echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.profile
             fi
         "#;
-        
+
         if let Err(e) = self.run_command(path_setup) {
             log::warn!("Failed to update PATH in shell config: {}", e);
         }
-        
+
         // Download and install dedups
         let install_cmd = format!(
             "curl -sSL https://raw.githubusercontent.com/AtlasPilotPuppy/dedup/main/install.sh | {} bash -s -- --ssh",
             if has_sudo { "sudo -S" } else { "" }
         );
-        
+
         log::info!("Downloading and installing dedups on remote host...");
         match self.run_command(&install_cmd) {
             Ok(_) => {
@@ -405,16 +421,24 @@ impl RemoteLocation {
                     fi
                     which dedups || echo 'not found'
                 "#;
-                
+
                 match self.run_command(verify_cmd) {
                     Ok(path) => {
                         let path = path.trim();
                         if path != "not found" {
-                            log::info!("Successfully installed dedups on remote host '{}' at: {}", self.host, path);
+                            log::info!(
+                                "Successfully installed dedups on remote host '{}' at: {}",
+                                self.host,
+                                path
+                            );
                             Ok(path.to_string())
                         } else {
-                            log::error!("Installation appeared to succeed but dedups not found in PATH");
-                            Err(anyhow::anyhow!("Installation verification failed: dedups not found in PATH"))
+                            log::error!(
+                                "Installation appeared to succeed but dedups not found in PATH"
+                            );
+                            Err(anyhow::anyhow!(
+                                "Installation verification failed: dedups not found in PATH"
+                            ))
                         }
                     }
                     Err(e) => {
@@ -424,7 +448,11 @@ impl RemoteLocation {
                 }
             }
             Err(e) => {
-                log::error!("Failed to install dedups on remote host '{}': {}", self.host, e);
+                log::error!(
+                    "Failed to install dedups on remote host '{}': {}",
+                    self.host,
+                    e
+                );
                 Err(anyhow::anyhow!(
                     "Failed to install dedups on remote host '{}': {}",
                     self.host,
@@ -436,8 +464,11 @@ impl RemoteLocation {
 
     /// Check if a remote directory exists
     pub fn check_directory_exists(&self) -> Result<bool> {
-        log::info!("Checking if remote directory exists: {}", self.path.display());
-        
+        log::info!(
+            "Checking if remote directory exists: {}",
+            self.path.display()
+        );
+
         // First try to establish basic SSH connectivity
         let test_cmd = "echo 'SSH connection test successful'";
         match self.run_command(test_cmd) {
@@ -449,14 +480,19 @@ impl RemoteLocation {
                     1. The host '{}' is configured in ~/.ssh/config\n\
                     2. You have SSH key access to the host\n\
                     3. The host is reachable\n\
-                    Error: {}", 
-                    self.host, self.host, e
+                    Error: {}",
+                    self.host,
+                    self.host,
+                    e
                 ));
             }
         }
 
         // Then check if the directory exists
-        let check_cmd = format!("test -d '{}' && echo 'EXISTS' || echo 'NOTFOUND'", self.path.display());
+        let check_cmd = format!(
+            "test -d '{}' && echo 'EXISTS' || echo 'NOTFOUND'",
+            self.path.display()
+        );
         match self.run_command(&check_cmd) {
             Ok(output) => {
                 let exists = output.trim() == "EXISTS";
@@ -483,9 +519,9 @@ fn get_default_key_files() -> Vec<PathBuf> {
         Some(home) => home,
         None => return Vec::new(),
     };
-    
+
     let ssh_dir = home.join(".ssh");
-    
+
     vec![
         ssh_dir.join("id_rsa"),
         ssh_dir.join("id_dsa"),
@@ -531,26 +567,30 @@ impl SshProtocol {
             remote,
         }
     }
-    
+
     /// Connect to the remote host
     pub fn connect(&mut self) -> Result<()> {
-        log::debug!("Starting SSH connection to host '{}' with options: {:?}", self.remote.host, self.remote.ssh_options);
-        
+        log::debug!(
+            "Starting SSH connection to host '{}' with options: {:?}",
+            self.remote.host,
+            self.remote.ssh_options
+        );
+
         // Build SSH command
         let mut ssh_cmd = vec!["ssh".to_string()];
-        
+
         // Add port if specified
         if let Some(port) = self.remote.port {
             log::debug!("Using custom port: {}", port);
             ssh_cmd.extend(vec!["-p".to_string(), port.to_string()]);
         }
-        
+
         // Add custom SSH options
         if !self.remote.ssh_options.is_empty() {
             log::debug!("Adding custom SSH options: {:?}", self.remote.ssh_options);
             ssh_cmd.extend(self.remote.ssh_options.clone());
         }
-        
+
         // Add host with optional user
         let host = if let Some(user) = &self.remote.username {
             log::debug!("Using username: {}", user);
@@ -559,37 +599,39 @@ impl SshProtocol {
             self.remote.host.clone()
         };
         ssh_cmd.push(host);
-        
+
         // Test SSH connection first
         let test_cmd = format!("{} echo 'SSH connection test'", ssh_cmd.join(" "));
         log::debug!("Testing SSH connection with command: {}", test_cmd);
-        
+
         let output = std::process::Command::new("sh")
             .arg("-c")
             .arg(&test_cmd)
             .output()
-            .with_context(|| format!("Failed to execute SSH test command for host '{}'", self.remote.host))?;
-            
+            .with_context(|| {
+                format!(
+                    "Failed to execute SSH test command for host '{}'",
+                    self.remote.host
+                )
+            })?;
+
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let stdout = String::from_utf8_lossy(&output.stdout);
             log::error!("SSH test command failed. Stderr: {}", stderr);
             log::error!("SSH test command stdout: {}", stdout);
-            return Err(anyhow::anyhow!(
-                "SSH connection test failed: {}",
-                stderr
-            ));
+            return Err(anyhow::anyhow!("SSH connection test failed: {}", stderr));
         }
-        
+
         log::debug!("SSH connection test successful");
-        
+
         // Create new SSH session for future use
         let sess = Session::new()?;
         self.session = Some(sess);
-        
+
         Ok(())
     }
-    
+
     /// Helper: extract JSON lines from mixed output
     fn extract_json_lines(text: &str) -> Option<String> {
         let mut json_lines = Vec::new();
@@ -611,7 +653,7 @@ impl SshProtocol {
     pub fn execute_dedups(&self, args: &[&str], cli: &crate::Cli) -> Result<String> {
         // Check if we're using JSON output to adjust approach
         let using_json = args.iter().any(|&a| a == "--json") || cli.json;
-        
+
         // If we're using JSON output and SSH tunnel is enabled in config, use tunnel-based approach
         if using_json && cli.use_ssh_tunnel {
             self.execute_dedups_with_tunnel(args, cli)
@@ -627,29 +669,31 @@ impl SshProtocol {
         use crate::client::DedupClient;
         use crate::protocol::find_available_port;
         use std::collections::HashMap;
-        
+
         log::debug!("Executing dedups via SSH tunnel");
-        
+
         // Find an available local port for the tunnel
         let local_port = find_available_port(10000, 11000)
             .context("Could not find an available port for SSH tunnel")?;
-        
+
         // Forward RUST_LOG if set
         let rust_log_export = if let Ok(val) = std::env::var("RUST_LOG") {
             format!("export RUST_LOG=\"{}\";", val)
-        } else { String::new() };
-        
+        } else {
+            String::new()
+        };
+
         // Set up tunnel in background
         let _host = self.remote.host.clone();
         let _username = self.remote.username.clone().unwrap_or_default();
         let _port = self.remote.port;
-        
+
         // Set up a temporary port forwarding with SSH
         let port_forwarding = format!("{}:localhost:{}", local_port, local_port);
         let mut ssh_opts = vec!["-L", &port_forwarding];
         let ssh_options = self.get_ssh_options(cli);
         ssh_opts.extend(ssh_options.iter().map(|s| s.as_str()));
-        
+
         let remote_addr = if let Some(user) = &self.remote.username {
             if let Some(port) = self.remote.port {
                 format!("{}@{}:{}", user, self.remote.host, port)
@@ -659,7 +703,7 @@ impl SshProtocol {
         } else {
             self.remote.host.clone()
         };
-        
+
         // Start the server process on the remote system
         let server_cmd = format!(
             r#"ssh {ssh_options} {remote_addr} bash -c '{rust_log_export} export PATH="$HOME/.local/bin:$PATH"; if [ -f "$HOME/.bashrc" ]; then source "$HOME/.bashrc"; fi; dedups --server-mode --port {port}'"#,
@@ -668,9 +712,12 @@ impl SshProtocol {
             rust_log_export = rust_log_export,
             port = local_port
         );
-        
-        log::debug!("Starting SSH tunnel and server with command: {}", server_cmd);
-        
+
+        log::debug!(
+            "Starting SSH tunnel and server with command: {}",
+            server_cmd
+        );
+
         // Start the SSH tunnel in background
         let mut child = std::process::Command::new("bash")
             .arg("-c")
@@ -679,10 +726,10 @@ impl SshProtocol {
             .stderr(std::process::Stdio::piped())
             .spawn()
             .context("Failed to start SSH tunnel")?;
-        
+
         // Give server time to start
         std::thread::sleep(std::time::Duration::from_millis(500));
-        
+
         // Connect to the server via the tunnel
         let mut client = DedupClient::new("localhost".to_string(), local_port);
         if let Err(e) = client.connect() {
@@ -690,16 +737,16 @@ impl SshProtocol {
             let _ = child.kill();
             return Err(e);
         }
-        
+
         // Convert &[&str] to Vec<String>
         let args_vec: Vec<String> = args.iter().map(|&s| s.to_string()).collect();
-        
+
         // Set up environment variables to pass through
         let mut options = HashMap::new();
         if let Ok(log_val) = std::env::var("RUST_LOG") {
             options.insert("ENV_RUST_LOG".to_string(), log_val);
         }
-        
+
         // Execute command and get output
         let output = match client.execute_command("dedups".to_string(), args_vec, options) {
             Ok(out) => out,
@@ -709,42 +756,46 @@ impl SshProtocol {
                 return Err(e);
             }
         };
-        
+
         // Clean up
         let _ = client.disconnect();
         let _ = child.kill();
-        
+
         Ok(output)
     }
-    
+
     /// Standard execution method for non-JSON commands
     fn execute_dedups_standard(&self, args: &[&str], _cli: &crate::Cli) -> Result<String> {
         // Build SSH command
         let mut ssh_cmd = vec!["ssh".to_string()];
-        
+
         // Add port if specified
         if let Some(port) = self.remote.port {
             ssh_cmd.extend(vec!["-p".to_string(), port.to_string()]);
         }
-        
+
         // Add custom SSH options
         ssh_cmd.extend(self.remote.ssh_options.clone());
-        
+
         // Check if we're using JSON output
         let using_json = args.contains(&"--json");
-        
+
         // For JSON output, add options to minimize SSH noise
         if using_json {
             // Add options to prevent MOTD, banner, etc.
             ssh_cmd.extend(vec![
-                "-T".to_string(),            // Disable pseudo-terminal allocation
-                "-o".to_string(), "LogLevel=QUIET".to_string(), 
-                "-o".to_string(), "UserKnownHostsFile=/dev/null".to_string(),
-                "-o".to_string(), "StrictHostKeyChecking=no".to_string(),
-                "-o".to_string(), "BatchMode=yes".to_string(),
+                "-T".to_string(), // Disable pseudo-terminal allocation
+                "-o".to_string(),
+                "LogLevel=QUIET".to_string(),
+                "-o".to_string(),
+                "UserKnownHostsFile=/dev/null".to_string(),
+                "-o".to_string(),
+                "StrictHostKeyChecking=no".to_string(),
+                "-o".to_string(),
+                "BatchMode=yes".to_string(),
             ]);
         }
-        
+
         // Add host with optional user
         let host = if let Some(user) = &self.remote.username {
             format!("{}@{}", user, self.remote.host)
@@ -752,7 +803,7 @@ impl SshProtocol {
             self.remote.host.clone()
         };
         ssh_cmd.push(host);
-        
+
         // Set up environment and command
         let rust_log_export = std::env::var("RUST_LOG").ok();
         let setup_env = format!(
@@ -761,7 +812,7 @@ impl SshProtocol {
                 .map(|v| format!("export RUST_LOG=\"{}\";", v))
                 .unwrap_or_default()
         );
-        
+
         // Build the command, adding unbuffer for JSON mode
         let command = if using_json {
             format!(
@@ -781,100 +832,107 @@ impl SshProtocol {
                 args.join(" ")
             )
         } else {
-            format!(
-            "{}\ndedups {}",
-            setup_env,
-            args.join(" ")
-            )
+            format!("{}\ndedups {}", setup_env, args.join(" "))
         };
-        
+
         ssh_cmd.push(command);
-        
+
         log::debug!("Executing remote command: {}", ssh_cmd.join(" "));
-        
+
         // Use different approach for JSON to handle streaming
         if using_json {
             let mut command = std::process::Command::new(&ssh_cmd[0]);
             command.args(&ssh_cmd[1..]);
-            
+
             // Create pipes for stdout and stderr
-            let mut child = command.stdout(std::process::Stdio::piped())
-                                   .stderr(std::process::Stdio::piped())
-                                   .spawn()
-                                   .with_context(|| format!("Failed to execute command on host '{}'", self.remote.host))?;
-            
+            let mut child = command
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .with_context(|| {
+                    format!("Failed to execute command on host '{}'", self.remote.host)
+                })?;
+
             // Create a reader for stdout
             let stdout = child.stdout.take().unwrap();
             let mut reader = std::io::BufReader::new(stdout);
             let mut line = String::new();
             let mut output = String::new();
-            
+
             // Process each line as it comes in
             use std::io::BufRead;
-            
+
             while let Ok(bytes) = reader.read_line(&mut line) {
                 if bytes == 0 {
                     break; // End of stream
                 }
-                
+
                 // If this is valid JSON, pass it through immediately
                 if line.trim().starts_with('{') {
                     // Pass through the JSON line to stdout
                     println!("{}", line.trim());
                 }
-                
+
                 // Accumulate the full output
                 output.push_str(&line);
                 line.clear();
             }
-            
+
             // Check if the command succeeded
-            let status = child.wait()
-                .with_context(|| format!("Failed to wait for command on host '{}'", self.remote.host))?;
-                
+            let status = child.wait().with_context(|| {
+                format!("Failed to wait for command on host '{}'", self.remote.host)
+            })?;
+
             if !status.success() {
                 // Check if the output contains any valid JSON
                 if output.contains("\"type\":\"error\"") {
                     // Error was already output in JSON format, just return it
                     return Ok(output);
                 }
-                
+
                 // Get stderr
                 let mut stderr = String::new();
                 if let Some(mut stderr_handle) = child.stderr {
                     use std::io::Read;
                     let _ = stderr_handle.read_to_string(&mut stderr);
                 }
-                
+
                 if !stderr.is_empty() {
                     log::error!("Remote command failed with stderr: {}", stderr);
                     // Create a JSON error
-                    let error_json = format!("{{\"type\":\"error\",\"message\":\"{}\",\"code\":{}}}",
+                    let error_json = format!(
+                        "{{\"type\":\"error\",\"message\":\"{}\",\"code\":{}}}",
                         stderr.replace('\"', "\\\"").replace('\n', "\\n"),
-                        status.code().unwrap_or(1));
-                    
+                        status.code().unwrap_or(1)
+                    );
+
                     // Output error JSON and return it
                     println!("{}", error_json);
                     return Ok(error_json);
                 } else {
                     log::error!("Remote command failed with output: {}", output);
                     // Create a JSON error from the output
-                    let error_json = format!("{{\"type\":\"error\",\"message\":\"{}\",\"code\":{}}}",
+                    let error_json = format!(
+                        "{{\"type\":\"error\",\"message\":\"{}\",\"code\":{}}}",
                         output.replace('\"', "\\\"").replace('\n', "\\n"),
-                        status.code().unwrap_or(1));
-                    
+                        status.code().unwrap_or(1)
+                    );
+
                     // Output error JSON and return it
                     println!("{}", error_json);
                     return Ok(error_json);
                 }
             }
-            
+
             // Check if output is valid JSON
             if Self::is_valid_json(&output) {
                 log::debug!("Received valid JSON from remote dedups");
                 return Ok(output);
             } else if let Some(json_only) = Self::extract_json_lines(&output) {
-                log::debug!("Extracted {} JSON lines from mixed output", json_only.lines().count());
+                log::debug!(
+                    "Extracted {} JSON lines from mixed output",
+                    json_only.lines().count()
+                );
                 return Ok(json_only);
             } else {
                 log::warn!("Remote output did not contain JSON, creating error response");
@@ -884,55 +942,48 @@ impl SshProtocol {
             }
         } else {
             // Standard non-JSON execution
-        let output = std::process::Command::new(&ssh_cmd[0])
-            .args(&ssh_cmd[1..])
-            .output()
-            .with_context(|| format!("Failed to execute command on host '{}'", self.remote.host))?;
-            
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            
-            if !stderr.is_empty() {
-                log::error!("Remote command failed with stderr: {}", stderr);
-                return Err(anyhow::anyhow!(
-                    "Remote dedups command failed: {}",
-                    stderr
-                ));
-            } else {
-                log::error!("Remote command failed with output: {}", stdout);
-                return Err(anyhow::anyhow!(
-                    "Remote dedups command failed: {}",
-                    stdout
-                ));
+            let output = std::process::Command::new(&ssh_cmd[0])
+                .args(&ssh_cmd[1..])
+                .output()
+                .with_context(|| {
+                    format!("Failed to execute command on host '{}'", self.remote.host)
+                })?;
+
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let stdout = String::from_utf8_lossy(&output.stdout);
+
+                if !stderr.is_empty() {
+                    log::error!("Remote command failed with stderr: {}", stderr);
+                    return Err(anyhow::anyhow!("Remote dedups command failed: {}", stderr));
+                } else {
+                    log::error!("Remote command failed with output: {}", stdout);
+                    return Err(anyhow::anyhow!("Remote dedups command failed: {}", stdout));
+                }
             }
-        }
-        
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        log::debug!("Command output: {}", stdout);
-        
-        Ok(stdout.into_owned())
+
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            log::debug!("Command output: {}", stdout);
+
+            Ok(stdout.into_owned())
         }
     }
-    
+
     /// Check if a string contains valid JSON
     fn is_valid_json(text: &str) -> bool {
         // Check for some JSON structures
         text.trim().starts_with('{') && text.trim().ends_with('}') && text.contains("\"type\":")
     }
-    
+
     /// Close the SSH connection
     pub fn close(&mut self) {
         if self.session.is_some() {
             // Clean up any SSH tunnels we created
-            let cleanup_cmd = format!(
-                "pkill -f 'ssh.*-L.*{}.*-N'",
-                self.remote.port.unwrap_or(22)
-            );
+            let cleanup_cmd = format!("pkill -f 'ssh.*-L.*{}.*-N'", self.remote.port.unwrap_or(22));
             if let Err(e) = std::process::Command::new("sh")
                 .arg("-c")
                 .arg(&cleanup_cmd)
-                .output() 
+                .output()
             {
                 log::warn!("Failed to clean up SSH tunnel: {}", e);
             }
@@ -943,13 +994,13 @@ impl SshProtocol {
     /// Get SSH options from CLI, remote location, and default settings
     pub fn get_ssh_options(&self, cli: &crate::Cli) -> Vec<String> {
         let mut options = Vec::new();
-        
+
         // Add options from the CLI
         #[cfg(feature = "ssh")]
         {
             options.extend(cli.ssh_options.clone());
         }
-        
+
         // Add SSH config file option if found in regular locations
         if Path::new("/Users/anant/.ssh/config").exists() {
             options.push("-F".to_string());
@@ -958,11 +1009,11 @@ impl SshProtocol {
             options.push("-F".to_string());
             options.push("/etc/ssh/ssh_config".to_string());
         }
-        
+
         // Add default options for better SSH experience
         options.push("-o".to_string());
         options.push("BatchMode=yes".to_string());
-        
+
         // Add SSH config file from environment variable if set
         if let Ok(config_file) = std::env::var("SSH_CONFIG_FILE") {
             if !config_file.is_empty() {
@@ -971,7 +1022,7 @@ impl SshProtocol {
                 options.push(config_file);
             }
         }
-        
+
         options
     }
 }
@@ -999,4 +1050,4 @@ impl RemoteLocation {
     pub fn is_ssh_path(_path: &str) -> bool {
         false
     }
-} 
+}

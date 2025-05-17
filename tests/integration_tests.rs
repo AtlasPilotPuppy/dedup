@@ -201,7 +201,7 @@ impl TestEnv {
             log_file: None, // Add the missing log_file field
             output: None,
             format: "json".to_string(),
-            json: false, // Add the missing json field
+            json: false,                     // Add the missing json field
             algorithm: "blake3".to_string(), // Fast algorithm for tests
             parallel: Some(1),               // Controlled parallelism for predictable testing
             mode: "newest_modified".to_string(),
@@ -1102,11 +1102,11 @@ mod integration {
     fn test_json_output_functionality() -> Result<()> {
         // Set up test environment with duplicates
         let mut env = TestEnv::new();
-        
+
         // Create some duplicate files for testing
         let subfolder = env.create_subdir("json_test");
         let now = SystemTime::now();
-        
+
         // First set of duplicates
         env.create_file_with_content_and_time(
             &subfolder.join("file1a.txt"),
@@ -1118,7 +1118,7 @@ mod integration {
             "duplicate_content_set1",
             Some(now - Duration::from_secs(200)),
         );
-        
+
         // Second set of duplicates
         env.create_file_with_content_and_time(
             &subfolder.join("file2a.txt"),
@@ -1130,63 +1130,68 @@ mod integration {
             "duplicate_content_set2",
             Some(now - Duration::from_secs(400)),
         );
-        
+
         // Unique file
         env.create_file_with_content_and_time(
             &subfolder.join("unique.txt"),
             "unique_content",
             Some(now),
         );
-        
+
         // Set up CLI with json flag and output redirection
         let mut cli_args = env.default_cli_args();
         cli_args.directories = vec![subfolder.clone()];
         cli_args.json = true;
-        
+
         // Create a capture for stdout
         let output_file = env.root().join("json_output.txt");
-        
+
         // Since we can't easily capture stdout in the test, we'll generate the JSON using the API
         // directly and analyze it
-        
+
         // Create a dummy channel for the progress updates
         let (tx, _rx) = std::sync::mpsc::channel();
         let duplicate_sets = file_utils::find_duplicate_files_with_progress(&cli_args, tx)?;
-        
+
         // Verify we found the expected duplicate sets
         assert_eq!(duplicate_sets.len(), 2, "Should find 2 duplicate sets");
-        
+
         // Create a representation of what would be returned as JSON
         let mut json_duplicate_sets = std::collections::HashMap::new();
-        
+
         // Build JSON structure for duplicate sets
         for (idx, set) in duplicate_sets.iter().enumerate() {
             let mut set_json = std::collections::HashMap::new();
             set_json.insert("count".to_string(), serde_json::json!(set.files.len()));
             set_json.insert("size".to_string(), serde_json::json!(set.size));
-            set_json.insert("size_human".to_string(), serde_json::json!(humansize::format_size(set.size, humansize::DECIMAL)));
+            set_json.insert(
+                "size_human".to_string(),
+                serde_json::json!(humansize::format_size(set.size, humansize::DECIMAL)),
+            );
             set_json.insert("hash".to_string(), serde_json::json!(set.hash.clone()));
-            
-            let file_paths: Vec<String> = set.files.iter()
+
+            let file_paths: Vec<String> = set
+                .files
+                .iter()
                 .map(|f| f.path.display().to_string())
                 .collect();
             set_json.insert("files".to_string(), serde_json::json!(file_paths));
-            
+
             json_duplicate_sets.insert(format!("set_{}", idx + 1), serde_json::json!(set_json));
         }
-        
+
         // Convert to JSON value
         let json_value = serde_json::json!(json_duplicate_sets);
-        
+
         // Verify we got a JSON result
         assert!(json_value.is_object(), "JSON should be an object");
-        
+
         // Convert to string for inspection
         let json_str = serde_json::to_string_pretty(&json_value)?;
-        
+
         // Write to file so we can see the output
         fs::write(&output_file, &json_str)?;
-        
+
         Ok(())
     }
 }

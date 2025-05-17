@@ -18,10 +18,10 @@ use std::net::TcpStream;
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum MessageType {
-    Command,   // Client to server command
-    Progress,  // Server to client progress update
-    Result,    // Server to client final result
-    Error,     // Error message
+    Command,  // Client to server command
+    Progress, // Server to client progress update
+    Result,   // Server to client final result
+    Error,    // Error message
 }
 
 // Core message structure
@@ -115,11 +115,11 @@ impl ProtocolHandler for TcpProtocolHandler {
     fn receive_message(&mut self) -> Result<Option<DedupMessage>> {
         let mut line = String::new();
         let bytes_read = self.reader.read_line(&mut line)?;
-        
+
         if bytes_read == 0 {
             return Ok(None); // EOF
         }
-        
+
         log::debug!("Received message: {}", line);
         let message: DedupMessage = serde_json::from_str(line.trim())?;
         Ok(Some(message))
@@ -153,5 +153,9 @@ pub fn find_available_port(start_range: u16, end_range: u16) -> Result<u16> {
             return Ok(port);
         }
     }
-    Err(anyhow!("No available ports found in range {}-{}", start_range, end_range))
-} 
+    Err(anyhow!(
+        "No available ports found in range {}-{}",
+        start_range,
+        end_range
+    ))
+}

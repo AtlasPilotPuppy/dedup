@@ -55,9 +55,11 @@ fn main() -> Result<()> {
         // We create a logger that discards all messages
         struct NullLogger;
         impl log::Log for NullLogger {
-            fn enabled(&self, _: &log::Metadata) -> bool { false }
-            fn log(&self, _: &log::Record) { }
-            fn flush(&self) { }
+            fn enabled(&self, _: &log::Metadata) -> bool {
+                false
+            }
+            fn log(&self, _: &log::Record) {}
+            fn flush(&self) {}
         }
         let logger = Box::new(NullLogger);
         log::set_boxed_logger(logger).map(|()| log::set_max_level(log::LevelFilter::Off))?;
@@ -121,10 +123,7 @@ fn main() -> Result<()> {
         if !is_remote_path(dir) {
             if !dir.exists() {
                 log::error!("Local directory {:?} does not exist.", dir);
-                return Err(anyhow::anyhow!(
-                    "Local directory does not exist: {:?}",
-                    dir
-                ));
+                return Err(anyhow::anyhow!("Local directory does not exist: {:?}", dir));
             }
             if !dir.is_dir() {
                 log::error!("Local path {:?} is not a directory.", dir);
@@ -166,7 +165,7 @@ fn main() -> Result<()> {
             Ok(duplicate_sets) => {
                 if duplicate_sets.is_empty() {
                     log::info!("No duplicate files found.");
-                    
+
                     if cli.json {
                         // Output already handled by find_duplicate_files_with_json_progress
                         // No need to output anything here
@@ -189,10 +188,13 @@ fn main() -> Result<()> {
             }
             Err(e) => {
                 log::error!("Error finding duplicate files: {}", e);
-                
+
                 if cli.json {
                     // Output error as JSON
-                    println!("{{\"type\":\"error\",\"message\":\"{}\",\"code\":1}}", e.to_string().replace('\"', "\\\""));
+                    println!(
+                        "{{\"type\":\"error\",\"message\":\"{}\",\"code\":1}}",
+                        e.to_string().replace('\"', "\\\"")
+                    );
                 } else {
                     eprintln!("Error: {}", e);
                 }
@@ -206,9 +208,9 @@ fn main() -> Result<()> {
 // Handle multiple directory mode - comparing directories and copying/deduplicating
 fn handle_multi_directory_mode(cli: &Cli) -> Result<()> {
     log::info!("Multi-directory mode: Comparing directories");
-    
+
     let start_time = std::time::Instant::now();
-    
+
     if cli.json {
         // Send initial progress information
         let progress = file_utils::ProgressInfo {
@@ -224,7 +226,7 @@ fn handle_multi_directory_mode(cli: &Cli) -> Result<()> {
             estimated_seconds_left: None,
             status_message: "Comparing directories for missing files or duplicates...".to_string(),
         };
-        
+
         let json_output = file_utils::JsonOutput::Progress(progress);
         if let Ok(json_str) = serde_json::to_string(&json_output) {
             println!("{}", json_str);
@@ -254,7 +256,7 @@ fn handle_multi_directory_mode(cli: &Cli) -> Result<()> {
             "dry_run": cli.dry_run
         });
         println!("{}", serde_json::to_string(&dir_info)?);
-        
+
         // Update progress
         let progress = file_utils::ProgressInfo {
             stage: 2,
@@ -269,7 +271,7 @@ fn handle_multi_directory_mode(cli: &Cli) -> Result<()> {
             estimated_seconds_left: None,
             status_message: "Comparing directories for differences...".to_string(),
         };
-        
+
         let json_output = file_utils::JsonOutput::Progress(progress);
         if let Ok(json_str) = serde_json::to_string(&json_output) {
             println!("{}", json_str);
@@ -277,14 +279,14 @@ fn handle_multi_directory_mode(cli: &Cli) -> Result<()> {
     }
 
     let comparison_result = file_utils::compare_directories(cli)?;
-    
+
     // Update progress in JSON mode
     if cli.json {
         let progress = file_utils::ProgressInfo {
             stage: 2,
             stage_name: "Comparing".to_string(),
             files_processed: 0,
-            total_files: 0, 
+            total_files: 0,
             percent_complete: 50.0, // Halfway through directory comparison
             current_file: None,
             bytes_processed: 0,
@@ -293,7 +295,7 @@ fn handle_multi_directory_mode(cli: &Cli) -> Result<()> {
             estimated_seconds_left: None,
             status_message: "Directory comparison complete, processing results...".to_string(),
         };
-        
+
         let json_output = file_utils::JsonOutput::Progress(progress);
         if let Ok(json_str) = serde_json::to_string(&json_output) {
             println!("{}", json_str);
@@ -302,7 +304,7 @@ fn handle_multi_directory_mode(cli: &Cli) -> Result<()> {
 
     // JSON output structure for multi-directory mode
     let mut json_result = std::collections::HashMap::new();
-    
+
     // Handle missing files
     if !comparison_result.missing_in_target.is_empty() {
         if !cli.json {
@@ -327,18 +329,24 @@ fn handle_multi_directory_mode(cli: &Cli) -> Result<()> {
                 .iter()
                 .map(|f| f.path.display().to_string())
                 .collect();
-                
+
             // Stream the missing files information
             let missing_info = serde_json::json!({
-                "type": "missing_files", 
+                "type": "missing_files",
                 "count": missing_files.len(),
                 "files": missing_files
             });
             println!("{}", serde_json::to_string(&missing_info)?);
-            
+
             // Still add to the final result
-            json_result.insert("missing_files".to_string(), serde_json::json!(missing_files));
-            json_result.insert("missing_count".to_string(), serde_json::json!(missing_files.len()));
+            json_result.insert(
+                "missing_files".to_string(),
+                serde_json::json!(missing_files),
+            );
+            json_result.insert(
+                "missing_count".to_string(),
+                serde_json::json!(missing_files.len()),
+            );
         }
 
         // Update progress in JSON mode before copying
@@ -351,12 +359,19 @@ fn handle_multi_directory_mode(cli: &Cli) -> Result<()> {
                 percent_complete: 0.0,
                 current_file: None,
                 bytes_processed: 0,
-                total_bytes: comparison_result.missing_in_target.iter().map(|f| f.size).sum(),
+                total_bytes: comparison_result
+                    .missing_in_target
+                    .iter()
+                    .map(|f| f.size)
+                    .sum(),
                 elapsed_seconds: start_time.elapsed().as_secs_f64(),
                 estimated_seconds_left: None,
-                status_message: format!("Preparing to copy {} missing files", comparison_result.missing_in_target.len()),
+                status_message: format!(
+                    "Preparing to copy {} missing files",
+                    comparison_result.missing_in_target.len()
+                ),
             };
-            
+
             let json_output = file_utils::JsonOutput::Progress(progress);
             if let Ok(json_str) = serde_json::to_string(&json_output) {
                 println!("{}", json_str);
@@ -372,14 +387,14 @@ fn handle_multi_directory_mode(cli: &Cli) -> Result<()> {
             Ok((count, logs)) => {
                 // Store logs for JSON output if needed
                 let mut operation_logs = Vec::new();
-                
+
                 // Display all log messages
                 for log_msg in logs {
                     // Only log to file what hasn't already been logged in the function
                     if !log_msg.starts_with("[DRY RUN]") {
                         log::info!("{}", log_msg);
                     }
-                    
+
                     if !cli.json {
                         println!("{}", log_msg);
                     } else {
@@ -404,16 +419,19 @@ fn handle_multi_directory_mode(cli: &Cli) -> Result<()> {
                         "logs": operation_logs,
                     });
                     println!("{}", serde_json::to_string(&copy_result)?);
-                    
+
                     // Add copy operation results to overall JSON
                     json_result.insert("copied_count".to_string(), serde_json::json!(count));
                     json_result.insert("dry_run".to_string(), serde_json::json!(cli.dry_run));
-                    json_result.insert("operation_logs".to_string(), serde_json::json!(operation_logs));
+                    json_result.insert(
+                        "operation_logs".to_string(),
+                        serde_json::json!(operation_logs),
+                    );
                 }
             }
             Err(e) => {
                 log::error!("Failed to copy files: {}", e);
-                
+
                 if !cli.json {
                     eprintln!("Error copying files: {}", e);
                 } else {
@@ -425,7 +443,7 @@ fn handle_multi_directory_mode(cli: &Cli) -> Result<()> {
                         "operation": "copy_files"
                     });
                     println!("{}", serde_json::to_string(&error)?);
-                    
+
                     // Add to overall result
                     json_result.insert("error".to_string(), serde_json::json!(e.to_string()));
                 }
@@ -437,14 +455,17 @@ fn handle_multi_directory_mode(cli: &Cli) -> Result<()> {
         } else {
             // Stream the empty missing files result
             let missing_info = serde_json::json!({
-                "type": "missing_files", 
+                "type": "missing_files",
                 "count": 0,
                 "files": []
             });
             println!("{}", serde_json::to_string(&missing_info)?);
-            
+
             // Add to overall result
-            json_result.insert("missing_files".to_string(), serde_json::json!(Vec::<String>::new()));
+            json_result.insert(
+                "missing_files".to_string(),
+                serde_json::json!(Vec::<String>::new()),
+            );
             json_result.insert("missing_count".to_string(), serde_json::json!(0));
         }
     }
@@ -468,7 +489,7 @@ fn handle_multi_directory_mode(cli: &Cli) -> Result<()> {
 
         // Process duplicates similar to single directory mode
         let duplicate_json = handle_duplicate_sets(cli, &comparison_result.duplicates)?;
-        
+
         // If JSON was returned, merge it into our results
         if cli.json && duplicate_json.is_some() {
             if let Some(dup_json) = duplicate_json {
@@ -486,7 +507,7 @@ fn handle_multi_directory_mode(cli: &Cli) -> Result<()> {
                 "total_files": 0
             });
             println!("{}", serde_json::to_string(&dup_info)?);
-            
+
             // Add to overall result
             json_result.insert("duplicates".to_string(), serde_json::json!({}));
         }
@@ -502,8 +523,11 @@ fn handle_multi_directory_mode(cli: &Cli) -> Result<()> {
     // Output final JSON result summary if needed
     if cli.json {
         // Add elapsed time
-        json_result.insert("elapsed_seconds".to_string(), serde_json::json!(start_time.elapsed().as_secs_f64()));
-        
+        json_result.insert(
+            "elapsed_seconds".to_string(),
+            serde_json::json!(start_time.elapsed().as_secs_f64()),
+        );
+
         // Final result summary
         let result = serde_json::json!({
             "type": "final_result",
@@ -518,12 +542,15 @@ fn handle_multi_directory_mode(cli: &Cli) -> Result<()> {
 }
 
 // Handle duplicate sets (common code for both single and multi-directory modes)
-fn handle_duplicate_sets(cli: &Cli, duplicate_sets: &[file_utils::DuplicateSet]) -> Result<Option<serde_json::Value>> {
+fn handle_duplicate_sets(
+    cli: &Cli,
+    duplicate_sets: &[file_utils::DuplicateSet],
+) -> Result<Option<serde_json::Value>> {
     log::info!("Found {} sets of duplicate files.", duplicate_sets.len());
-    
+
     // Initialize JSON structure for duplicate sets if needed
     let mut json_duplicate_sets = std::collections::HashMap::new();
-    
+
     if !cli.json {
         println!("Found {} sets of duplicate files:", duplicate_sets.len());
 
@@ -544,17 +571,22 @@ fn handle_duplicate_sets(cli: &Cli, duplicate_sets: &[file_utils::DuplicateSet])
             let mut set_json = std::collections::HashMap::new();
             set_json.insert("count".to_string(), serde_json::json!(set.files.len()));
             set_json.insert("size".to_string(), serde_json::json!(set.size));
-            set_json.insert("size_human".to_string(), serde_json::json!(format_size(set.size, DECIMAL)));
+            set_json.insert(
+                "size_human".to_string(),
+                serde_json::json!(format_size(set.size, DECIMAL)),
+            );
             set_json.insert("hash".to_string(), serde_json::json!(set.hash.clone()));
-            
-            let file_paths: Vec<String> = set.files.iter()
+
+            let file_paths: Vec<String> = set
+                .files
+                .iter()
                 .map(|f| f.path.display().to_string())
                 .collect();
             set_json.insert("files".to_string(), serde_json::json!(file_paths));
-            
+
             json_duplicate_sets.insert(format!("set_{}", idx + 1), serde_json::json!(set_json));
         }
-        
+
         // Print JSON directly in this function since we're now handling JSON output completely inside handle_duplicate_sets
         if cli.json {
             // Format and print the JSON output
@@ -567,20 +599,24 @@ fn handle_duplicate_sets(cli: &Cli, duplicate_sets: &[file_utils::DuplicateSet])
         match file_utils::output_duplicates(duplicate_sets, output_path, &cli.format) {
             Ok(_) => {
                 log::info!("Successfully wrote duplicate list to {:?}", output_path);
-                
+
                 if !cli.json {
                     println!("Duplicate list saved to {:?}", output_path);
                 } else {
-                    json_duplicate_sets.insert("output_file".to_string(), serde_json::json!(output_path.display().to_string()));
+                    json_duplicate_sets.insert(
+                        "output_file".to_string(),
+                        serde_json::json!(output_path.display().to_string()),
+                    );
                 }
             }
             Err(e) => {
                 log::error!("Failed to write duplicate list to {:?}: {}", output_path, e);
-                
+
                 if !cli.json {
                     eprintln!("Failed to write output file: {}", e);
                 } else {
-                    json_duplicate_sets.insert("output_error".to_string(), serde_json::json!(e.to_string()));
+                    json_duplicate_sets
+                        .insert("output_error".to_string(), serde_json::json!(e.to_string()));
                 }
             }
         }
@@ -589,7 +625,7 @@ fn handle_duplicate_sets(cli: &Cli, duplicate_sets: &[file_utils::DuplicateSet])
     if cli.delete || cli.move_to.is_some() {
         // Add action results to JSON
         let mut action_results = std::collections::HashMap::new();
-        
+
         // Log dry run mode status at the beginning
         if cli.dry_run && !cli.json {
             log::info!("Running in DRY RUN mode - no files will be modified");
@@ -613,7 +649,7 @@ fn handle_duplicate_sets(cli: &Cli, duplicate_sets: &[file_utils::DuplicateSet])
                         set.hash.chars().take(8).collect::<String>(),
                         kept_file.path
                     );
-                    
+
                     if !cli.json {
                         println!("Keeping: {}", kept_file.path.display());
                     }
@@ -624,7 +660,7 @@ fn handle_duplicate_sets(cli: &Cli, duplicate_sets: &[file_utils::DuplicateSet])
                                 total_deleted += count;
                                 // Store logs for JSON output
                                 all_logs.extend(logs.clone());
-                                
+
                                 // Print logs if not in JSON mode
                                 if !cli.json {
                                     for log_msg in logs {
@@ -635,11 +671,14 @@ fn handle_duplicate_sets(cli: &Cli, duplicate_sets: &[file_utils::DuplicateSet])
                             }
                             Err(e) => {
                                 log::error!("Error during deletion batch: {}", e);
-                                
+
                                 if !cli.json {
                                     eprintln!("Error: {}", e);
                                 } else {
-                                    action_results.insert("delete_error".to_string(), serde_json::json!(e.to_string()));
+                                    action_results.insert(
+                                        "delete_error".to_string(),
+                                        serde_json::json!(e.to_string()),
+                                    );
                                 }
                             }
                         }
@@ -650,7 +689,7 @@ fn handle_duplicate_sets(cli: &Cli, duplicate_sets: &[file_utils::DuplicateSet])
                                 total_moved += count;
                                 // Store logs for JSON output
                                 all_logs.extend(logs.clone());
-                                
+
                                 // Print logs if not in JSON mode
                                 if !cli.json {
                                     for log_msg in logs {
@@ -661,11 +700,14 @@ fn handle_duplicate_sets(cli: &Cli, duplicate_sets: &[file_utils::DuplicateSet])
                             }
                             Err(e) => {
                                 log::error!("Error during move batch: {}", e);
-                                
+
                                 if !cli.json {
                                     eprintln!("Error: {}", e);
                                 } else {
-                                    action_results.insert("move_error".to_string(), serde_json::json!(e.to_string()));
+                                    action_results.insert(
+                                        "move_error".to_string(),
+                                        serde_json::json!(e.to_string()),
+                                    );
                                 }
                             }
                         }
@@ -673,14 +715,15 @@ fn handle_duplicate_sets(cli: &Cli, duplicate_sets: &[file_utils::DuplicateSet])
                 }
                 Err(e) => {
                     log::error!("Could not determine action targets for a set: {}", e);
-                    
+
                     if !cli.json {
                         eprintln!(
                             "Error: Could not determine which files to keep/delete: {}",
                             e
                         );
                     } else {
-                        action_results.insert("action_error".to_string(), serde_json::json!(e.to_string()));
+                        action_results
+                            .insert("action_error".to_string(), serde_json::json!(e.to_string()));
                     }
                 }
             }
@@ -696,23 +739,29 @@ fn handle_duplicate_sets(cli: &Cli, duplicate_sets: &[file_utils::DuplicateSet])
         if cli.delete {
             let msg = format!("{}deleted {} files", action_prefix, total_deleted);
             log::info!("{}", msg);
-            
+
             if !cli.json {
                 println!("\n{}", msg);
             } else {
-                action_results.insert("deleted_count".to_string(), serde_json::json!(total_deleted));
+                action_results.insert(
+                    "deleted_count".to_string(),
+                    serde_json::json!(total_deleted),
+                );
                 action_results.insert("dry_run".to_string(), serde_json::json!(cli.dry_run));
             }
         }
         if cli.move_to.is_some() {
             let msg = format!("{}moved {} files", action_prefix, total_moved);
             log::info!("{}", msg);
-            
+
             if !cli.json {
                 println!("\n{}", msg);
             } else {
                 action_results.insert("moved_count".to_string(), serde_json::json!(total_moved));
-                action_results.insert("move_target".to_string(), serde_json::json!(cli.move_to.as_ref().unwrap().display().to_string()));
+                action_results.insert(
+                    "move_target".to_string(),
+                    serde_json::json!(cli.move_to.as_ref().unwrap().display().to_string()),
+                );
                 action_results.insert("dry_run".to_string(), serde_json::json!(cli.dry_run));
             }
         }
@@ -746,23 +795,23 @@ fn handle_duplicate_sets(cli: &Cli, duplicate_sets: &[file_utils::DuplicateSet])
 fn start_server_mode(cli: &Cli) -> Result<()> {
     use dedups::protocol::find_available_port;
     use dedups::server::run_server;
-    
+
     // If port is 0, find an available port
     let port = if cli.port == 0 {
         find_available_port(10000, 20000)?
     } else {
         cli.port
     };
-    
+
     log::info!("Starting dedups server on port {}", port);
-    
+
     // Print the port so the client can connect
     if cli.verbose > 0 {
         println!("DEDUPS_SERVER_PORT={}", port);
     }
-    
+
     // Run the server
     run_server(port)?;
-    
+
     Ok(())
 }
