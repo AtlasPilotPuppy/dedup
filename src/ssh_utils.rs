@@ -3,12 +3,12 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "ssh")]
 use ssh2::Session;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
 #[cfg(feature = "ssh")]
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::io::{BufRead, BufReader};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output, Stdio};
 use std::str::FromStr;
 use std::sync::{mpsc, Arc, Mutex};
 

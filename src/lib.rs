@@ -300,17 +300,17 @@ pub struct Cli {
         help = "Port to use for server mode (0 = auto)"
     )]
     pub port: u16,
-    
+
     /// Use Protobuf for protocol communication (instead of JSON)
     #[cfg(feature = "proto")]
     #[clap(long, help = "Use Protobuf for network communication")]
     pub use_protobuf: bool,
-    
+
     /// Use ZSTD compression for network communication
     #[cfg(feature = "proto")]
     #[clap(long, help = "Use ZSTD compression for network communication")]
     pub use_compression: bool,
-    
+
     /// ZSTD compression level (1-22, higher = more compression but slower)
     #[cfg(feature = "proto")]
     #[clap(long, default_value = "3", help = "ZSTD compression level (1-22)")]
@@ -485,7 +485,7 @@ impl Cli {
             self.mode = "newest_modified".to_string();
         }
     }
-    
+
     /// Convert Cli to DedupOptions
     pub fn to_options(&self) -> DedupOptions {
         DedupOptions {
@@ -516,14 +516,14 @@ impl Cli {
             dry_run: self.dry_run,
             cache_location: self.cache_location.clone(),
             fast_mode: self.fast_mode,
-            
+
             // Media options
             media_mode: self.media_mode,
             media_resolution: self.media_resolution.clone(),
             media_formats: self.media_formats.clone(),
             media_similarity: self.media_similarity,
             media_dedup_options: self.media_dedup_options.clone(),
-            
+
             // SSH options
             #[cfg(feature = "ssh")]
             allow_remote_install: self.allow_remote_install,
@@ -541,7 +541,7 @@ impl Cli {
             server_mode: self.server_mode,
             #[cfg(feature = "ssh")]
             port: self.port,
-            
+
             // Protocol options
             #[cfg(feature = "proto")]
             use_protobuf: self.use_protobuf,
@@ -551,11 +551,11 @@ impl Cli {
             compression_level: self.compression_level,
         }
     }
-    
+
     /// Create a new Cli instance from DedupOptions
     pub fn from_options(options: &DedupOptions) -> Self {
         let mut cli = Self::parse();
-        
+
         cli.directories = options.directories.clone();
         cli.target = options.target.clone();
         cli.deduplicate = options.deduplicate;
@@ -576,29 +576,29 @@ impl Cli {
         cli.filter_from = options.filter_from.clone();
         cli.progress = options.progress;
         cli.progress_tui = options.progress_tui;
-        
+
         // Convert string values to enums
         if let Ok(sort_by) = SortCriterion::from_str(&options.sort_by) {
             cli.sort_by = sort_by;
         }
-        
+
         if let Ok(sort_order) = SortOrder::from_str(&options.sort_order) {
             cli.sort_order = sort_order;
         }
-        
+
         cli.raw_sizes = options.raw_sizes;
         cli.config_file = options.config_file.clone();
         cli.dry_run = options.dry_run;
         cli.cache_location = options.cache_location.clone();
         cli.fast_mode = options.fast_mode;
-        
+
         // Media options
         cli.media_mode = options.media_mode;
         cli.media_resolution = options.media_resolution.clone();
         cli.media_formats = options.media_formats.clone();
         cli.media_similarity = options.media_similarity;
         cli.media_dedup_options = options.media_dedup_options.clone();
-        
+
         // SSH options
         #[cfg(feature = "ssh")]
         {
@@ -611,7 +611,7 @@ impl Cli {
             cli.server_mode = options.server_mode;
             cli.port = options.port;
         }
-        
+
         // Protocol options
         #[cfg(feature = "proto")]
         {
@@ -619,7 +619,7 @@ impl Cli {
             cli.use_compression = options.use_compression;
             cli.compression_level = options.compression_level;
         }
-        
+
         cli
     }
 }

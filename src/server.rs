@@ -1,10 +1,10 @@
 #[cfg(feature = "ssh")]
-use crate::protocol::{
-    CommandMessage, DedupMessage, ErrorMessage, MessageType, ProtocolHandler,
-    ResultMessage, create_protocol_handler,
-};
-#[cfg(feature = "ssh")]
 use crate::options::DedupOptions;
+#[cfg(feature = "ssh")]
+use crate::protocol::{
+    create_protocol_handler, CommandMessage, DedupMessage, ErrorMessage, MessageType,
+    ProtocolHandler, ResultMessage,
+};
 #[cfg(feature = "ssh")]
 use anyhow::{anyhow, Context, Result};
 #[cfg(feature = "ssh")]
@@ -44,7 +44,7 @@ impl DedupServer {
             options: Arc::new(Mutex::new(DedupOptions::default())),
         }
     }
-    
+
     pub fn with_options(port: u16, options: DedupOptions) -> Self {
         Self {
             port,
@@ -104,13 +104,15 @@ impl DedupServer {
 
     /// Handle a client connection
     fn handle_client(
-        stream: TcpStream, 
+        stream: TcpStream,
         running: Arc<AtomicBool>,
-        options: Arc<Mutex<DedupOptions>>
+        options: Arc<Mutex<DedupOptions>>,
     ) -> Result<()> {
         // Get protocol options from shared state
-        let opts = options.lock().map_err(|_| anyhow!("Failed to lock options"))?;
-        
+        let opts = options
+            .lock()
+            .map_err(|_| anyhow!("Failed to lock options"))?;
+
         let use_protobuf = {
             #[cfg(feature = "proto")]
             {
@@ -121,7 +123,7 @@ impl DedupServer {
                 false
             }
         };
-        
+
         let use_compression = {
             #[cfg(feature = "proto")]
             {
@@ -132,7 +134,7 @@ impl DedupServer {
                 false
             }
         };
-        
+
         let compression_level = {
             #[cfg(feature = "proto")]
             {
@@ -143,15 +145,11 @@ impl DedupServer {
                 3
             }
         };
-        
+
         drop(opts); // Release the lock
-        
-        let mut protocol = create_protocol_handler(
-            stream, 
-            use_protobuf, 
-            use_compression, 
-            compression_level
-        )?;
+
+        let mut protocol =
+            create_protocol_handler(stream, use_protobuf, use_compression, compression_level)?;
 
         while running.load(Ordering::SeqCst) {
             if let Some(message) = protocol.receive_message()? {
@@ -224,7 +222,7 @@ impl DedupServer {
                                     message_type: MessageType::Result,
                                     payload: line.clone(),
                                 };
-                                
+
                                 if let Err(e) = protocol_clone.send_message(result_msg) {
                                     log::error!("Error sending output to client: {}", e);
                                     break;

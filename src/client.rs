@@ -1,10 +1,10 @@
 #[cfg(feature = "ssh")]
-use crate::protocol::{
-    CommandMessage, DedupMessage, ErrorMessage, MessageType, ProgressMessage, ProtocolHandler,
-    create_protocol_handler,
-};
-#[cfg(feature = "ssh")]
 use crate::options::DedupOptions;
+#[cfg(feature = "ssh")]
+use crate::protocol::{
+    create_protocol_handler, CommandMessage, DedupMessage, ErrorMessage, MessageType,
+    ProgressMessage, ProtocolHandler,
+};
 #[cfg(feature = "ssh")]
 use anyhow::{anyhow, Context, Result};
 #[cfg(feature = "ssh")]
@@ -43,7 +43,7 @@ impl DedupClient {
             reader_thread: None,
         }
     }
-    
+
     pub fn with_options(host: String, port: u16, options: DedupOptions) -> Self {
         Self {
             host,
@@ -78,7 +78,7 @@ impl DedupClient {
                 false
             }
         };
-        
+
         let use_compression = {
             #[cfg(feature = "proto")]
             {
@@ -89,7 +89,7 @@ impl DedupClient {
                 false
             }
         };
-        
+
         let compression_level = {
             #[cfg(feature = "proto")]
             {
@@ -100,12 +100,12 @@ impl DedupClient {
                 3
             }
         };
-        
+
         let protocol = create_protocol_handler(
-            stream.try_clone()?, 
-            use_protobuf, 
-            use_compression, 
-            compression_level
+            stream.try_clone()?,
+            use_protobuf,
+            use_compression,
+            compression_level,
         )?;
 
         // Create a message channel for receiving messages from the server
@@ -113,13 +113,9 @@ impl DedupClient {
         self.message_receiver = Some(rx);
 
         // Start a background thread to read messages from the server
-        let mut reader_protocol = create_protocol_handler(
-            stream, 
-            use_protobuf, 
-            use_compression, 
-            compression_level
-        )?;
-        
+        let mut reader_protocol =
+            create_protocol_handler(stream, use_protobuf, use_compression, compression_level)?;
+
         let reader_thread = thread::spawn(move || {
             loop {
                 match reader_protocol.receive_message() {

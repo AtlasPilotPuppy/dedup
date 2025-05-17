@@ -43,14 +43,14 @@ pub struct DedupOptions {
     pub dry_run: bool,
     pub cache_location: Option<PathBuf>,
     pub fast_mode: bool,
-    
+
     // Media options
     pub media_mode: bool,
     pub media_resolution: String,
     pub media_formats: Vec<String>,
     pub media_similarity: u32,
     pub media_dedup_options: MediaDedupOptions,
-    
+
     // SSH options
     #[cfg(feature = "ssh")]
     pub allow_remote_install: bool,
@@ -68,7 +68,7 @@ pub struct DedupOptions {
     pub server_mode: bool,
     #[cfg(feature = "ssh")]
     pub port: u16,
-    
+
     // Protocol options
     #[cfg(feature = "proto")]
     pub use_protobuf: bool,
@@ -108,14 +108,14 @@ impl Default for DedupOptions {
             dry_run: false,
             cache_location: None,
             fast_mode: false,
-            
+
             // Media options
             media_mode: false,
             media_resolution: "highest".to_string(),
             media_formats: Vec::new(),
             media_similarity: 90,
             media_dedup_options: MediaDedupOptions::default(),
-            
+
             // SSH options
             #[cfg(feature = "ssh")]
             allow_remote_install: true,
@@ -133,7 +133,7 @@ impl Default for DedupOptions {
             server_mode: false,
             #[cfg(feature = "ssh")]
             port: 0,
-            
+
             // Protocol options
             #[cfg(feature = "proto")]
             use_protobuf: true,
@@ -150,23 +150,33 @@ impl DedupOptions {
     pub fn get_sort_criterion(&self) -> Result<SortCriterion> {
         SortCriterion::from_str(&self.sort_by)
     }
-    
+
     // Convert sort_order string to SortOrder enum
     pub fn get_sort_order(&self) -> Result<SortOrder> {
         SortOrder::from_str(&self.sort_order)
     }
-    
+
     // Convert to protobuf format if proto feature is enabled
     #[cfg(feature = "proto")]
     pub fn to_proto(&self) -> self::proto::DedupOptions {
         use self::proto;
-        
+
         proto::DedupOptions {
-            directories: self.directories.iter().map(|p| p.to_string_lossy().to_string()).collect(),
-            target: self.target.as_ref().map(|p| p.to_string_lossy().to_string()),
+            directories: self
+                .directories
+                .iter()
+                .map(|p| p.to_string_lossy().to_string())
+                .collect(),
+            target: self
+                .target
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string()),
             deduplicate: self.deduplicate,
             delete: self.delete,
-            move_to: self.move_to.as_ref().map(|p| p.to_string_lossy().to_string()),
+            move_to: self
+                .move_to
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string()),
             json: self.json,
             algorithm: self.algorithm.clone(),
             parallel: self.parallel.map(|p| p as u32),
@@ -175,21 +185,27 @@ impl DedupOptions {
             verbose: self.verbose as u32,
             include: self.include.clone(),
             exclude: self.exclude.clone(),
-            filter_from: self.filter_from.as_ref().map(|p| p.to_string_lossy().to_string()),
+            filter_from: self
+                .filter_from
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string()),
             progress: self.progress,
             sort_by: self.sort_by.clone(),
             sort_order: self.sort_order.clone(),
             raw_sizes: self.raw_sizes,
             dry_run: self.dry_run,
-            cache_location: self.cache_location.as_ref().map(|p| p.to_string_lossy().to_string()),
+            cache_location: self
+                .cache_location
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string()),
             fast_mode: self.fast_mode,
-            
+
             // Media options
             media_mode: self.media_mode,
             media_resolution: self.media_resolution.clone(),
             media_formats: self.media_formats.clone(),
             media_similarity: self.media_similarity,
-            
+
             // SSH options
             allow_remote_install: self.allow_remote_install,
             ssh_options: self.ssh_options.clone(),
@@ -199,26 +215,30 @@ impl DedupOptions {
             use_ssh_tunnel: self.use_ssh_tunnel,
             server_mode: self.server_mode,
             port: self.port as u32,
-            
+
             // Protocol options
             use_protobuf: self.use_protobuf,
             use_compression: self.use_compression,
             compression_level: self.compression_level,
         }
     }
-    
+
     // Convert from protobuf format if proto feature is enabled
     #[cfg(feature = "proto")]
     pub fn from_proto(proto_opts: &self::proto::DedupOptions) -> Self {
         Self {
-            directories: proto_opts.directories.iter().map(|s| PathBuf::from(s)).collect(),
+            directories: proto_opts
+                .directories
+                .iter()
+                .map(|s| PathBuf::from(s))
+                .collect(),
             target: proto_opts.target.as_ref().map(PathBuf::from),
             deduplicate: proto_opts.deduplicate,
             delete: proto_opts.delete,
             move_to: proto_opts.move_to.as_ref().map(PathBuf::from),
-            log: false, // Not needed in protocol
+            log: false,     // Not needed in protocol
             log_file: None, // Not needed in protocol
-            output: None, // Not needed in protocol
+            output: None,   // Not needed in protocol
             format: proto_opts.algorithm.clone(),
             json: proto_opts.json,
             algorithm: proto_opts.algorithm.clone(),
@@ -238,14 +258,14 @@ impl DedupOptions {
             dry_run: proto_opts.dry_run,
             cache_location: proto_opts.cache_location.as_ref().map(PathBuf::from),
             fast_mode: proto_opts.fast_mode,
-            
+
             // Media options
             media_mode: proto_opts.media_mode,
             media_resolution: proto_opts.media_resolution.clone(),
             media_formats: proto_opts.media_formats.clone(),
             media_similarity: proto_opts.media_similarity,
             media_dedup_options: MediaDedupOptions::default(), // We'll update this separately
-            
+
             // SSH options
             #[cfg(feature = "ssh")]
             allow_remote_install: proto_opts.allow_remote_install,
@@ -263,7 +283,7 @@ impl DedupOptions {
             server_mode: proto_opts.server_mode,
             #[cfg(feature = "ssh")]
             port: proto_opts.port as u16,
-            
+
             // Protocol options
             #[cfg(feature = "proto")]
             use_protobuf: proto_opts.use_protobuf,
@@ -273,4 +293,4 @@ impl DedupOptions {
             compression_level: proto_opts.compression_level,
         }
     }
-} 
+}

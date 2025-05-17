@@ -76,6 +76,15 @@ jobs:
       if: matrix.os == 'windows-latest'
       run: cargo test
 
+    # Run protocol tests on Unix systems
+    - name: Run protocol tests (Unix)
+      if: matrix.os != 'windows-latest'
+      run: |
+        chmod +x test_protocol.sh
+        chmod +x test_protocol_perf.sh
+        ./test_protocol.sh
+        ./test_protocol_perf.sh
+
     # Run SSH integration tests on Linux and macOS
     - name: Run SSH integration tests (Unix)
       if: matrix.os != 'windows-latest'

@@ -3,7 +3,7 @@ use std::io::Result;
 fn main() -> Result<()> {
     #[cfg(feature = "proto")]
     compile_protos()?;
-    
+
     // Always compile successfully even if proto feature is not enabled
     Ok(())
 }
@@ -12,13 +12,13 @@ fn main() -> Result<()> {
 fn compile_protos() -> Result<()> {
     use std::fs;
     use std::path::Path;
-    
+
     // Create proto directory if it doesn't exist
     let proto_dir = Path::new("proto");
     if !proto_dir.exists() {
         fs::create_dir_all(proto_dir)?;
     }
-    
+
     // Ensure our basic proto file exists
     let proto_file = proto_dir.join("dedups.proto");
     if !proto_file.exists() {
@@ -128,11 +128,11 @@ message DedupOptions {
 "#,
         )?;
     }
-    
+
     // Compile the proto file
     prost_build::compile_protos(&[proto_file], &[proto_dir])?;
-    
+
     println!("cargo:rerun-if-changed=proto/dedups.proto");
-    
+
     Ok(())
-} 
+}

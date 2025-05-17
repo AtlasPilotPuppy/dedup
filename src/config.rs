@@ -82,7 +82,7 @@ pub struct DedupConfig {
     #[cfg(feature = "ssh")]
     #[serde(default)]
     pub ssh: SshConfig,
-    
+
     /// Protocol options
     #[cfg(feature = "proto")]
     #[serde(default)]
@@ -125,11 +125,11 @@ pub struct ProtocolConfig {
     /// Whether to use Protobuf instead of JSON
     #[serde(default = "default_use_protobuf")]
     pub use_protobuf: bool,
-    
+
     /// Whether to use ZSTD compression
     #[serde(default = "default_use_compression")]
     pub use_compression: bool,
-    
+
     /// ZSTD compression level (1-22)
     #[serde(default = "default_compression_level")]
     pub compression_level: u32,
@@ -378,7 +378,7 @@ impl DedupConfig {
 
         Ok(true) // File was created
     }
-    
+
     /// Convert to unified DedupOptions structure
     pub fn to_options(&self) -> DedupOptions {
         // Convert ResolutionPreference to string
@@ -387,9 +387,9 @@ impl DedupConfig {
             crate::media_dedup::ResolutionPreference::Lowest => "lowest".to_string(),
             crate::media_dedup::ResolutionPreference::ClosestTo(w, h) => format!("{}x{}", w, h),
         };
-        
+
         let formats = self.media_dedup.format_preference.formats.clone();
-        
+
         DedupOptions {
             // Basic options
             algorithm: self.algorithm.clone(),
@@ -404,14 +404,14 @@ impl DedupConfig {
             exclude: self.exclude.clone(),
             cache_location: self.cache_location.clone(),
             fast_mode: self.fast_mode,
-            
+
             // Media options
             media_dedup_options: self.media_dedup.clone(),
             media_mode: self.media_dedup.enabled,
             media_resolution: resolution,
             media_formats: formats,
             media_similarity: self.media_dedup.similarity_threshold,
-            
+
             // Set defaults for the rest
             log: false,
             log_file: None,
@@ -423,7 +423,7 @@ impl DedupConfig {
             raw_sizes: false,
             config_file: None,
             dry_run: false,
-            
+
             // SSH options
             #[cfg(feature = "ssh")]
             allow_remote_install: self.ssh.allow_remote_install,
@@ -441,7 +441,7 @@ impl DedupConfig {
             server_mode: false,
             #[cfg(feature = "ssh")]
             port: 0,
-            
+
             // Protocol options
             #[cfg(feature = "proto")]
             use_protobuf: self.protocol.use_protobuf,
@@ -449,7 +449,7 @@ impl DedupConfig {
             use_compression: self.protocol.use_compression,
             #[cfg(feature = "proto")]
             compression_level: self.protocol.compression_level,
-            
+
             // Initialize the rest from defaults
             directories: Vec::new(),
             target: None,
@@ -458,7 +458,7 @@ impl DedupConfig {
             move_to: None,
         }
     }
-    
+
     /// Create a config from DedupOptions
     pub fn from_options(options: &DedupOptions) -> Self {
         Self {
@@ -475,10 +475,10 @@ impl DedupConfig {
             exclude: options.exclude.clone(),
             cache_location: options.cache_location.clone(),
             fast_mode: options.fast_mode,
-            
+
             // Media options
             media_dedup: options.media_dedup_options.clone(),
-            
+
             // SSH options
             #[cfg(feature = "ssh")]
             ssh: SshConfig {
@@ -489,7 +489,7 @@ impl DedupConfig {
                 use_sudo: options.use_sudo,
                 use_ssh_tunnel: options.use_ssh_tunnel,
             },
-            
+
             // Protocol options
             #[cfg(feature = "proto")]
             protocol: ProtocolConfig {
@@ -518,7 +518,7 @@ mod tests {
         assert!(config.exclude.is_empty());
         assert_eq!(config.parallel, None);
         assert!(!config.progress);
-        
+
         #[cfg(feature = "proto")]
         {
             assert!(config.protocol.use_protobuf);
@@ -539,7 +539,7 @@ mod tests {
         test_config.parallel = Some(4);
         test_config.include = vec!["*.jpg".to_string(), "*.png".to_string()];
         test_config.exclude = vec!["*tmp*".to_string()];
-        
+
         #[cfg(feature = "proto")]
         {
             test_config.protocol.use_protobuf = false;
@@ -557,7 +557,7 @@ mod tests {
         assert_eq!(loaded_config.parallel, Some(4));
         assert_eq!(loaded_config.include, vec!["*.jpg", "*.png"]);
         assert_eq!(loaded_config.exclude, vec!["*tmp*"]);
-        
+
         #[cfg(feature = "proto")]
         {
             assert_eq!(loaded_config.protocol.use_protobuf, false);
@@ -566,7 +566,7 @@ mod tests {
 
         Ok(())
     }
-    
+
     #[test]
     fn test_to_options_and_back() -> Result<()> {
         // Create a test configuration
@@ -575,25 +575,25 @@ mod tests {
         test_config.parallel = Some(4);
         test_config.include = vec!["*.jpg".to_string(), "*.png".to_string()];
         test_config.exclude = vec!["*tmp*".to_string()];
-        
+
         // Convert to options
         let options = test_config.to_options();
-        
+
         // Verify options match config
         assert_eq!(options.algorithm, "sha256");
         assert_eq!(options.parallel, Some(4));
         assert_eq!(options.include, vec!["*.jpg", "*.png"]);
         assert_eq!(options.exclude, vec!["*tmp*"]);
-        
+
         // Convert back to config
         let converted_config = DedupConfig::from_options(&options);
-        
+
         // Verify converted config matches original
         assert_eq!(converted_config.algorithm, "sha256");
         assert_eq!(converted_config.parallel, Some(4));
         assert_eq!(converted_config.include, vec!["*.jpg", "*.png"]);
         assert_eq!(converted_config.exclude, vec!["*tmp*"]);
-        
+
         Ok(())
     }
 }

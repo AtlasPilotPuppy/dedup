@@ -24,49 +24,63 @@ jobs:
     strategy:
       matrix:
         include:
-          # Linux builds - standard and SSH
+          # Linux builds with linux
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             artifact_name: dedups-linux-x86_64
             binary_name: dedups
-            features: ""
-            features_flag: ""
+            features: "linux"
+            features_flag: "--features linux"
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            artifact_name: dedups-linux-x86_64-ssh
+            artifact_name: dedups-linux-x86_64-ssh-proto
             binary_name: dedups
-            features: "ssh"
-            features_flag: "--features ssh"
+            features: "linux,ssh,proto"
+            features_flag: "--features linux,ssh,proto"
           
-          # macOS x86_64 builds - standard and SSH
+          # Linux ARM builds with linux
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            artifact_name: dedups-linux-aarch64
+            binary_name: dedups
+            features: "linux"
+            features_flag: "--features linux"
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            artifact_name: dedups-linux-aarch64-ssh-proto
+            binary_name: dedups
+            features: "linux,ssh,proto"
+            features_flag: "--features linux,ssh,proto"
+          
+          # macOS x86_64 builds with linux
           - os: macos-latest
             target: x86_64-apple-darwin
             artifact_name: dedups-macos-x86_64
             binary_name: dedups
-            features: ""
-            features_flag: ""
+            features: "linux"
+            features_flag: "--features linux"
           - os: macos-latest
             target: x86_64-apple-darwin
-            artifact_name: dedups-macos-x86_64-ssh
+            artifact_name: dedups-macos-x86_64-ssh-proto
             binary_name: dedups
-            features: "ssh"
-            features_flag: "--features ssh"
+            features: "linux,ssh,proto"
+            features_flag: "--features linux,ssh,proto"
           
-          # macOS ARM builds - standard and SSH
+          # macOS ARM builds with linux
           - os: macos-latest
             target: aarch64-apple-darwin
             artifact_name: dedups-macos-aarch64
             binary_name: dedups
-            features: ""
-            features_flag: ""
+            features: "linux"
+            features_flag: "--features linux"
           - os: macos-latest
             target: aarch64-apple-darwin
-            artifact_name: dedups-macos-aarch64-ssh
+            artifact_name: dedups-macos-aarch64-ssh-proto
             binary_name: dedups
-            features: "ssh"
-            features_flag: "--features ssh"
+            features: "linux,ssh,proto"
+            features_flag: "--features linux,ssh,proto"
           
-          # Windows builds - standard and SSH
+          # Windows builds (no linux)
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             artifact_name: dedups-windows-x86_64.exe
@@ -79,6 +93,32 @@ jobs:
             binary_name: dedups.exe
             features: "ssh"
             features_flag: "--features ssh"
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_name: dedups-windows-x86_64-ssh-proto.exe
+            binary_name: dedups.exe
+            features: "ssh,proto"
+            features_flag: "--features ssh,proto"
+          
+          # Windows ARM builds (no linux)
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+            artifact_name: dedups-windows-aarch64.exe
+            binary_name: dedups.exe
+            features: ""
+            features_flag: ""
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+            artifact_name: dedups-windows-aarch64-ssh.exe
+            binary_name: dedups.exe
+            features: "ssh"
+            features_flag: "--features ssh"
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+            artifact_name: dedups-windows-aarch64-ssh-proto.exe
+            binary_name: dedups.exe
+            features: "ssh,proto"
+            features_flag: "--features ssh,proto"
 
     steps:
       - uses: actions/checkout@v4
@@ -109,7 +149,8 @@ jobs:
             build-essential \
             zlib1g-dev \
             libssh2-1-dev \
-            openssl
+            openssl \
+            gcc-aarch64-linux-gnu
           
           # Set OpenSSL environment variables
           echo "OPENSSL_DIR=/usr" >> $GITHUB_ENV
@@ -330,13 +371,19 @@ jobs:
         with:
           files: |
             dedups-linux-x86_64
-            dedups-linux-x86_64-ssh
+            dedups-linux-x86_64-ssh-proto
+            dedups-linux-aarch64
+            dedups-linux-aarch64-ssh-proto
             dedups-macos-x86_64
-            dedups-macos-x86_64-ssh
+            dedups-macos-x86_64-ssh-proto
             dedups-macos-aarch64
-            dedups-macos-aarch64-ssh
+            dedups-macos-aarch64-ssh-proto
             dedups-windows-x86_64.exe
             dedups-windows-x86_64-ssh.exe
+            dedups-windows-x86_64-ssh-proto.exe
+            dedups-windows-aarch64.exe
+            dedups-windows-aarch64-ssh.exe
+            dedups-windows-aarch64-ssh-proto.exe
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
