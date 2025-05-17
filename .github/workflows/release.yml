@@ -152,6 +152,12 @@ jobs:
             openssl \
             gcc-aarch64-linux-gnu
           
+          # Install protobuf compiler if proto feature is enabled
+          if [[ "${{ matrix.features }}" == *"proto"* ]]; then
+            sudo apt-get install -y protobuf-compiler
+            echo "PROTOC=/usr/bin/protoc" >> $GITHUB_ENV
+          fi
+          
           # Set OpenSSL environment variables
           echo "OPENSSL_DIR=/usr" >> $GITHUB_ENV
           echo "OPENSSL_LIB_DIR=/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
