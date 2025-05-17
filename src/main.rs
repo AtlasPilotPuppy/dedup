@@ -449,25 +449,23 @@ fn handle_multi_directory_mode(cli: &Cli) -> Result<()> {
                 }
             }
         }
+    } else if !cli.json {
+        println!("No missing files found in target directory.");
     } else {
-        if !cli.json {
-            println!("No missing files found in target directory.");
-        } else {
-            // Stream the empty missing files result
-            let missing_info = serde_json::json!({
-                "type": "missing_files",
-                "count": 0,
-                "files": []
-            });
-            println!("{}", serde_json::to_string(&missing_info)?);
+        // Stream the empty missing files result
+        let missing_info = serde_json::json!({
+            "type": "missing_files",
+            "count": 0,
+            "files": []
+        });
+        println!("{}", serde_json::to_string(&missing_info)?);
 
-            // Add to overall result
-            json_result.insert(
-                "missing_files".to_string(),
-                serde_json::json!(Vec::<String>::new()),
-            );
-            json_result.insert("missing_count".to_string(), serde_json::json!(0));
-        }
+        // Add to overall result
+        json_result.insert(
+            "missing_files".to_string(),
+            serde_json::json!(Vec::<String>::new()),
+        );
+        json_result.insert("missing_count".to_string(), serde_json::json!(0));
     }
 
     // Handle duplicates if deduplication is enabled

@@ -1,3 +1,4 @@
+#[allow(unused_imports)]
 use anyhow::{Context, Result};
 use glob::{Pattern, PatternError};
 use num_cpus;
@@ -1550,7 +1551,7 @@ pub fn copy_file(source: &Path, dest: &Path, dry_run: bool) -> Result<()> {
 
         #[cfg(not(feature = "ssh"))]
         {
-            return Err(anyhow::anyhow!("SSH support is not enabled in this build"));
+            Err(anyhow::anyhow!("SSH support is not enabled in this build"))
         }
     } else {
         // Both paths are local, use standard copy
