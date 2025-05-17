@@ -33,6 +33,27 @@ jobs:
           ~/.cargo/git
           target
         key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+    # Install system dependencies
+    - name: Install Linux dependencies
+      if: matrix.os == 'ubuntu-latest'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libssl-dev pkg-config docker.io
+
+    - name: Install macOS dependencies
+      if: matrix.os == 'macos-latest'
+      run: |
+        brew update
+        brew install openssl@3 docker
+        echo "OPENSSL_DIR=$(brew --prefix openssl@3)" >> $GITHUB_ENV
+
+    # Start Docker service on Linux
+    - name: Start Docker service
+      if: matrix.os == 'ubuntu-latest'
+      run: |
+        sudo systemctl start docker
+        sudo docker --version
     
     - name: Check formatting
       run: cargo fmt -- --check
@@ -40,7 +61,7 @@ jobs:
     - name: Clippy
       run: cargo clippy -- -D warnings
     
-    # Run tests (OS-specific)
+    # Run standard tests (OS-specific)
     - name: Run tests (Ubuntu)
       if: matrix.os == 'ubuntu-latest'
       run: cargo test --features linux
@@ -55,7 +76,23 @@ jobs:
       if: matrix.os == 'windows-latest'
       run: cargo test
 
-    # Run integration tests (OS-specific)
+    # Run SSH integration tests on Linux and macOS
+    - name: Run SSH integration tests (Unix)
+      if: matrix.os != 'windows-latest'
+      run: |
+        # Build test container
+        docker build -t dedups-test -f Dockerfile.test .
+        
+        # Set up test environment
+        chmod +x test_env/setup_test_env.sh
+        ./test_env/setup_test_env.sh
+        
+        # Run SSH tests
+        cargo test --features ssh --test ssh_integration_tests -- --ignored --nocapture
+      env:
+        DOCKER_BUILDKIT: 1
+
+    # Run standard integration tests (OS-specific)
     - name: Run integration tests (Ubuntu)
       if: matrix.os == 'ubuntu-latest'
       run: cargo test --test '*' --features linux

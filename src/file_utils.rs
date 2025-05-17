@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use glob::{Pattern, PatternError};
 use num_cpus;
 use rayon::prelude::*;
