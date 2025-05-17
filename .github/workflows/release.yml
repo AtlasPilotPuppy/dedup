@@ -333,7 +333,7 @@ jobs:
             $protocVersion = "25.1"
             $protocUrl = "https://github.com/protocolbuffers/protobuf/releases/download/v${protocVersion}/protoc-${protocVersion}-win64.zip"
             $protocZip = "protoc.zip"
-            $protocDir = "protoc"
+            $protocDir = "$env:GITHUB_WORKSPACE\protoc"
             
             # Download protoc
             Invoke-WebRequest -Uri $protocUrl -OutFile $protocZip
@@ -341,11 +341,16 @@ jobs:
             # Extract protoc
             Expand-Archive -Path $protocZip -DestinationPath $protocDir
             
-            # Add protoc to PATH
-            $env:PATH = "$env:GITHUB_WORKSPACE\$protocDir\bin;$env:PATH"
-            $env:PROTOC = "$env:GITHUB_WORKSPACE\$protocDir\bin\protoc.exe"
+            # Add protoc to PATH and set PROTOC env variable
+            $protocBin = Join-Path $protocDir "bin"
+            $protocExe = Join-Path $protocBin "protoc.exe"
+            $env:PATH = "$protocBin;$env:PATH"
+            $env:PROTOC = $protocExe
             
             # Verify protoc installation
+            Write-Host "Protoc bin: $protocBin"
+            Write-Host "Protoc exe: $protocExe"
+            Get-ChildItem $protocBin
             protoc --version
           }
           

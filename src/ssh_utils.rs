@@ -732,8 +732,8 @@ impl SshProtocol {
         }
         
         // Add verbosity flags to remote server based on local verbosity
-        for _ in 0..cli.verbose {
-            server_flags.push("-v");
+        if cli.verbose > 0 {
+            server_flags.extend(std::iter::repeat_n("-v", cli.verbose as usize));
         }
         
         // Add a special handshake flag that the server will respond to
@@ -852,7 +852,7 @@ impl SshProtocol {
         
         let options = crate::options::DedupOptions {
             use_ssh_tunnel: true,
-            tunnel_api_mode: tunnel_api_mode,  // Always true in tunnel mode
+            tunnel_api_mode,  // Use shorthand field initialization
             port: local_port,
             #[cfg(feature = "proto")]
             use_protobuf: cli.use_protobuf,
@@ -869,7 +869,6 @@ impl SshProtocol {
         // Attempt to connect with retry
         let max_attempts = 5; // Increase retries
         let mut connected = false;
-        let mut handshake_message = String::new();
         
         if cli.verbose >= 2 {
             log::info!("Attempting to connect to remote server on localhost:{}", local_port);
@@ -895,9 +894,8 @@ impl SshProtocol {
                         Ok(response) => {
                             if response.contains("handshake_ok") {
                                 handshake_received = true;
-                                handshake_message = "Handshake successful - server communication established".to_string();
                                 if cli.verbose >= 1 {
-                                    log::info!("{}", handshake_message);
+                                    log::info!("Handshake successful - server communication established");
                                 }
                             } else {
                                 log::warn!("Handshake response received but not recognized: {}", response);
