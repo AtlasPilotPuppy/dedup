@@ -301,7 +301,7 @@ jobs:
           MACOSX_DEPLOYMENT_TARGET: "11.0"
           OPENSSL_NO_VENDOR: "1"
           OPENSSL_STATIC: "0"
-          RUSTFLAGS: "-C target-cpu=x86-64-v2 -C target-feature=+neon"
+          RUSTFLAGS: "-C target-cpu=x86-64-v2"
 
       # Build with macOS ARM flags
       - name: Build (macOS ARM)

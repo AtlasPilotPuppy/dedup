@@ -92,6 +92,7 @@ message DedupOptions {
     bool use_ssh_tunnel = 31;
     bool server_mode = 32;
     uint32 port = 33;
+    bool tunnel_api_mode = 37;
     
     // Protocol options
     bool use_protobuf = 34;

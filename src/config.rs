@@ -108,6 +108,10 @@ pub struct SshConfig {
     /// Whether to use SSH tunneling for reliable JSON streaming
     #[serde(default = "default_use_ssh_tunnel")]
     pub use_ssh_tunnel: bool,
+    
+    /// Whether to use tunnel API mode for dedups communication
+    #[serde(default = "default_tunnel_api_mode")]
+    pub tunnel_api_mode: bool,
 
     /// Default SSH options
     #[serde(default)]
@@ -175,6 +179,11 @@ fn default_use_ssh_tunnel() -> bool {
     true
 }
 
+#[cfg(feature = "ssh")]
+fn default_tunnel_api_mode() -> bool {
+    true
+}
+
 #[cfg(feature = "proto")]
 fn default_use_protobuf() -> bool {
     true
@@ -198,6 +207,7 @@ impl Default for SshConfig {
             use_remote_dedups: default_use_remote_dedups(),
             use_sudo: default_use_sudo(),
             use_ssh_tunnel: default_use_ssh_tunnel(),
+            tunnel_api_mode: default_tunnel_api_mode(),
             ssh_options: Vec::new(),
             rsync_options: Vec::new(),
         }
@@ -441,6 +451,8 @@ impl DedupConfig {
             server_mode: false,
             #[cfg(feature = "ssh")]
             port: 0,
+            #[cfg(feature = "ssh")]
+            tunnel_api_mode: self.ssh.tunnel_api_mode,
 
             // Protocol options
             #[cfg(feature = "proto")]
@@ -488,6 +500,7 @@ impl DedupConfig {
                 use_remote_dedups: options.use_remote_dedups,
                 use_sudo: options.use_sudo,
                 use_ssh_tunnel: options.use_ssh_tunnel,
+                tunnel_api_mode: options.tunnel_api_mode,
             },
 
             // Protocol options

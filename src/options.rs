@@ -68,6 +68,8 @@ pub struct DedupOptions {
     pub server_mode: bool,
     #[cfg(feature = "ssh")]
     pub port: u16,
+    #[cfg(feature = "ssh")]
+    pub tunnel_api_mode: bool,  // New flag to enable separate tunnel API mode
 
     // Protocol options
     #[cfg(feature = "proto")]
@@ -132,7 +134,9 @@ impl Default for DedupOptions {
             #[cfg(feature = "ssh")]
             server_mode: false,
             #[cfg(feature = "ssh")]
-            port: 0,
+            port: 29875,  // Default port for API communication
+            #[cfg(feature = "ssh")]
+            tunnel_api_mode: true,  // Enabled by default to use API-style communication
 
             // Protocol options
             #[cfg(feature = "proto")]
@@ -215,6 +219,7 @@ impl DedupOptions {
             use_ssh_tunnel: self.use_ssh_tunnel,
             server_mode: self.server_mode,
             port: self.port as u32,
+            tunnel_api_mode: self.tunnel_api_mode,
 
             // Protocol options
             use_protobuf: self.use_protobuf,
@@ -283,6 +288,8 @@ impl DedupOptions {
             server_mode: proto_opts.server_mode,
             #[cfg(feature = "ssh")]
             port: proto_opts.port as u16,
+            #[cfg(feature = "ssh")]
+            tunnel_api_mode: proto_opts.tunnel_api_mode,
 
             // Protocol options
             #[cfg(feature = "proto")]
@@ -292,5 +299,24 @@ impl DedupOptions {
             #[cfg(feature = "proto")]
             compression_level: proto_opts.compression_level,
         }
+    }
+    
+    #[cfg(feature = "ssh")]
+    pub fn find_available_port(&self) -> u16 {
+        // Start with default port and find next available
+        let mut port = self.port;
+        let socket = std::net::TcpListener::bind(("127.0.0.1", port));
+        
+        // If the port is unavailable, try the next port
+        if socket.is_err() {
+            for p in port+1..port+100 {
+                if std::net::TcpListener::bind(("127.0.0.1", p)).is_ok() {
+                    return p;
+                }
+            }
+        }
+        
+        // Return the original port if it's available or no other port was found
+        port
     }
 }

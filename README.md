@@ -499,21 +499,22 @@ dedups uses an SSH tunnel to ensure reliable JSON streaming between the local an
 
 This feature:
 - Creates a secure tunnel for JSON data transmission
-- Uses netcat (nc) on the remote system for unbuffered streaming
+- Uses a dedicated API-style communication channel on port 29875 (configurable)
+- Separates protocol data from logs and other output
 - Provides real-time progress updates from remote operations
+- Uses Protocol Buffers for efficient data serialization
 - Falls back to standard SSH if tunneling is unavailable
 
 You can control this behavior with:
 - `--use-ssh-tunnel` - Enable SSH tunneling (default)
 - `--no-use-ssh-tunnel` - Disable SSH tunneling and use standard SSH connection
+- `--tunnel-api-mode` - Use the improved API-style communication (default)
+- `--no-tunnel-api-mode` - Use basic tunneling without the enhanced API separation
+- `--port <number>` - Specify a custom port for the tunnel (default: 29875)
 
 Requirements for optimal tunneling:
-- netcat (nc) installed on the remote system
-- Local port available for tunnel creation (automatically selected)
 - SSH port forwarding permissions
-
-If netcat is unavailable, dedups will try to use `stdbuf` or `unbuffer` for improved streaming
-over standard SSH connections.
+- Local and remote ports available (default 29875 or auto-selected)
 
 ### Remote File Operations
 

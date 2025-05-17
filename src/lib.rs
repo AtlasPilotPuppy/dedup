@@ -287,6 +287,15 @@ pub struct Cli {
     )]
     pub use_ssh_tunnel: bool,
 
+    /// Use tunnel API mode for communication (recommended for better parsing)
+    #[cfg(feature = "ssh")]
+    #[clap(
+        long,
+        default_value_t = true,
+        help = "Use dedicated API tunnel for communication (avoids stdout parsing issues)"
+    )]
+    pub tunnel_api_mode: bool,
+
     /// Run in server mode to listen for commands over a socket/stdin
     #[cfg(feature = "ssh")]
     #[clap(long, help = "Run in server mode on the specified port")]
@@ -541,6 +550,8 @@ impl Cli {
             server_mode: self.server_mode,
             #[cfg(feature = "ssh")]
             port: self.port,
+            #[cfg(feature = "ssh")]
+            tunnel_api_mode: self.tunnel_api_mode,
 
             // Protocol options
             #[cfg(feature = "proto")]
@@ -610,6 +621,7 @@ impl Cli {
             cli.use_ssh_tunnel = options.use_ssh_tunnel;
             cli.server_mode = options.server_mode;
             cli.port = options.port;
+            cli.tunnel_api_mode = options.tunnel_api_mode;
         }
 
         // Protocol options

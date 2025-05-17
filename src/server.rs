@@ -192,6 +192,24 @@ impl DedupServer {
         // Build and execute the command
         let mut cmd = Command::new(&command_msg.command);
         cmd.args(&command_msg.args);
+        
+        // Check if we're in tunnel API mode where we need strict JSON output separation
+        let tunnel_api_mode = command_msg.options.get("USE_TUNNEL_API").is_some();
+        
+        if tunnel_api_mode {
+            // For tunnel API mode, we force --json output to ensure proper protocol format
+            // and separate stdout/stderr completely to avoid mixing
+            if !command_msg.args.contains(&"--json".to_string()) {
+                cmd.arg("--json");
+            }
+            
+            // In tunnel API mode, redirect all logging to stderr only
+            cmd.env("RUST_LOG_TARGET", "stderr");
+            
+            // Add API mode flag to signal the child process to use strict mode
+            cmd.env("DEDUPS_TUNNEL_API", "1");
+        }
+        
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
 
@@ -211,6 +229,7 @@ impl DedupServer {
 
                 // Process stdout in a separate thread
                 let mut protocol_clone = protocol.box_clone();
+                let tunnel_api_mode_clone = tunnel_api_mode;
                 let stdout_thread = thread::spawn(move || {
                     let reader = BufReader::new(stdout);
                     for line in reader.lines() {
@@ -227,52 +246,50 @@ impl DedupServer {
                                     log::error!("Error sending output to client: {}", e);
                                     break;
                                 }
+                            } else if tunnel_api_mode_clone {
+                                // In tunnel API mode, non-JSON stdout is treated as an error
+                                // as we expect clean protocol
+                                log::warn!("Unexpected non-JSON output on stdout in tunnel API mode: {}", line);
                             } else {
+                                // Regular mode, stdout may contain mixed output
                                 log::debug!("STDOUT: {}", line);
                             }
                         }
                     }
                 });
 
-                // Process stderr in main thread
-                let stderr_reader = BufReader::new(stderr);
-                for line in stderr_reader.lines() {
-                    if let Ok(line) = line {
-                        log::debug!("STDERR: {}", line);
+                // Process stderr in a separate thread to avoid blocking
+                let stderr_thread = thread::spawn(move || {
+                    let stderr_reader = BufReader::new(stderr);
+                    for line in stderr_reader.lines() {
+                        if let Ok(line) = line {
+                            // Stderr is always logged but doesn't affect protocol
+                            log::debug!("STDERR: {}", line);
+                        }
                     }
-                }
+                });
 
                 // Wait for stdout thread to complete
                 stdout_thread.join().expect("Stdout thread panicked");
-
+                
+                // We don't need to wait for stderr thread as it's not critical for protocol
+                
                 // Wait for process to exit
                 let status = child.wait()?;
                 log::info!("Command exited with status: {}", status);
 
-                // Send final result message
-                let result = ResultMessage {
-                    duplicate_count: 0, // These would come from actual output parsing
-                    total_files: 0,
-                    total_bytes: 0,
-                    duplicate_bytes: 0,
-                    elapsed_seconds: 0.0,
-                };
-
-                let result_json = serde_json::to_string(&result)?;
-                let result_msg = DedupMessage {
-                    message_type: MessageType::Result,
-                    payload: result_json,
-                };
-
-                protocol.send_message(result_msg)?;
-
-                Ok(())
+                if !status.success() {
+                    let err_msg = format!("Command failed with exit code: {}", status);
+                    Self::send_error(protocol, &err_msg, 2)?;
+                }
             }
             Err(e) => {
-                log::error!("Failed to execute command: {}", e);
-                Self::send_error(protocol, &format!("Failed to execute command: {}", e), 2)
+                let err_msg = format!("Failed to execute command: {}", e);
+                Self::send_error(protocol, &err_msg, 3)?;
             }
         }
+
+        Ok(())
     }
 
     /// Send an error message to the client

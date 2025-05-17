@@ -402,14 +402,22 @@ pub type TcpProtocolHandler = JsonProtocolHandler;
 // Utility function to find an available port
 #[cfg(feature = "ssh")]
 pub fn find_available_port(start_range: u16, end_range: u16) -> Result<u16> {
+    use std::net::TcpListener;
+
+    // Try the default dedups port first (29875) if within range
+    let default_port = 29875;
+    if default_port >= start_range && default_port <= end_range {
+        if TcpListener::bind(("127.0.0.1", default_port)).is_ok() {
+            return Ok(default_port);
+        }
+    }
+
+    // If default port is unavailable, try sequentially in the range
     for port in start_range..=end_range {
-        if let Ok(_) = std::net::TcpListener::bind(format!("127.0.0.1:{}", port)) {
+        if TcpListener::bind(("127.0.0.1", port)).is_ok() {
             return Ok(port);
         }
     }
-    Err(anyhow!(
-        "No available ports found in range {}-{}",
-        start_range,
-        end_range
-    ))
+
+    Err(anyhow!("No available ports found in range {}-{}", start_range, end_range))
 }
