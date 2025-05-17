@@ -2,7 +2,6 @@
 use anyhow::{Context, Result};
 #[cfg(feature = "ssh")]
 use ssh2::Session;
-use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
 /// Represents a remote location parsed from an SSH URI
@@ -511,24 +510,6 @@ impl RemoteLocation {
     }
 }
 
-/// Get default SSH key file locations
-#[cfg(feature = "ssh")]
-fn get_default_key_files() -> Vec<PathBuf> {
-    let home = match dirs::home_dir() {
-        Some(home) => home,
-        None => return Vec::new(),
-    };
-
-    let ssh_dir = home.join(".ssh");
-
-    vec![
-        ssh_dir.join("id_rsa"),
-        ssh_dir.join("id_dsa"),
-        ssh_dir.join("id_ecdsa"),
-        ssh_dir.join("id_ed25519"),
-    ]
-}
-
 /// SSH Communication protocol for dedups instances
 #[cfg(feature = "ssh")]
 pub struct SshProtocol {
@@ -1024,15 +1005,6 @@ impl SshProtocol {
 
         options
     }
-}
-
-/// Find an available port on the local system
-#[cfg(feature = "ssh")]
-fn find_available_port() -> Result<u16> {
-    // Try to bind to port 0, which lets the OS choose an available port
-    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
-    let addr = listener.local_addr()?;
-    Ok(addr.port())
 }
 
 /// Dummy implementation for non-SSH builds

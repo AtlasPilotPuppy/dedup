@@ -54,12 +54,17 @@ test_protocol_perf() {
     
     print_status "Testing $protocol protocol${compression:+ with compression level $level}..."
     
-    # Start server in background
-    ./target/release/dedups --server-mode --port 12345 \
-        ${protocol:+--use-protobuf} \
-        ${compression:+--use-compression} \
-        ${level:+--compression-level $level} &
+    # Build server command
+    local server_cmd="./target/release/dedups --server-mode --port 12345"
+    if [[ "$protocol" == "protobuf" ]]; then
+        server_cmd+=" --use-protobuf"
+        if [[ "$compression" == "yes" ]]; then
+            server_cmd+=" --use-compression --compression-level $level"
+        fi
+    fi
     
+    # Start server in background
+    eval "$server_cmd &"
     SERVER_PID=$!
     
     # Wait for server to start
