@@ -144,6 +144,11 @@ jobs:
         shell: bash
         run: |
           sudo apt-get update
+          
+          # Enable multi-arch support
+          sudo dpkg --add-architecture arm64
+          sudo apt-get update
+          
           sudo apt-get install -y \
             pkg-config \
             libssl-dev \
@@ -151,9 +156,16 @@ jobs:
             zlib1g-dev \
             libssh2-1-dev \
             openssl \
-            gcc-aarch64-linux-gnu \
-            libssl-dev:amd64 \
-            libssl-dev:arm64
+            gcc-aarch64-linux-gnu
+          
+          # Install ARM64 specific packages if targeting ARM64
+          if [[ "${{ matrix.target }}" == "aarch64-unknown-linux-gnu" ]]; then
+            sudo apt-get install -y \
+              gcc-aarch64-linux-gnu \
+              g++-aarch64-linux-gnu \
+              libc6-dev-arm64-cross \
+              libssl-dev:arm64
+          fi
 
           # Install protobuf compiler if proto feature is enabled
           if [[ "${{ matrix.features }}" == *"proto"* ]]; then
@@ -162,35 +174,32 @@ jobs:
           fi
           
           # Set OpenSSL environment variables
-          echo "OPENSSL_DIR=/usr" >> $GITHUB_ENV
-          echo "OPENSSL_LIB_DIR=/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
-          echo "OPENSSL_INCLUDE_DIR=/usr/include" >> $GITHUB_ENV
-          
-          # Create symlinks if needed
-          sudo mkdir -p /usr/include/openssl
-          sudo ln -sf /usr/include/x86_64-linux-gnu/openssl/opensslconf.h /usr/include/openssl/ || true
-          sudo ln -sf /usr/include/x86_64-linux-gnu/openssl/configuration.h /usr/include/openssl/ || true
+          if [[ "${{ matrix.target }}" == "aarch64-unknown-linux-gnu" ]]; then
+            echo "OPENSSL_DIR=/usr/aarch64-linux-gnu" >> $GITHUB_ENV
+            echo "OPENSSL_LIB_DIR=/usr/lib/aarch64-linux-gnu" >> $GITHUB_ENV
+            echo "OPENSSL_INCLUDE_DIR=/usr/include/aarch64-linux-gnu" >> $GITHUB_ENV
+            echo "PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig" >> $GITHUB_ENV
+            echo "PKG_CONFIG_ALLOW_CROSS=1" >> $GITHUB_ENV
+            
+            # Create symlinks for ARM64 if needed
+            sudo mkdir -p /usr/aarch64-linux-gnu/include/openssl
+            sudo ln -sf /usr/include/aarch64-linux-gnu/openssl/opensslconf.h /usr/aarch64-linux-gnu/include/openssl/ || true
+            sudo ln -sf /usr/include/aarch64-linux-gnu/openssl/configuration.h /usr/aarch64-linux-gnu/include/openssl/ || true
+          else
+            echo "OPENSSL_DIR=/usr" >> $GITHUB_ENV
+            echo "OPENSSL_LIB_DIR=/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
+            echo "OPENSSL_INCLUDE_DIR=/usr/include" >> $GITHUB_ENV
+            echo "PKG_CONFIG_PATH=/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/lib/pkgconfig" >> $GITHUB_ENV
+          fi
           
           # Verify OpenSSL installation
           pkg-config --libs openssl
           pkg-config --modversion openssl
-          ls -la /usr/include/openssl/
-          ls -la /usr/lib/x86_64-linux-gnu/
-          
-          # Set pkg-config paths
-          echo "PKG_CONFIG_PATH=/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/lib/pkgconfig" >> $GITHUB_ENV
-          
-          # For ARM64 cross-compilation
+          ls -la /usr/include/openssl/ || true
+          ls -la /usr/lib/x86_64-linux-gnu/ || true
           if [[ "${{ matrix.target }}" == "aarch64-unknown-linux-gnu" ]]; then
-            sudo apt-get install -y \
-              gcc-aarch64-linux-gnu \
-              g++-aarch64-linux-gnu \
-              libc6-dev-arm64-cross
-            
-            # Set up ARM64 OpenSSL
-            sudo mkdir -p /usr/aarch64-linux-gnu/include/openssl
-            sudo ln -sf /usr/include/aarch64-linux-gnu/openssl/opensslconf.h /usr/aarch64-linux-gnu/include/openssl/ || true
-            sudo ln -sf /usr/include/aarch64-linux-gnu/openssl/configuration.h /usr/aarch64-linux-gnu/include/openssl/ || true
+            ls -la /usr/lib/aarch64-linux-gnu/ || true
+            ls -la /usr/include/aarch64-linux-gnu/openssl/ || true
           fi
 
       # Set up x86_64 Homebrew for Intel builds
