@@ -7,6 +7,7 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use crate::media_dedup::MediaDedupOptions;
+use crate::options::DedupOptions;
 
 // For tests only - enable with test_mode feature
 #[cfg(feature = "test_mode")]
@@ -81,6 +82,11 @@ pub struct DedupConfig {
     #[cfg(feature = "ssh")]
     #[serde(default)]
     pub ssh: SshConfig,
+    
+    /// Protocol options
+    #[cfg(feature = "proto")]
+    #[serde(default)]
+    pub protocol: ProtocolConfig,
 }
 
 /// Configuration for SSH remote operations
@@ -110,6 +116,23 @@ pub struct SshConfig {
     /// Default Rsync options
     #[serde(default)]
     pub rsync_options: Vec<String>,
+}
+
+/// Configuration for Protocol options
+#[cfg(feature = "proto")]
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ProtocolConfig {
+    /// Whether to use Protobuf instead of JSON
+    #[serde(default = "default_use_protobuf")]
+    pub use_protobuf: bool,
+    
+    /// Whether to use ZSTD compression
+    #[serde(default = "default_use_compression")]
+    pub use_compression: bool,
+    
+    /// ZSTD compression level (1-22)
+    #[serde(default = "default_compression_level")]
+    pub compression_level: u32,
 }
 
 fn default_algorithm() -> String {
@@ -152,6 +175,21 @@ fn default_use_ssh_tunnel() -> bool {
     true
 }
 
+#[cfg(feature = "proto")]
+fn default_use_protobuf() -> bool {
+    true
+}
+
+#[cfg(feature = "proto")]
+fn default_use_compression() -> bool {
+    true
+}
+
+#[cfg(feature = "proto")]
+fn default_compression_level() -> u32 {
+    3
+}
+
 #[cfg(feature = "ssh")]
 impl Default for SshConfig {
     fn default() -> Self {
@@ -162,6 +200,17 @@ impl Default for SshConfig {
             use_ssh_tunnel: default_use_ssh_tunnel(),
             ssh_options: Vec::new(),
             rsync_options: Vec::new(),
+        }
+    }
+}
+
+#[cfg(feature = "proto")]
+impl Default for ProtocolConfig {
+    fn default() -> Self {
+        Self {
+            use_protobuf: default_use_protobuf(),
+            use_compression: default_use_compression(),
+            compression_level: default_compression_level(),
         }
     }
 }
@@ -184,6 +233,8 @@ impl Default for DedupConfig {
             media_dedup: MediaDedupOptions::default(),
             #[cfg(feature = "ssh")]
             ssh: SshConfig::default(),
+            #[cfg(feature = "proto")]
+            protocol: ProtocolConfig::default(),
         }
     }
 }
@@ -327,6 +378,127 @@ impl DedupConfig {
 
         Ok(true) // File was created
     }
+    
+    /// Convert to unified DedupOptions structure
+    pub fn to_options(&self) -> DedupOptions {
+        // Convert ResolutionPreference to string
+        let resolution = match self.media_dedup.resolution_preference {
+            crate::media_dedup::ResolutionPreference::Highest => "highest".to_string(),
+            crate::media_dedup::ResolutionPreference::Lowest => "lowest".to_string(),
+            crate::media_dedup::ResolutionPreference::ClosestTo(w, h) => format!("{}x{}", w, h),
+        };
+        
+        let formats = self.media_dedup.format_preference.formats.clone();
+        
+        DedupOptions {
+            // Basic options
+            algorithm: self.algorithm.clone(),
+            parallel: self.parallel,
+            mode: self.mode.clone(),
+            format: self.format.clone(),
+            json: self.json,
+            progress: self.progress,
+            sort_by: self.sort_by.clone(),
+            sort_order: self.sort_order.clone(),
+            include: self.include.clone(),
+            exclude: self.exclude.clone(),
+            cache_location: self.cache_location.clone(),
+            fast_mode: self.fast_mode,
+            
+            // Media options
+            media_dedup_options: self.media_dedup.clone(),
+            media_mode: self.media_dedup.enabled,
+            media_resolution: resolution,
+            media_formats: formats,
+            media_similarity: self.media_dedup.similarity_threshold,
+            
+            // Set defaults for the rest
+            log: false,
+            log_file: None,
+            output: None,
+            interactive: false,
+            verbose: 0,
+            filter_from: None,
+            progress_tui: false,
+            raw_sizes: false,
+            config_file: None,
+            dry_run: false,
+            
+            // SSH options
+            #[cfg(feature = "ssh")]
+            allow_remote_install: self.ssh.allow_remote_install,
+            #[cfg(feature = "ssh")]
+            ssh_options: self.ssh.ssh_options.clone(),
+            #[cfg(feature = "ssh")]
+            rsync_options: self.ssh.rsync_options.clone(),
+            #[cfg(feature = "ssh")]
+            use_remote_dedups: self.ssh.use_remote_dedups,
+            #[cfg(feature = "ssh")]
+            use_sudo: self.ssh.use_sudo,
+            #[cfg(feature = "ssh")]
+            use_ssh_tunnel: self.ssh.use_ssh_tunnel,
+            #[cfg(feature = "ssh")]
+            server_mode: false,
+            #[cfg(feature = "ssh")]
+            port: 0,
+            
+            // Protocol options
+            #[cfg(feature = "proto")]
+            use_protobuf: self.protocol.use_protobuf,
+            #[cfg(feature = "proto")]
+            use_compression: self.protocol.use_compression,
+            #[cfg(feature = "proto")]
+            compression_level: self.protocol.compression_level,
+            
+            // Initialize the rest from defaults
+            directories: Vec::new(),
+            target: None,
+            deduplicate: false,
+            delete: false,
+            move_to: None,
+        }
+    }
+    
+    /// Create a config from DedupOptions
+    pub fn from_options(options: &DedupOptions) -> Self {
+        Self {
+            // Basic options
+            algorithm: options.algorithm.clone(),
+            parallel: options.parallel,
+            mode: options.mode.clone(),
+            format: options.format.clone(),
+            json: options.json,
+            progress: options.progress,
+            sort_by: options.sort_by.clone(),
+            sort_order: options.sort_order.clone(),
+            include: options.include.clone(),
+            exclude: options.exclude.clone(),
+            cache_location: options.cache_location.clone(),
+            fast_mode: options.fast_mode,
+            
+            // Media options
+            media_dedup: options.media_dedup_options.clone(),
+            
+            // SSH options
+            #[cfg(feature = "ssh")]
+            ssh: SshConfig {
+                allow_remote_install: options.allow_remote_install,
+                ssh_options: options.ssh_options.clone(),
+                rsync_options: options.rsync_options.clone(),
+                use_remote_dedups: options.use_remote_dedups,
+                use_sudo: options.use_sudo,
+                use_ssh_tunnel: options.use_ssh_tunnel,
+            },
+            
+            // Protocol options
+            #[cfg(feature = "proto")]
+            protocol: ProtocolConfig {
+                use_protobuf: options.use_protobuf,
+                use_compression: options.use_compression,
+                compression_level: options.compression_level,
+            },
+        }
+    }
 }
 
 #[cfg(test)]
@@ -346,6 +518,13 @@ mod tests {
         assert!(config.exclude.is_empty());
         assert_eq!(config.parallel, None);
         assert!(!config.progress);
+        
+        #[cfg(feature = "proto")]
+        {
+            assert!(config.protocol.use_protobuf);
+            assert!(config.protocol.use_compression);
+            assert_eq!(config.protocol.compression_level, 3);
+        }
     }
 
     #[test]
@@ -360,6 +539,12 @@ mod tests {
         test_config.parallel = Some(4);
         test_config.include = vec!["*.jpg".to_string(), "*.png".to_string()];
         test_config.exclude = vec!["*tmp*".to_string()];
+        
+        #[cfg(feature = "proto")]
+        {
+            test_config.protocol.use_protobuf = false;
+            test_config.protocol.compression_level = 9;
+        }
 
         // Save the configuration
         test_config.save_to_path(&config_path)?;
@@ -372,7 +557,43 @@ mod tests {
         assert_eq!(loaded_config.parallel, Some(4));
         assert_eq!(loaded_config.include, vec!["*.jpg", "*.png"]);
         assert_eq!(loaded_config.exclude, vec!["*tmp*"]);
+        
+        #[cfg(feature = "proto")]
+        {
+            assert_eq!(loaded_config.protocol.use_protobuf, false);
+            assert_eq!(loaded_config.protocol.compression_level, 9);
+        }
 
+        Ok(())
+    }
+    
+    #[test]
+    fn test_to_options_and_back() -> Result<()> {
+        // Create a test configuration
+        let mut test_config = DedupConfig::default();
+        test_config.algorithm = "sha256".to_string();
+        test_config.parallel = Some(4);
+        test_config.include = vec!["*.jpg".to_string(), "*.png".to_string()];
+        test_config.exclude = vec!["*tmp*".to_string()];
+        
+        // Convert to options
+        let options = test_config.to_options();
+        
+        // Verify options match config
+        assert_eq!(options.algorithm, "sha256");
+        assert_eq!(options.parallel, Some(4));
+        assert_eq!(options.include, vec!["*.jpg", "*.png"]);
+        assert_eq!(options.exclude, vec!["*tmp*"]);
+        
+        // Convert back to config
+        let converted_config = DedupConfig::from_options(&options);
+        
+        // Verify converted config matches original
+        assert_eq!(converted_config.algorithm, "sha256");
+        assert_eq!(converted_config.parallel, Some(4));
+        assert_eq!(converted_config.include, vec!["*.jpg", "*.png"]);
+        assert_eq!(converted_config.exclude, vec!["*tmp*"]);
+        
         Ok(())
     }
 }

@@ -27,6 +27,9 @@ pub mod video_fingerprint;
 #[cfg(feature = "ssh")]
 pub mod ssh_utils;
 
+// Add unified options module
+pub mod options;
+
 // To make Cli accessible, you'll need to move its definition from main.rs to lib.rs
 // or re-export it from main.rs if main.rs uses this lib.rs as a library.
 // For a typical binary project that also wants to expose a library for testing/other uses:
@@ -49,6 +52,7 @@ use std::str::FromStr;
 use crate::config::DedupConfig;
 use crate::file_utils::{SortCriterion, SortOrder};
 use crate::media_dedup::MediaDedupOptions;
+use crate::options::DedupOptions;
 
 #[derive(Parser, Debug, Clone)]
 #[clap(author, version, about, long_about = None)]
@@ -296,6 +300,21 @@ pub struct Cli {
         help = "Port to use for server mode (0 = auto)"
     )]
     pub port: u16,
+    
+    /// Use Protobuf for protocol communication (instead of JSON)
+    #[cfg(feature = "proto")]
+    #[clap(long, help = "Use Protobuf for network communication")]
+    pub use_protobuf: bool,
+    
+    /// Use ZSTD compression for network communication
+    #[cfg(feature = "proto")]
+    #[clap(long, help = "Use ZSTD compression for network communication")]
+    pub use_compression: bool,
+    
+    /// ZSTD compression level (1-22, higher = more compression but slower)
+    #[cfg(feature = "proto")]
+    #[clap(long, default_value = "3", help = "ZSTD compression level (1-22)")]
+    pub compression_level: u32,
 }
 
 impl Cli {
@@ -447,6 +466,12 @@ impl Cli {
             }
         }
 
+        // Apply protocol options from config
+        #[cfg(feature = "proto")]
+        {
+            // TODO: Add protocol options to config file
+        }
+
         // Ensure we always have defaults for required fields that might be empty
         if self.algorithm.is_empty() {
             self.algorithm = "xxhash".to_string();
@@ -459,6 +484,143 @@ impl Cli {
         if self.mode.is_empty() {
             self.mode = "newest_modified".to_string();
         }
+    }
+    
+    /// Convert Cli to DedupOptions
+    pub fn to_options(&self) -> DedupOptions {
+        DedupOptions {
+            directories: self.directories.clone(),
+            target: self.target.clone(),
+            deduplicate: self.deduplicate,
+            delete: self.delete,
+            move_to: self.move_to.clone(),
+            log: self.log,
+            log_file: self.log_file.clone(),
+            output: self.output.clone(),
+            format: self.format.clone(),
+            json: self.json,
+            algorithm: self.algorithm.clone(),
+            parallel: self.parallel,
+            mode: self.mode.clone(),
+            interactive: self.interactive,
+            verbose: self.verbose,
+            include: self.include.clone(),
+            exclude: self.exclude.clone(),
+            filter_from: self.filter_from.clone(),
+            progress: self.progress,
+            progress_tui: self.progress_tui,
+            sort_by: self.sort_by.to_string(),
+            sort_order: self.sort_order.to_string(),
+            raw_sizes: self.raw_sizes,
+            config_file: self.config_file.clone(),
+            dry_run: self.dry_run,
+            cache_location: self.cache_location.clone(),
+            fast_mode: self.fast_mode,
+            
+            // Media options
+            media_mode: self.media_mode,
+            media_resolution: self.media_resolution.clone(),
+            media_formats: self.media_formats.clone(),
+            media_similarity: self.media_similarity,
+            media_dedup_options: self.media_dedup_options.clone(),
+            
+            // SSH options
+            #[cfg(feature = "ssh")]
+            allow_remote_install: self.allow_remote_install,
+            #[cfg(feature = "ssh")]
+            ssh_options: self.ssh_options.clone(),
+            #[cfg(feature = "ssh")]
+            rsync_options: self.rsync_options.clone(),
+            #[cfg(feature = "ssh")]
+            use_remote_dedups: self.use_remote_dedups,
+            #[cfg(feature = "ssh")]
+            use_sudo: self.use_sudo,
+            #[cfg(feature = "ssh")]
+            use_ssh_tunnel: self.use_ssh_tunnel,
+            #[cfg(feature = "ssh")]
+            server_mode: self.server_mode,
+            #[cfg(feature = "ssh")]
+            port: self.port,
+            
+            // Protocol options
+            #[cfg(feature = "proto")]
+            use_protobuf: self.use_protobuf,
+            #[cfg(feature = "proto")]
+            use_compression: self.use_compression,
+            #[cfg(feature = "proto")]
+            compression_level: self.compression_level,
+        }
+    }
+    
+    /// Create a new Cli instance from DedupOptions
+    pub fn from_options(options: &DedupOptions) -> Self {
+        let mut cli = Self::parse();
+        
+        cli.directories = options.directories.clone();
+        cli.target = options.target.clone();
+        cli.deduplicate = options.deduplicate;
+        cli.delete = options.delete;
+        cli.move_to = options.move_to.clone();
+        cli.log = options.log;
+        cli.log_file = options.log_file.clone();
+        cli.output = options.output.clone();
+        cli.format = options.format.clone();
+        cli.json = options.json;
+        cli.algorithm = options.algorithm.clone();
+        cli.parallel = options.parallel;
+        cli.mode = options.mode.clone();
+        cli.interactive = options.interactive;
+        cli.verbose = options.verbose;
+        cli.include = options.include.clone();
+        cli.exclude = options.exclude.clone();
+        cli.filter_from = options.filter_from.clone();
+        cli.progress = options.progress;
+        cli.progress_tui = options.progress_tui;
+        
+        // Convert string values to enums
+        if let Ok(sort_by) = SortCriterion::from_str(&options.sort_by) {
+            cli.sort_by = sort_by;
+        }
+        
+        if let Ok(sort_order) = SortOrder::from_str(&options.sort_order) {
+            cli.sort_order = sort_order;
+        }
+        
+        cli.raw_sizes = options.raw_sizes;
+        cli.config_file = options.config_file.clone();
+        cli.dry_run = options.dry_run;
+        cli.cache_location = options.cache_location.clone();
+        cli.fast_mode = options.fast_mode;
+        
+        // Media options
+        cli.media_mode = options.media_mode;
+        cli.media_resolution = options.media_resolution.clone();
+        cli.media_formats = options.media_formats.clone();
+        cli.media_similarity = options.media_similarity;
+        cli.media_dedup_options = options.media_dedup_options.clone();
+        
+        // SSH options
+        #[cfg(feature = "ssh")]
+        {
+            cli.allow_remote_install = options.allow_remote_install;
+            cli.ssh_options = options.ssh_options.clone();
+            cli.rsync_options = options.rsync_options.clone();
+            cli.use_remote_dedups = options.use_remote_dedups;
+            cli.use_sudo = options.use_sudo;
+            cli.use_ssh_tunnel = options.use_ssh_tunnel;
+            cli.server_mode = options.server_mode;
+            cli.port = options.port;
+        }
+        
+        // Protocol options
+        #[cfg(feature = "proto")]
+        {
+            cli.use_protobuf = options.use_protobuf;
+            cli.use_compression = options.use_compression;
+            cli.compression_level = options.compression_level;
+        }
+        
+        cli
     }
 }
 
@@ -497,3 +659,5 @@ pub mod server;
 
 // Export the primary types
 pub use config::DedupConfig as Config;
+// No need to re-export DedupOptions since it's already imported
+// pub use options::DedupOptions;

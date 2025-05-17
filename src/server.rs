@@ -1,8 +1,10 @@
 #[cfg(feature = "ssh")]
 use crate::protocol::{
-    CommandMessage, DedupMessage, ErrorMessage, MessageType, ProgressMessage, ProtocolHandler,
-    ResultMessage, TcpProtocolHandler,
+    CommandMessage, DedupMessage, ErrorMessage, MessageType, ProtocolHandler,
+    ResultMessage, create_protocol_handler,
 };
+#[cfg(feature = "ssh")]
+use crate::options::DedupOptions;
 #[cfg(feature = "ssh")]
 use anyhow::{anyhow, Context, Result};
 #[cfg(feature = "ssh")]
@@ -10,7 +12,7 @@ use log;
 #[cfg(feature = "ssh")]
 use serde_json;
 #[cfg(feature = "ssh")]
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader};
 #[cfg(feature = "ssh")]
 use std::net::{TcpListener, TcpStream};
 #[cfg(feature = "ssh")]
@@ -18,7 +20,7 @@ use std::process::{Command, Stdio};
 #[cfg(feature = "ssh")]
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc,
+    Arc, Mutex,
 };
 #[cfg(feature = "ssh")]
 use std::thread;
@@ -30,6 +32,7 @@ use std::time::Duration;
 pub struct DedupServer {
     port: u16,
     running: Arc<AtomicBool>,
+    options: Arc<Mutex<DedupOptions>>,
 }
 
 #[cfg(feature = "ssh")]
@@ -38,6 +41,15 @@ impl DedupServer {
         Self {
             port,
             running: Arc::new(AtomicBool::new(false)),
+            options: Arc::new(Mutex::new(DedupOptions::default())),
+        }
+    }
+    
+    pub fn with_options(port: u16, options: DedupOptions) -> Self {
+        Self {
+            port,
+            running: Arc::new(AtomicBool::new(false)),
+            options: Arc::new(Mutex::new(options)),
         }
     }
 
@@ -52,6 +64,7 @@ impl DedupServer {
 
         self.running.store(true, Ordering::SeqCst);
         let running = self.running.clone();
+        let options = self.options.clone();
 
         log::info!("Dedups server started on port {}", self.port);
 
@@ -61,8 +74,9 @@ impl DedupServer {
                     log::info!("New client connection from: {}", addr);
                     // Handle client in a new thread
                     let running_clone = running.clone();
+                    let options_clone = options.clone();
                     thread::spawn(move || {
-                        if let Err(e) = Self::handle_client(stream, running_clone) {
+                        if let Err(e) = Self::handle_client(stream, running_clone, options_clone) {
                             log::error!("Error handling client: {}", e);
                         }
                     });
@@ -89,14 +103,61 @@ impl DedupServer {
     }
 
     /// Handle a client connection
-    fn handle_client(stream: TcpStream, running: Arc<AtomicBool>) -> Result<()> {
-        let mut protocol = TcpProtocolHandler::new(stream)?;
+    fn handle_client(
+        stream: TcpStream, 
+        running: Arc<AtomicBool>,
+        options: Arc<Mutex<DedupOptions>>
+    ) -> Result<()> {
+        // Get protocol options from shared state
+        let opts = options.lock().map_err(|_| anyhow!("Failed to lock options"))?;
+        
+        let use_protobuf = {
+            #[cfg(feature = "proto")]
+            {
+                opts.use_protobuf
+            }
+            #[cfg(not(feature = "proto"))]
+            {
+                false
+            }
+        };
+        
+        let use_compression = {
+            #[cfg(feature = "proto")]
+            {
+                opts.use_compression
+            }
+            #[cfg(not(feature = "proto"))]
+            {
+                false
+            }
+        };
+        
+        let compression_level = {
+            #[cfg(feature = "proto")]
+            {
+                opts.compression_level
+            }
+            #[cfg(not(feature = "proto"))]
+            {
+                3
+            }
+        };
+        
+        drop(opts); // Release the lock
+        
+        let mut protocol = create_protocol_handler(
+            stream, 
+            use_protobuf, 
+            use_compression, 
+            compression_level
+        )?;
 
         while running.load(Ordering::SeqCst) {
             if let Some(message) = protocol.receive_message()? {
                 match message.message_type {
                     MessageType::Command => {
-                        Self::handle_command(&mut protocol, &message)?;
+                        Self::handle_command(&mut *protocol, &message)?;
                     }
                     _ => {
                         log::warn!(
@@ -104,7 +165,7 @@ impl DedupServer {
                             message.message_type
                         );
                         Self::send_error(
-                            &mut protocol,
+                            &mut *protocol,
                             "Unexpected message type, expected command",
                             1,
                         )?;
@@ -121,7 +182,7 @@ impl DedupServer {
     }
 
     /// Handle a command message
-    fn handle_command(protocol: &mut TcpProtocolHandler, message: &DedupMessage) -> Result<()> {
+    fn handle_command(protocol: &mut dyn ProtocolHandler, message: &DedupMessage) -> Result<()> {
         let command_msg: CommandMessage = serde_json::from_str(&message.payload)?;
 
         log::info!(
@@ -151,24 +212,21 @@ impl DedupServer {
                 let stderr = child.stderr.take().expect("Failed to open stderr");
 
                 // Process stdout in a separate thread
-                let mut protocol_clone = protocol.stream.try_clone()?;
+                let mut protocol_clone = protocol.box_clone();
                 let stdout_thread = thread::spawn(move || {
                     let reader = BufReader::new(stdout);
                     for line in reader.lines() {
                         if let Ok(line) = line {
                             // Try to parse as JSON
                             if line.starts_with('{') && line.ends_with('}') {
-                                // Forward raw JSON to the client
-                                if let Err(e) = protocol_clone.write_all(line.as_bytes()) {
+                                // Forward as Result message
+                                let result_msg = DedupMessage {
+                                    message_type: MessageType::Result,
+                                    payload: line.clone(),
+                                };
+                                
+                                if let Err(e) = protocol_clone.send_message(result_msg) {
                                     log::error!("Error sending output to client: {}", e);
-                                    break;
-                                }
-                                if let Err(e) = protocol_clone.write_all(b"\n") {
-                                    log::error!("Error sending newline to client: {}", e);
-                                    break;
-                                }
-                                if let Err(e) = protocol_clone.flush() {
-                                    log::error!("Error flushing output to client: {}", e);
                                     break;
                                 }
                             } else {
@@ -220,7 +278,7 @@ impl DedupServer {
     }
 
     /// Send an error message to the client
-    fn send_error(protocol: &mut TcpProtocolHandler, message: &str, code: i32) -> Result<()> {
+    fn send_error(protocol: &mut dyn ProtocolHandler, message: &str, code: i32) -> Result<()> {
         let error = ErrorMessage {
             message: message.to_string(),
             code,
@@ -241,6 +299,14 @@ impl DedupServer {
 #[cfg(feature = "ssh")]
 pub fn run_server(port: u16) -> Result<()> {
     let mut server = DedupServer::new(port);
+    server.start()?;
+    Ok(())
+}
+
+/// Entry point for running the server with custom options
+#[cfg(feature = "ssh")]
+pub fn run_server_with_options(port: u16, options: DedupOptions) -> Result<()> {
+    let mut server = DedupServer::with_options(port, options);
     server.start()?;
     Ok(())
 }

@@ -618,3 +618,61 @@ If dedups is not installed on the remote system and cannot be installed:
 - Limited hashing functionality is available
 - Media deduplication is not available
 - All operations will be significantly slower for large directories
+
+## Protocol Improvements with Protobuf and ZSTD Compression
+
+When using SSH/remote features, `dedups` now supports an improved communication protocol using Protocol Buffers (Protobuf) with optional ZSTD compression. This significantly improves performance and reduces bandwidth usage for remote operations.
+
+### Benefits
+
+- **Faster Communication**: Protocol Buffers offer more efficient serialization compared to JSON
+- **Reduced Bandwidth**: Smaller message size for network transfers
+- **Enhanced Compression**: ZSTD compression provides high compression ratios with minimal CPU usage
+- **Better Performance**: Especially noticeable with large directories or high-latency connections
+
+### How to Enable
+
+Protocol Buffers and compression are enabled by default when using SSH features with the `proto` feature enabled, but you can control them explicitly with these options:
+
+```bash
+# Specify protocol and compression options
+dedups ssh:server.example.com:/home/user/photos --use-protobuf --use-compression
+
+# Disable Protocol Buffers (fall back to JSON)
+dedups ssh:server.example.com:/home/user/photos --no-use-protobuf
+
+# Use Protocol Buffers without compression
+dedups ssh:server.example.com:/home/user/photos --use-protobuf --no-use-compression
+
+# Adjust compression level (1-22, higher = more compression but slower)
+dedups ssh:server.example.com:/home/user/photos --compression-level 9
+```
+
+### Configuration
+
+You can set default Protocol Buffers and compression options in your `.deduprc` file:
+
+```toml
+[protocol]
+use_protobuf = true
+use_compression = true
+compression_level = 3  # Default is 3, range is 1-22
+```
+
+### Performance Impact
+
+- **Small Directories**: For small directories, the overhead of Protobuf might outweigh benefits
+- **Large Directories**: For large directories (1000+ files), expect 2-5x faster network communication
+- **Many Small Files**: When dealing with many small files, compression is particularly effective
+- **High-Latency Networks**: Over VPNs or high-latency networks, the benefits increase significantly
+- **Media Operations**: When using `--media-mode` remotely, expect much better performance due to reduced data transfer
+
+### Protocol Compatibility
+
+`dedups` automatically negotiates the protocol based on:
+
+1. The features with which the client and server were compiled
+2. The settings passed via command line or config file
+3. Client/server capabilities detection
+
+When communicating with older versions of remote `dedups`, the system will automatically fall back to JSON.

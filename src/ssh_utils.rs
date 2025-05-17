@@ -5,6 +5,12 @@ use serde::{Deserialize, Serialize};
 use ssh2::Session;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+#[cfg(feature = "ssh")]
+use std::collections::HashMap;
+use std::ffi::OsStr;
+use std::io::{BufRead, BufReader};
+use std::str::FromStr;
+use std::sync::{mpsc, Arc, Mutex};
 
 /// Represents a remote location parsed from an SSH URI
 #[cfg(feature = "ssh")]

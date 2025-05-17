@@ -47,6 +47,11 @@ regex = { version = "1.10" }
 dirs = "5.0"
 itertools = "0.12"
 
+# Protobuf and compression support
+prost = "0.12"
+bytes = "1.5"
+zstd = "0.13"
+
 # Media fingerprinting libraries
 image = "0.24.7"                      # Image processing
 img_hash = "3.2.0"                    # Perceptual image hashing
@@ -61,11 +66,15 @@ ssh2 = { version = "0.9", optional = true }
 shellexpand = { version = "3.1", optional = true }
 tokio = { version = "1.28", features = ["rt", "rt-multi-thread"], optional = true }
 
+[build-dependencies]
+prost-build = "0.12"
+
 [features]
 default = []
 linux = ["gxhash"]  # Enable gxhash only on Linux platforms
 ssh = ["dep:ssh2", "dep:shellexpand", "dep:tokio"]  # Enable SSH/rsync functionality
-all = ["linux", "ssh"]  # Enable all features
+proto = []          # Enable Protobuf protocol
+all = ["linux", "ssh", "proto"]  # Enable all features
 test_mode = []     # Used for integration tests
 
 [dev-dependencies]

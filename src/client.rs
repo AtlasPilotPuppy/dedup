@@ -1,8 +1,10 @@
 #[cfg(feature = "ssh")]
 use crate::protocol::{
     CommandMessage, DedupMessage, ErrorMessage, MessageType, ProgressMessage, ProtocolHandler,
-    ResultMessage, TcpProtocolHandler,
+    create_protocol_handler,
 };
+#[cfg(feature = "ssh")]
+use crate::options::DedupOptions;
 #[cfg(feature = "ssh")]
 use anyhow::{anyhow, Context, Result};
 #[cfg(feature = "ssh")]
@@ -14,7 +16,7 @@ use std::collections::HashMap;
 #[cfg(feature = "ssh")]
 use std::net::TcpStream;
 #[cfg(feature = "ssh")]
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver};
 #[cfg(feature = "ssh")]
 use std::thread::{self, JoinHandle};
 
@@ -23,7 +25,8 @@ use std::thread::{self, JoinHandle};
 pub struct DedupClient {
     host: String,
     port: u16,
-    protocol: Option<TcpProtocolHandler>,
+    protocol: Option<Box<dyn ProtocolHandler>>,
+    options: DedupOptions,
     message_receiver: Option<Receiver<DedupMessage>>,
     reader_thread: Option<JoinHandle<()>>,
 }
@@ -35,6 +38,18 @@ impl DedupClient {
             host,
             port,
             protocol: None,
+            options: DedupOptions::default(),
+            message_receiver: None,
+            reader_thread: None,
+        }
+    }
+    
+    pub fn with_options(host: String, port: u16, options: DedupOptions) -> Self {
+        Self {
+            host,
+            port,
+            protocol: None,
+            options,
             message_receiver: None,
             reader_thread: None,
         }
@@ -52,74 +67,78 @@ impl DedupClient {
                 )
             })?;
 
-        let protocol = TcpProtocolHandler::new(stream)?;
+        // Create protocol handler based on options
+        let use_protobuf = {
+            #[cfg(feature = "proto")]
+            {
+                self.options.use_protobuf
+            }
+            #[cfg(not(feature = "proto"))]
+            {
+                false
+            }
+        };
+        
+        let use_compression = {
+            #[cfg(feature = "proto")]
+            {
+                self.options.use_compression
+            }
+            #[cfg(not(feature = "proto"))]
+            {
+                false
+            }
+        };
+        
+        let compression_level = {
+            #[cfg(feature = "proto")]
+            {
+                self.options.compression_level
+            }
+            #[cfg(not(feature = "proto"))]
+            {
+                3
+            }
+        };
+        
+        let protocol = create_protocol_handler(
+            stream.try_clone()?, 
+            use_protobuf, 
+            use_compression, 
+            compression_level
+        )?;
 
         // Create a message channel for receiving messages from the server
         let (tx, rx) = mpsc::channel();
         self.message_receiver = Some(rx);
 
         // Start a background thread to read messages from the server
-        let mut reader_protocol = protocol
-            .stream
-            .try_clone()
-            .context("Failed to clone stream for reader thread")?;
+        let mut reader_protocol = create_protocol_handler(
+            stream, 
+            use_protobuf, 
+            use_compression, 
+            compression_level
+        )?;
+        
         let reader_thread = thread::spawn(move || {
-            let mut buf = Vec::new();
-            let mut buf_reader = std::io::BufReader::new(&mut reader_protocol);
-
             loop {
-                buf.clear();
-                let bytes_read =
-                    match std::io::BufRead::read_until(&mut buf_reader, b'\n', &mut buf) {
-                        Ok(0) => break, // EOF
-                        Ok(n) => n,
-                        Err(e) => {
-                            log::error!("Error reading from server: {}", e);
+                match reader_protocol.receive_message() {
+                    Ok(Some(msg)) => {
+                        if tx.send(msg).is_err() {
+                            log::error!("Failed to send message to channel, receiver dropped");
                             break;
                         }
-                    };
-
-                if bytes_read > 0 {
-                    let line = match String::from_utf8(buf.clone()) {
-                        Ok(s) => s,
-                        Err(e) => {
-                            log::error!("Invalid UTF-8 in server response: {}", e);
-                            continue;
-                        }
-                    };
-
-                    log::debug!("Received raw message: {}", line);
-
-                    // Try to parse as DedupMessage
-                    if line.starts_with('{') && (line.trim_end().ends_with('}')) {
-                        match serde_json::from_str::<DedupMessage>(&line) {
-                            Ok(msg) => {
-                                if tx.send(msg).is_err() {
-                                    log::error!(
-                                        "Failed to send message to channel, receiver dropped"
-                                    );
-                                    break;
-                                }
-                            }
-                            Err(e) => {
-                                // Try as raw JSON to be forwarded to caller
-                                log::debug!("Not a DedupMessage, forwarding raw JSON: {}", e);
-                                let raw_msg = DedupMessage {
-                                    message_type: MessageType::Result,
-                                    payload: line.clone(),
-                                };
-                                if tx.send(raw_msg).is_err() {
-                                    log::error!("Failed to send raw message to channel");
-                                    break;
-                                }
-                            }
-                        }
-                    } else {
-                        log::debug!("Ignoring non-JSON line: {}", line);
+                    }
+                    Ok(None) => {
+                        log::info!("Server connection closed");
+                        break;
+                    }
+                    Err(e) => {
+                        log::error!("Error reading from server: {}", e);
+                        break;
                     }
                 }
             }
-
             log::info!("Server reader thread exiting");
         });
 

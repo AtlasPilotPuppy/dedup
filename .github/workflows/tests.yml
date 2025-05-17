@@ -112,6 +112,10 @@ jobs:
         # Run SSH tests
         cargo test --features ssh --test ssh_integration_tests
         cargo test --features ssh --test ssh_json_streaming_test
+        
+        # Run SSH tests with Protocol Buffers feature
+        cargo test --features "ssh,proto" --test ssh_integration_tests
+        cargo test --features "ssh,proto" --test ssh_json_streaming_test
       env:
         DOCKER_BUILDKIT: 1
 
