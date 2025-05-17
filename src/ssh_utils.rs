@@ -1,7 +1,8 @@
 #[cfg(feature = "ssh")]
 use anyhow::{Context, Result};
+#[cfg(feature = "ssh")]
+use ssh2::Session;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 /// Represents a remote location parsed from an SSH URI
 #[cfg(feature = "ssh")]

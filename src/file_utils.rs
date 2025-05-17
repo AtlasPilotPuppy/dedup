@@ -2144,7 +2144,23 @@ pub fn handle_remote_path(path: &Path) -> Result<Vec<FileInfo>> {
     if let Some(path_str) = path_str.strip_prefix("ssh:") {
         let remote_location = crate::ssh_utils::RemoteLocation::parse(path_str)
             .with_context(|| format!("Failed to parse remote path: {}. Format should be ssh:host:/path", path_str))?;
-        // ... rest of the function ...
+
+        // Create a CLI configuration for scanning
+        let mut cli = crate::Cli::with_config()?;
+        cli.directories = vec![remote_location.path.clone()];
+        cli.use_remote_dedups = true;
+        cli.allow_remote_install = true;
+
+        // Use the handle_remote_directory function to scan
+        #[cfg(feature = "ssh")]
+        {
+            handle_remote_directory(&cli, path)
+        }
+
+        #[cfg(not(feature = "ssh"))]
+        {
+            Err(anyhow::anyhow!("SSH support is not enabled in this build"))
+        }
     } else {
         Err(anyhow::anyhow!("Not a valid SSH path: {}", path_str))
     }
