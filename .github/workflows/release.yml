@@ -103,10 +103,25 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libssl-dev pkg-config
-          if [[ "${{ matrix.features }}" == *"ssh"* ]]; then
-            sudo apt-get install -y libssh2-1-dev
-          fi
+          sudo apt-get install -y \
+            pkg-config \
+            libssl-dev \
+            build-essential \
+            zlib1g-dev \
+            libssh2-1-dev \
+            openssl
+          
+          # Set OpenSSL environment variables
+          echo "OPENSSL_DIR=/usr" >> $GITHUB_ENV
+          echo "OPENSSL_LIB_DIR=/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
+          echo "OPENSSL_INCLUDE_DIR=/usr/include" >> $GITHUB_ENV
+          
+          # Verify OpenSSL installation
+          pkg-config --libs openssl
+          pkg-config --modversion openssl
+          
+          # Set pkg-config path
+          echo "PKG_CONFIG_PATH=/usr/lib/x86_64-linux-gnu/pkgconfig" >> $GITHUB_ENV
 
       # Install macOS dependencies (x86_64)
       - name: Install macOS x86_64 dependencies
@@ -146,10 +161,18 @@ jobs:
       - name: Build (Linux)
         if: matrix.os == 'ubuntu-latest'
         run: |
-          cargo build --release --target ${{ matrix.target }} ${{ matrix.features_flag }}
+          # Verify environment
+          echo "OpenSSL Dir: $OPENSSL_DIR"
+          echo "OpenSSL Lib Dir: $OPENSSL_LIB_DIR"
+          echo "OpenSSL Include Dir: $OPENSSL_INCLUDE_DIR"
+          echo "PKG_CONFIG_PATH: $PKG_CONFIG_PATH"
+          
+          # Build with OpenSSL configuration
+          OPENSSL_NO_VENDOR=1 cargo build --release --target ${{ matrix.target }} ${{ matrix.features_flag }}
         env:
           RUSTFLAGS: "-C target-cpu=native"
-          PKG_CONFIG_PATH: "/usr/lib/pkgconfig"
+          OPENSSL_NO_VENDOR: "1"
+          OPENSSL_STATIC: "0"
       
       # Build with macOS ARM flags
       - name: Build (macOS ARM)
