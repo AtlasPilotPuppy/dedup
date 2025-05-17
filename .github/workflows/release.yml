@@ -24,7 +24,7 @@ jobs:
     strategy:
       matrix:
         include:
-          # Linux builds with linux
+          # Linux x86_64 builds
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             artifact_name: dedups-linux-x86_64
@@ -38,21 +38,7 @@ jobs:
             features: "linux,ssh,proto"
             features_flag: "--features linux,ssh,proto"
           
-          # Linux ARM builds with linux
-          - os: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
-            artifact_name: dedups-linux-aarch64
-            binary_name: dedups
-            features: "linux"
-            features_flag: "--features linux"
-          - os: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
-            artifact_name: dedups-linux-aarch64-ssh-proto
-            binary_name: dedups
-            features: "linux,ssh,proto"
-            features_flag: "--features linux,ssh,proto"
-          
-          # macOS x86_64 builds with linux
+          # macOS x86_64 builds
           - os: macos-latest
             target: x86_64-apple-darwin
             artifact_name: dedups-macos-x86_64
@@ -66,7 +52,7 @@ jobs:
             features: "linux,ssh,proto"
             features_flag: "--features linux,ssh,proto"
           
-          # macOS ARM builds with linux
+          # macOS ARM64 builds
           - os: macos-latest
             target: aarch64-apple-darwin
             artifact_name: dedups-macos-aarch64
@@ -80,7 +66,7 @@ jobs:
             features: "linux,ssh,proto"
             features_flag: "--features linux,ssh,proto"
           
-          # Windows builds (no linux)
+          # Windows x86_64 builds
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             artifact_name: dedups-windows-x86_64.exe
@@ -96,26 +82,6 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             artifact_name: dedups-windows-x86_64-ssh-proto.exe
-            binary_name: dedups.exe
-            features: "ssh,proto"
-            features_flag: "--features ssh,proto"
-          
-          # Windows ARM builds (no linux)
-          - os: windows-latest
-            target: aarch64-pc-windows-msvc
-            artifact_name: dedups-windows-aarch64.exe
-            binary_name: dedups.exe
-            features: ""
-            features_flag: ""
-          - os: windows-latest
-            target: aarch64-pc-windows-msvc
-            artifact_name: dedups-windows-aarch64-ssh.exe
-            binary_name: dedups.exe
-            features: "ssh"
-            features_flag: "--features ssh"
-          - os: windows-latest
-            target: aarch64-pc-windows-msvc
-            artifact_name: dedups-windows-aarch64-ssh-proto.exe
             binary_name: dedups.exe
             features: "ssh,proto"
             features_flag: "--features ssh,proto"
@@ -144,28 +110,13 @@ jobs:
         shell: bash
         run: |
           sudo apt-get update
-          
-          # Enable multi-arch support
-          sudo dpkg --add-architecture arm64
-          sudo apt-get update
-          
           sudo apt-get install -y \
             pkg-config \
             libssl-dev \
             build-essential \
             zlib1g-dev \
             libssh2-1-dev \
-            openssl \
-            gcc-aarch64-linux-gnu
-          
-          # Install ARM64 specific packages if targeting ARM64
-          if [[ "${{ matrix.target }}" == "aarch64-unknown-linux-gnu" ]]; then
-            sudo apt-get install -y \
-              gcc-aarch64-linux-gnu \
-              g++-aarch64-linux-gnu \
-              libc6-dev-arm64-cross \
-              libssl-dev:arm64
-          fi
+            openssl
 
           # Install protobuf compiler if proto feature is enabled
           if [[ "${{ matrix.features }}" == *"proto"* ]]; then
@@ -174,33 +125,16 @@ jobs:
           fi
           
           # Set OpenSSL environment variables
-          if [[ "${{ matrix.target }}" == "aarch64-unknown-linux-gnu" ]]; then
-            echo "OPENSSL_DIR=/usr/aarch64-linux-gnu" >> $GITHUB_ENV
-            echo "OPENSSL_LIB_DIR=/usr/lib/aarch64-linux-gnu" >> $GITHUB_ENV
-            echo "OPENSSL_INCLUDE_DIR=/usr/include/aarch64-linux-gnu" >> $GITHUB_ENV
-            echo "PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig" >> $GITHUB_ENV
-            echo "PKG_CONFIG_ALLOW_CROSS=1" >> $GITHUB_ENV
-            
-            # Create symlinks for ARM64 if needed
-            sudo mkdir -p /usr/aarch64-linux-gnu/include/openssl
-            sudo ln -sf /usr/include/aarch64-linux-gnu/openssl/opensslconf.h /usr/aarch64-linux-gnu/include/openssl/ || true
-            sudo ln -sf /usr/include/aarch64-linux-gnu/openssl/configuration.h /usr/aarch64-linux-gnu/include/openssl/ || true
-          else
-            echo "OPENSSL_DIR=/usr" >> $GITHUB_ENV
-            echo "OPENSSL_LIB_DIR=/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
-            echo "OPENSSL_INCLUDE_DIR=/usr/include" >> $GITHUB_ENV
-            echo "PKG_CONFIG_PATH=/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/lib/pkgconfig" >> $GITHUB_ENV
-          fi
-          
+          echo "OPENSSL_DIR=/usr" >> $GITHUB_ENV
+          echo "OPENSSL_LIB_DIR=/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
+          echo "OPENSSL_INCLUDE_DIR=/usr/include" >> $GITHUB_ENV
+          echo "PKG_CONFIG_PATH=/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/lib/pkgconfig" >> $GITHUB_ENV
+
           # Verify OpenSSL installation
           pkg-config --libs openssl
           pkg-config --modversion openssl
           ls -la /usr/include/openssl/ || true
           ls -la /usr/lib/x86_64-linux-gnu/ || true
-          if [[ "${{ matrix.target }}" == "aarch64-unknown-linux-gnu" ]]; then
-            ls -la /usr/lib/aarch64-linux-gnu/ || true
-            ls -la /usr/include/aarch64-linux-gnu/openssl/ || true
-          fi
 
       # Set up x86_64 Homebrew for Intel builds
       - name: Set up x86_64 Homebrew
@@ -325,7 +259,7 @@ jobs:
         shell: bash
         run: |
           rustup target add aarch64-apple-darwin
-      
+
       # Build with Linux-specific flags
       - name: Build (Linux)
         if: matrix.os == 'ubuntu-latest'
@@ -338,32 +272,14 @@ jobs:
           echo "PKG_CONFIG_PATH: $PKG_CONFIG_PATH"
           
           # Set architecture-specific flags
-          if [[ "${{ matrix.target }}" == "x86_64-unknown-linux-gnu" ]]; then
-            export RUSTFLAGS="-C target-cpu=x86-64-v3 -C target-feature=+aes,+sse2"
-          elif [[ "${{ matrix.target }}" == "aarch64-unknown-linux-gnu" ]]; then
-            export RUSTFLAGS="-C target-cpu=generic -C target-feature=+neon"
-            # Set cross-compilation environment variables
-            export PKG_CONFIG_PATH="/usr/lib/aarch64-linux-gnu/pkgconfig"
-            export PKG_CONFIG_ALLOW_CROSS=1
-            export OPENSSL_LIB_DIR=/usr/lib/aarch64-linux-gnu
-            export OPENSSL_INCLUDE_DIR=/usr/include
-          fi
+          export RUSTFLAGS="-C target-cpu=x86-64-v3 -C target-feature=+aes,+sse2"
           
           # Build with OpenSSL configuration
           OPENSSL_NO_VENDOR=1 cargo build --release --target ${{ matrix.target }} ${{ matrix.features_flag }}
         env:
           OPENSSL_NO_VENDOR: "1"
           OPENSSL_STATIC: "0"
-      
-      # Build with macOS ARM flags
-      - name: Build (macOS ARM)
-        if: matrix.target == 'aarch64-apple-darwin'
-        shell: bash
-        run: |
-          cargo build --release --target ${{ matrix.target }} ${{ matrix.features_flag }}
-        env:
-          RUSTFLAGS: "-C target-feature=+neon"
-      
+
       # Build with macOS x86_64 flags
       - name: Build (macOS x86_64)
         if: matrix.os == 'macos-latest' && matrix.target == 'x86_64-apple-darwin'
@@ -386,30 +302,35 @@ jobs:
           OPENSSL_NO_VENDOR: "1"
           OPENSSL_STATIC: "0"
           RUSTFLAGS: "-C target-cpu=x86-64-v2"
-      
-      # Build with Windows-specific flags - Fixed PowerShell syntax
+
+      # Build with macOS ARM flags
+      - name: Build (macOS ARM)
+        if: matrix.target == 'aarch64-apple-darwin'
+        shell: bash
+        run: |
+          cargo build --release --target ${{ matrix.target }} ${{ matrix.features_flag }}
+        env:
+          RUSTFLAGS: "-C target-feature=+neon"
+
+      # Build with Windows-specific flags
       - name: Build (Windows)
         if: matrix.os == 'windows-latest'
         shell: pwsh
         run: |
           # Set architecture-specific flags
-          if ("${{ matrix.target }}" -eq "x86_64-pc-windows-msvc") {
-            $env:RUSTFLAGS="-C target-cpu=x86-64-v2"
-          } elseif ("${{ matrix.target }}" -eq "aarch64-pc-windows-msvc") {
-            $env:RUSTFLAGS="-C target-feature=+neon"
-          }
+          $env:RUSTFLAGS="-C target-cpu=x86-64-v2"
 
           # Configure vcpkg for OpenSSL
           $env:VCPKG_ROOT = "$env:GITHUB_WORKSPACE\vcpkg"
           git clone https://github.com/Microsoft/vcpkg.git $env:VCPKG_ROOT
           Set-Location $env:VCPKG_ROOT
           .\bootstrap-vcpkg.bat
-          .\vcpkg.exe install openssl:${{ matrix.target == 'aarch64-pc-windows-msvc' && 'arm64-windows' || 'x64-windows-static' }}
+          .\vcpkg.exe install openssl:x64-windows-static
           
           # Set OpenSSL environment variables
           $env:OPENSSL_NO_VENDOR = "1"
           $env:OPENSSL_STATIC = "1"
-          $env:OPENSSL_DIR = "$env:VCPKG_ROOT\installed\${{ matrix.target == 'aarch64-pc-windows-msvc' && 'arm64-windows' || 'x64-windows-static' }}"
+          $env:OPENSSL_DIR = "$env:VCPKG_ROOT\installed\x64-windows-static"
           
           # Return to workspace and build
           Set-Location $env:GITHUB_WORKSPACE
@@ -417,7 +338,7 @@ jobs:
         env:
           OPENSSL_NO_VENDOR: "1"
           OPENSSL_STATIC: "1"
-      
+
       # Prepare artifact on Linux/macOS
       - name: Prepare artifact (Unix)
         if: matrix.os != 'windows-latest'
@@ -468,8 +389,6 @@ jobs:
           files: |
             dedups-linux-x86_64
             dedups-linux-x86_64-ssh-proto
-            dedups-linux-aarch64
-            dedups-linux-aarch64-ssh-proto
             dedups-macos-x86_64
             dedups-macos-x86_64-ssh-proto
             dedups-macos-aarch64
@@ -477,9 +396,6 @@ jobs:
             dedups-windows-x86_64.exe
             dedups-windows-x86_64-ssh.exe
             dedups-windows-x86_64-ssh-proto.exe
-            dedups-windows-aarch64.exe
-            dedups-windows-aarch64-ssh.exe
-            dedups-windows-aarch64-ssh-proto.exe
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
