@@ -235,7 +235,7 @@ impl DedupOptions {
             directories: proto_opts
                 .directories
                 .iter()
-                .map(|s| PathBuf::from(s))
+                .map(PathBuf::from)
                 .collect(),
             target: proto_opts.target.as_ref().map(PathBuf::from),
             deduplicate: proto_opts.deduplicate,
@@ -304,7 +304,7 @@ impl DedupOptions {
     #[cfg(feature = "ssh")]
     pub fn find_available_port(&self) -> u16 {
         // Start with default port and find next available
-        let mut port = self.port;
+        let port = self.port;
         let socket = std::net::TcpListener::bind(("127.0.0.1", port));
         
         // If the port is unavailable, try the next port

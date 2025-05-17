@@ -1,9 +1,7 @@
 #![cfg(feature = "ssh")]
 
-use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
-use dedups::file_utils;
 use dedups::ssh_utils::{RemoteLocation, SshProtocol};
 use dedups::Cli;
 use std::time::Instant;

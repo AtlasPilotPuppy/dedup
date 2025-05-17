@@ -1560,7 +1560,7 @@ pub fn copy_file(source: &Path, dest: &Path, dry_run: bool) -> Result<()> {
         // At least one path is remote, handle with SSH/rsync
         #[cfg(feature = "ssh")]
         {
-            return copy_file_remote(source, dest, dry_run);
+            copy_file_remote(source, dest, dry_run)
         }
 
         #[cfg(not(feature = "ssh"))]
@@ -2270,7 +2270,7 @@ fn handle_remote_directory(cli: &crate::Cli, dir_path: &Path) -> Result<Vec<File
             handle_remote_fallback(cli, &remote)
         }
     } else {
-        if !dedups_installed.is_some() && cli.allow_remote_install {
+        if dedups_installed.is_none() && cli.allow_remote_install {
             log::info!("dedups not found on remote, attempting installation");
             match remote.install_dedups(cli) {
                 Ok(path) => {
@@ -2287,9 +2287,9 @@ fn handle_remote_directory(cli: &crate::Cli, dir_path: &Path) -> Result<Vec<File
             }
         }
 
-        // Check if we're in media mode and warn appropriately
+                // Check if we're in media mode and warn appropriately
         if cli.media_mode {
-            if !dedups_installed.is_some() {
+            if dedups_installed.is_none() {
                 return Err(anyhow::anyhow!(
                     "Media mode requires dedups to be installed on the remote host '{}'. \
                     Please install dedups on the remote system or use --allow-remote-install.",

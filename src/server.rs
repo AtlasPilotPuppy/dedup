@@ -3,7 +3,7 @@ use crate::options::DedupOptions;
 #[cfg(feature = "ssh")]
 use crate::protocol::{
     create_protocol_handler, CommandMessage, DedupMessage, ErrorMessage, MessageType,
-    ProtocolHandler, ResultMessage,
+    ProtocolHandler,
 };
 #[cfg(feature = "ssh")]
 use anyhow::{anyhow, Context, Result};
@@ -194,7 +194,7 @@ impl DedupServer {
         cmd.args(&command_msg.args);
         
         // Check if we're in tunnel API mode where we need strict JSON output separation
-        let tunnel_api_mode = command_msg.options.get("USE_TUNNEL_API").is_some();
+        let tunnel_api_mode = command_msg.options.contains_key("USE_TUNNEL_API");
         
         if tunnel_api_mode {
             // For tunnel API mode, we force --json output to ensure proper protocol format
@@ -232,40 +232,36 @@ impl DedupServer {
                 let tunnel_api_mode_clone = tunnel_api_mode;
                 let stdout_thread = thread::spawn(move || {
                     let reader = BufReader::new(stdout);
-                    for line in reader.lines() {
-                        if let Ok(line) = line {
-                            // Try to parse as JSON
-                            if line.starts_with('{') && line.ends_with('}') {
-                                // Forward as Result message
-                                let result_msg = DedupMessage {
-                                    message_type: MessageType::Result,
-                                    payload: line.clone(),
-                                };
+                    for line in reader.lines().map_while(Result::ok) {
+                        // Try to parse as JSON
+                        if line.starts_with('{') && line.ends_with('}') {
+                            // Forward as Result message
+                            let result_msg = DedupMessage {
+                                message_type: MessageType::Result,
+                                payload: line.clone(),
+                            };
 
-                                if let Err(e) = protocol_clone.send_message(result_msg) {
-                                    log::error!("Error sending output to client: {}", e);
-                                    break;
-                                }
-                            } else if tunnel_api_mode_clone {
-                                // In tunnel API mode, non-JSON stdout is treated as an error
-                                // as we expect clean protocol
-                                log::warn!("Unexpected non-JSON output on stdout in tunnel API mode: {}", line);
-                            } else {
-                                // Regular mode, stdout may contain mixed output
-                                log::debug!("STDOUT: {}", line);
+                            if let Err(e) = protocol_clone.send_message(result_msg) {
+                                log::error!("Error sending output to client: {}", e);
+                                break;
                             }
+                        } else if tunnel_api_mode_clone {
+                            // In tunnel API mode, non-JSON stdout is treated as an error
+                            // as we expect clean protocol
+                            log::warn!("Unexpected non-JSON output on stdout in tunnel API mode: {}", line);
+                        } else {
+                            // Regular mode, stdout may contain mixed output
+                            log::debug!("STDOUT: {}", line);
                         }
                     }
                 });
 
                 // Process stderr in a separate thread to avoid blocking
-                let stderr_thread = thread::spawn(move || {
+                let _stderr_thread = thread::spawn(move || {
                     let stderr_reader = BufReader::new(stderr);
-                    for line in stderr_reader.lines() {
-                        if let Ok(line) = line {
-                            // Stderr is always logged but doesn't affect protocol
-                            log::debug!("STDERR: {}", line);
-                        }
+                    for line in stderr_reader.lines().map_while(Result::ok) {
+                        // Stderr is always logged but doesn't affect protocol
+                        log::debug!("STDERR: {}", line);
                     }
                 });
 

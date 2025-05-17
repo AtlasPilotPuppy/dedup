@@ -9,7 +9,6 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 use std::str::FromStr;
-use dedups::options::DedupOptions;
 use dedups::file_utils::{self, FileInfo, SelectionStrategy, SortCriterion, SortOrder};
 use dedups::media_dedup::MediaDedupOptions;
 use dedups::Cli;
@@ -239,6 +238,8 @@ impl TestEnv {
             server_mode: false,
             #[cfg(feature = "ssh")]
             port: 0,
+            #[cfg(feature = "ssh")]
+            tunnel_api_mode: true,
             #[cfg(feature = "proto")]
             use_protobuf: true,
             #[cfg(feature = "proto")]
@@ -1257,7 +1258,7 @@ mod integration {
             println!("\nTesting strategy: {}", strategy);
             
             // Create CLI args for this test
-            let mut cli = Cli {
+            let cli = Cli {
                 directories: vec![test_dir.path().to_path_buf()],
                 target: None,
                 deduplicate: false,
@@ -1306,6 +1307,8 @@ mod integration {
                 server_mode: false,
                 #[cfg(feature = "ssh")]
                 port: 0,
+                #[cfg(feature = "ssh")]
+                tunnel_api_mode: true,
                 #[cfg(feature = "proto")]
                 use_protobuf: true,
                 #[cfg(feature = "proto")]

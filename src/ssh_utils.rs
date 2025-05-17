@@ -138,20 +138,21 @@ impl RemoteLocation {
         cmd.extend(self.rsync_options.clone());
 
         // Format source and destination with proper remote syntax
-        let host_prefix = if let Some(user) = &self.username {
+        // Don't include port in host_part if we're already specifying it with -e
+        let host_part = if let Some(user) = &self.username {
             format!("{}@{}", user, self.host)
         } else {
             self.host.clone()
         };
 
         let source_str = if is_remote_source {
-            format!("{}:{}", host_prefix, source.display())
+            format!("{}:{}", host_part, source.display())
         } else {
             source.display().to_string()
         };
 
         let dest_str = if !is_remote_source {
-            format!("{}:{}", host_prefix, dest.display())
+            format!("{}:{}", host_part, dest.display())
         } else {
             dest.display().to_string()
         };
@@ -175,12 +176,10 @@ impl RemoteLocation {
                 } else {
                     format!("{}@{}", user, self.host)
                 }
+            } else if let Some(port) = self.port {
+                format!("{}:{}", self.host, port)
             } else {
-                if let Some(port) = self.port {
-                    format!("{}:{}", self.host, port)
-                } else {
-                    self.host.clone()
-                }
+                self.host.clone()
             };
 
             // Execute with custom SSH wrapper
@@ -714,17 +713,16 @@ impl SshProtocol {
         std::thread::sleep(std::time::Duration::from_millis(1000));
 
         // Create options with tunnel settings
-        let mut options = crate::options::DedupOptions::default();
-        options.use_ssh_tunnel = true;
-        options.tunnel_api_mode = true;
-        options.port = local_port;
-        
-        // If proto feature is enabled, use it
-        #[cfg(feature = "proto")]
-        {
-            options.use_protobuf = true;
-            options.use_compression = true;
-        }
+        let options = crate::options::DedupOptions {
+            use_ssh_tunnel: true,
+            tunnel_api_mode: true,
+            port: local_port,
+            #[cfg(feature = "proto")]
+            use_protobuf: true,
+            #[cfg(feature = "proto")]
+            use_compression: true,
+            ..crate::options::DedupOptions::default()
+        };
 
         // Connect to the server via the tunnel
         let mut client = DedupClient::with_options("localhost".to_string(), local_port, options);
@@ -910,58 +908,58 @@ impl SshProtocol {
                 // Check if the output contains any valid JSON
                 if output.contains("\"type\":\"error\"") {
                     // Error was already output in JSON format, just return it
-                    return Ok(output);
-                }
-
-                // Get stderr
-                let mut stderr = String::new();
-                if let Some(mut stderr_handle) = child.stderr {
-                    use std::io::Read;
-                    let _ = stderr_handle.read_to_string(&mut stderr);
-                }
-
-                if !stderr.is_empty() {
-                    log::error!("Remote command failed with stderr: {}", stderr);
-                    // Create a JSON error
-                    let error_json = format!(
-                        "{{\"type\":\"error\",\"message\":\"{}\",\"code\":{}}}",
-                        stderr.replace('\"', "\\\"").replace('\n', "\\n"),
-                        status.code().unwrap_or(1)
-                    );
-
-                    // Output error JSON and return it
-                    println!("{}", error_json);
-                    return Ok(error_json);
+                    Ok(output)
                 } else {
-                    log::error!("Remote command failed with output: {}", output);
-                    // Create a JSON error from the output
-                    let error_json = format!(
-                        "{{\"type\":\"error\",\"message\":\"{}\",\"code\":{}}}",
-                        output.replace('\"', "\\\"").replace('\n', "\\n"),
-                        status.code().unwrap_or(1)
-                    );
+                    // Get stderr
+                    let mut stderr = String::new();
+                    if let Some(mut stderr_handle) = child.stderr {
+                        use std::io::Read;
+                        let _ = stderr_handle.read_to_string(&mut stderr);
+                    }
 
-                    // Output error JSON and return it
-                    println!("{}", error_json);
-                    return Ok(error_json);
+                    if !stderr.is_empty() {
+                        log::error!("Remote command failed with stderr: {}", stderr);
+                        // Create a JSON error
+                        let error_json = format!(
+                            "{{\"type\":\"error\",\"message\":\"{}\",\"code\":{}}}",
+                            stderr.replace('\"', "\\\"").replace('\n', "\\n"),
+                            status.code().unwrap_or(1)
+                        );
+
+                        // Output error JSON and return it
+                        println!("{}", error_json);
+                        Ok(error_json)
+                    } else {
+                        log::error!("Remote command failed with output: {}", output);
+                        // Create a JSON error from the output
+                        let error_json = format!(
+                            "{{\"type\":\"error\",\"message\":\"{}\",\"code\":{}}}",
+                            output.replace('\"', "\\\"").replace('\n', "\\n"),
+                            status.code().unwrap_or(1)
+                        );
+
+                        // Output error JSON and return it
+                        println!("{}", error_json);
+                        Ok(error_json)
+                    }
                 }
-            }
-
-            // Check if output is valid JSON
-            if Self::is_valid_json(&output) {
-                log::debug!("Received valid JSON from remote dedups");
-                return Ok(output);
-            } else if let Some(json_only) = Self::extract_json_lines(&output) {
-                log::debug!(
-                    "Extracted {} JSON lines from mixed output",
-                    json_only.lines().count()
-                );
-                return Ok(json_only);
             } else {
-                log::warn!("Remote output did not contain JSON, creating error response");
-                let error_json = format!("{{\"type\":\"error\",\"message\":\"Remote output not valid JSON\",\"code\":1}}");
-                println!("{}", error_json);
-                return Ok(error_json);
+                // Check if output is valid JSON
+                if Self::is_valid_json(&output) {
+                    log::debug!("Received valid JSON from remote dedups");
+                    Ok(output)
+                } else if let Some(json_only) = Self::extract_json_lines(&output) {
+                    log::debug!(
+                        "Extracted {} JSON lines from mixed output",
+                        json_only.lines().count()
+                    );
+                    Ok(json_only)
+                } else {
+                    log::warn!("Remote output did not contain JSON, creating error response");
+                    let error_json = "{\"type\":\"error\",\"message\":\"Remote output not valid JSON\",\"code\":1}".to_string();
+                    println!("{}", error_json);
+                    Ok(error_json)
+                }
             }
         } else {
             // Standard non-JSON execution
@@ -978,17 +976,17 @@ impl SshProtocol {
 
                 if !stderr.is_empty() {
                     log::error!("Remote command failed with stderr: {}", stderr);
-                    return Err(anyhow::anyhow!("Remote dedups command failed: {}", stderr));
+                    Err(anyhow::anyhow!("Remote dedups command failed: {}", stderr))
                 } else {
                     log::error!("Remote command failed with output: {}", stdout);
-                    return Err(anyhow::anyhow!("Remote dedups command failed: {}", stdout));
+                    Err(anyhow::anyhow!("Remote dedups command failed: {}", stdout))
                 }
+            } else {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                log::debug!("Command output: {}", stdout);
+
+                Ok(stdout.into_owned())
             }
-
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            log::debug!("Command output: {}", stdout);
-
-            Ok(stdout.into_owned())
         }
     }
 

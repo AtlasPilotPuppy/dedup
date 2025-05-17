@@ -459,17 +459,17 @@ impl Cli {
             }
 
             // Boolean options should use config value if not explicitly changed
-            if self.allow_remote_install == true && config.ssh.allow_remote_install == false {
+            if self.allow_remote_install && !config.ssh.allow_remote_install {
                 // If config is false but CLI default is true, use config value
                 self.allow_remote_install = config.ssh.allow_remote_install;
             }
 
-            if self.use_remote_dedups == true && config.ssh.use_remote_dedups == false {
+            if self.use_remote_dedups && !config.ssh.use_remote_dedups {
                 // If config is false but CLI default is true, use config value
                 self.use_remote_dedups = config.ssh.use_remote_dedups;
             }
 
-            if self.use_ssh_tunnel == true && config.ssh.use_ssh_tunnel == false {
+            if self.use_ssh_tunnel && !config.ssh.use_ssh_tunnel {
                 // If config is false but CLI default is true, use config value
                 self.use_ssh_tunnel = config.ssh.use_ssh_tunnel;
             }

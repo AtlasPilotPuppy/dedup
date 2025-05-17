@@ -406,10 +406,8 @@ pub fn find_available_port(start_range: u16, end_range: u16) -> Result<u16> {
 
     // Try the default dedups port first (29875) if within range
     let default_port = 29875;
-    if default_port >= start_range && default_port <= end_range {
-        if TcpListener::bind(("127.0.0.1", default_port)).is_ok() {
-            return Ok(default_port);
-        }
+    if default_port >= start_range && default_port <= end_range && TcpListener::bind(("127.0.0.1", default_port)).is_ok() {
+        return Ok(default_port);
     }
 
     // If default port is unavailable, try sequentially in the range
