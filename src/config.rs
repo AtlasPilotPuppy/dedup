@@ -40,6 +40,10 @@ pub struct DedupConfig {
     /// Default output format
     #[serde(default = "default_format")]
     pub format: String,
+    
+    /// Whether to output results in JSON format to stdout
+    #[serde(default)]
+    pub json: bool,
 
     /// Whether to show progress information during scanning/hashing
     #[serde(default)]
@@ -159,6 +163,7 @@ impl Default for DedupConfig {
             parallel: None,
             mode: default_mode(),
             format: default_format(),
+            json: false,
             progress: false,
             sort_by: default_sort_by(),
             sort_order: default_sort_order(),

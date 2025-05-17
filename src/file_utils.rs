@@ -2165,3 +2165,474 @@ pub fn handle_remote_path(path: &Path) -> Result<Vec<FileInfo>> {
         Err(anyhow::anyhow!("Not a valid SSH path: {}", path_str))
     }
 }
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ProgressInfo {
+    pub stage: u8,                  // Current processing stage (1=scanning, 2=grouping, 3=hashing)
+    pub stage_name: String,         // Human-readable stage name
+    pub files_processed: usize,     // Number of files processed so far
+    pub total_files: usize,         // Total number of files to process (if known)
+    pub percent_complete: f32,      // Percentage complete (0-100)
+    pub current_file: Option<String>, // Current file being processed (if applicable)
+    pub bytes_processed: u64,       // Bytes processed so far
+    pub total_bytes: u64,           // Total bytes to process (if known)
+    pub elapsed_seconds: f64,       // Seconds elapsed since start
+    pub estimated_seconds_left: Option<f64>, // Estimated seconds remaining (if calculable)
+    pub status_message: String,     // Status message for display
+}
+
+impl Default for ProgressInfo {
+    fn default() -> Self {
+        Self {
+            stage: 1,
+            stage_name: "Initializing".to_string(),
+            files_processed: 0,
+            total_files: 0,
+            percent_complete: 0.0,
+            current_file: None,
+            bytes_processed: 0,
+            total_bytes: 0,
+            elapsed_seconds: 0.0,
+            estimated_seconds_left: None,
+            status_message: "Starting scan...".to_string(),
+        }
+    }
+}
+
+/// Wrapper for JSON streaming output
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "type")]
+pub enum JsonOutput {
+    #[serde(rename = "progress")]
+    Progress(ProgressInfo),
+    
+    #[serde(rename = "duplicate_set")]
+    DuplicateSet(DuplicateSet),
+    
+    #[serde(rename = "result")]
+    Result {
+        duplicate_count: usize,
+        total_files: usize,
+        total_bytes: u64,
+        duplicate_bytes: u64,
+        elapsed_seconds: f64,
+    },
+    
+    #[serde(rename = "error")]
+    Error {
+        message: String,
+        code: Option<i32>,
+    },
+}
+
+// Add this function near the existing find_duplicate_files_with_progress function
+pub fn find_duplicate_files_with_json_progress(
+    cli: &crate::Cli,
+    tx_progress: StdMpscSender<ScanMessage>,
+) -> Result<Vec<DuplicateSet>> {
+    // Clone tx before moving it into any closure
+    let tx_progress_for_media = tx_progress.clone();
+    let start_time = std::time::Instant::now();
+
+    log::info!(
+        "[ScanThread] Starting scan with JSON progress updates for directory: {:?}",
+        cli.directories[0]
+    );
+    
+    let filter_rules = FilterRules::new(cli)?;
+
+    // Initialize file cache if using fast mode
+    let file_cache = if cli.fast_mode && cli.cache_location.is_some() {
+        let cache_dir = cli.cache_location.as_ref().unwrap();
+        match crate::file_cache::FileCache::new(cache_dir, &cli.algorithm) {
+            Ok(cache) => {
+                log::info!(
+                    "[ScanThread] Using file cache at {:?} with {} entries",
+                    cache_dir,
+                    cache.len()
+                );
+                Some(std::sync::Arc::new(std::sync::Mutex::new(cache)))
+            }
+            Err(e) => {
+                log::warn!("[ScanThread] Failed to initialize file cache: {}", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // Track cache hits using atomic
+    let cache_hits = std::sync::atomic::AtomicUsize::new(0);
+
+    // Helper to send progress updates in JSON format
+    let send_json_progress = |stage: u8, stage_name: &str, files_processed: usize, total_files: usize, 
+                              bytes_processed: u64, total_bytes: u64, status_message: &str| {
+        let elapsed = start_time.elapsed().as_secs_f64();
+        let percent = if total_files > 0 {
+            (files_processed as f32 / total_files as f32) * 100.0
+        } else {
+            0.0
+        };
+        
+        // Calculate estimated time remaining
+        let estimated_left = if files_processed > 0 && percent > 0.0 {
+            let time_per_file = elapsed / files_processed as f64;
+            let files_left = total_files.saturating_sub(files_processed);
+            Some(time_per_file * files_left as f64)
+        } else {
+            None
+        };
+        
+        let progress = ProgressInfo {
+            stage,
+            stage_name: stage_name.to_string(),
+            files_processed,
+            total_files,
+            percent_complete: percent,
+            current_file: None, // We could add this if needed
+            bytes_processed,
+            total_bytes,
+            elapsed_seconds: elapsed,
+            estimated_seconds_left: estimated_left,
+            status_message: status_message.to_string(),
+        };
+        
+        let json_output = JsonOutput::Progress(progress);
+        
+        // Convert to JSON and print
+        if let Ok(json_str) = serde_json::to_string(&json_output) {
+            println!("{}", json_str);
+        }
+        
+        // Also send the progress update through the channel for TUI
+        if tx_progress.send(ScanMessage::StatusUpdate(stage, status_message.to_string())).is_err() {
+            log::warn!("[ScanThread] Failed to send status update to TUI (channel closed).");
+        }
+    };
+
+    // ========== STAGE 1: FILE DISCOVERY ==========
+    send_json_progress(1, "Scanning", 0, 0, 0, 0, "Starting file scan");
+    
+    // Collect files from all directories
+    let mut all_files = Vec::new();
+    let mut total_bytes = 0;
+    let mut current_directory_index = 0;
+    
+    // First pass - count total files for better progress reporting
+    let mut total_file_count = 0;
+    for directory in &cli.directories {
+        // This is just an estimate since we can't know exactly how many files we'll scan
+        match count_files_in_directory(directory, &filter_rules) {
+            Ok(count) => total_file_count += count,
+            Err(e) => log::warn!("Failed to count files in {}: {}", directory.display(), e),
+        }
+    }
+    
+    // Main scan
+    for directory in &cli.directories {
+        current_directory_index += 1;
+        let dir_str = directory.to_string_lossy().to_string();
+        
+        send_json_progress(1, "Scanning", all_files.len(), total_file_count, 
+            total_bytes, 0, &format!("Scanning directory {} of {}: {}", 
+                current_directory_index, cli.directories.len(), dir_str));
+        
+        // Check if this is a remote directory
+        let mut files = handle_directory(cli, directory)?;
+        
+        // Calculate total bytes
+        for file in &files {
+            total_bytes += file.size;
+        }
+        
+        // Add files to the main list
+        let files_count = files.len();
+        all_files.append(&mut files);
+        
+        // Update progress
+        send_json_progress(1, "Scanning", all_files.len(), total_file_count, 
+            total_bytes, total_bytes, &format!("Found {} files in {}", files_count, dir_str));
+    }
+
+    let total_files = all_files.len();
+
+    // ========== STAGE 2: SIZE COMPARISON ==========
+    send_json_progress(2, "Grouping", 0, total_files, 0, total_bytes, 
+        "Grouping files by size");
+    
+    // Group files by size
+    let mut size_groups: HashMap<u64, Vec<FileInfo>> = HashMap::new();
+    let mut files_processed = 0;
+    
+    for file in all_files {
+        size_groups.entry(file.size).or_default().push(file);
+        files_processed += 1;
+        
+        // Update progress periodically
+        if files_processed % 1000 == 0 || files_processed == total_files {
+            send_json_progress(2, "Grouping", files_processed, total_files, 
+                total_bytes, total_bytes, &format!("Grouped {} of {} files by size", files_processed, total_files));
+        }
+    }
+    
+    // Keep only groups with more than one file (potential duplicates)
+    let potential_duplicates: Vec<(u64, Vec<FileInfo>)> = size_groups
+        .into_iter()
+        .filter(|(_, files)| files.len() > 1)
+        .collect();
+
+    let _potential_duplicate_count = potential_duplicates.len();
+
+    if potential_duplicates.is_empty() {
+        send_json_progress(3, "Complete", total_files, total_files, total_bytes, total_bytes,
+            "Scan complete. No potential duplicates found.");
+        log::info!("[ScanThread] No potential duplicates found after size grouping.");
+
+        // No duplicates found, but if media mode is enabled, we should handle it separately
+        if cli.media_mode && cli.media_dedup_options.enabled {
+            // Clone before moving tx_progress into closure
+            let tx_clone = tx_progress_for_media.clone();
+            return find_similar_media_files_with_progress(cli, tx_clone);
+        }
+        
+        // Return empty result, but also output JSON result summary
+        if cli.json {
+            let result = JsonOutput::Result {
+                duplicate_count: 0,
+                total_files,
+                total_bytes,
+                duplicate_bytes: 0,
+                elapsed_seconds: start_time.elapsed().as_secs_f64(),
+            };
+            
+            if let Ok(json_str) = serde_json::to_string(&result) {
+                println!("{}", json_str);
+            }
+        }
+
+        return Ok(Vec::new());
+    }
+
+    let potential_groups = potential_duplicates.len();
+    let potential_files: usize = potential_duplicates
+        .iter()
+        .map(|(_, group)| group.len())
+        .sum();
+
+    send_json_progress(2, "Grouping", total_files, total_files, total_bytes, total_bytes,
+        &format!("Found {} size groups with {} potential duplicate files", 
+                potential_groups, potential_files));
+
+    log::info!(
+        "[ScanThread] Found {} sizes with potential duplicates. Calculating hashes...",
+        potential_groups
+    );
+
+    // ========== STAGE 3: HASH CALCULATION ==========
+    let num_threads = cli.parallel.unwrap_or_else(num_cpus::get);
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(num_threads)
+        .build()?;
+    log::info!("[ScanThread] Using {} threads for hashing.", num_threads);
+
+    // For MPSC between hashing threads and this function's aggregation logic
+    let (local_tx, local_rx) = std::sync::mpsc::channel::<Result<HashMap<String, Vec<FileInfo>>>>();
+    let total_groups_to_hash = potential_duplicates.len();
+    let mut groups_hashed_count = 0;
+    let total_files_to_hash = potential_files;
+    let mut files_hashed_count = 0;
+
+    send_json_progress(3, "Hashing", 0, total_files_to_hash, 0, total_bytes,
+        &format!("Hashing {} files across {} size groups (using {} threads)...",
+            total_files_to_hash, total_groups_to_hash, num_threads));
+
+    // Shared storage for all duplicate sets
+    let mut duplicate_sets: Vec<DuplicateSet> = Vec::new();
+
+    // Some variables needed for updating UI
+    let update_interval = std::time::Duration::from_millis(400);
+    let mut last_update_time = std::time::Instant::now();
+    
+    pool.install(|| {
+        potential_duplicates
+            .par_iter()
+            .for_each_with(local_tx, |thread_local_tx, (size, files)| {
+                let mut hashes_in_group: HashMap<String, Vec<FileInfo>> = HashMap::new();
+
+                // Thread-local cache hits counter
+                let mut thread_cache_hits = 0;
+
+                for file_info in files {
+                    // Try to get hash from cache first if fast mode is enabled
+                    let mut hash_from_cache = None;
+                    if let Some(cache) = file_cache.as_ref() {
+                        if let Ok(cache_guard) = cache.lock() {
+                            hash_from_cache = cache_guard.get_file_info(&file_info.path);
+                            if hash_from_cache.is_some() {
+                                thread_cache_hits += 1;
+                            }
+                        }
+                    }
+
+                    match hash_from_cache {
+                        // Use cached hash if available
+                        Some(cached_info) => {
+                            if let Some(hash_str) = &cached_info.hash {
+                                hashes_in_group
+                                    .entry(hash_str.clone())
+                                    .or_default()
+                                    .push(FileInfo {
+                                        path: file_info.path.clone(),
+                                        size: *size,
+                                        hash: Some(hash_str.clone()),
+                                        modified_at: cached_info.modified_at,
+                                        created_at: cached_info.created_at,
+                                    });
+                            }
+                        },
+                        // Calculate hash if not cached or cache miss
+                        None => match calculate_hash(&file_info.path, &cli.algorithm) {
+                            Ok(hash_str) => {
+                                let metadata = match fs::metadata(&file_info.path) {
+                                    Ok(m) => m,
+                                    Err(e) => {
+                                        log::warn!("Failed to get metadata for {:?}: {}", file_info.path, e);
+                                        continue;
+                                    }
+                                };
+                                let file_info = FileInfo {
+                                    path: file_info.path.clone(),
+                                    size: *size,
+                                    hash: Some(hash_str.clone()),
+                                    modified_at: file_time_to_system_time(metadata.modified()),
+                                    created_at: file_time_to_system_time(metadata.created()),
+                                };
+
+                                // Update cache if available
+                                if let Some(cache) = &file_cache {
+                                    if let Ok(mut cache_guard) = cache.lock() {
+                                        let _ = cache_guard.store(&file_info, &cli.algorithm);
+                                    }
+                                }
+
+                                hashes_in_group.entry(hash_str).or_default().push(file_info);
+                            }
+                            Err(e) => {
+                                log::warn!("Failed to hash file {:?}: {}", file_info.path, e);
+                            }
+                        },
+                    }
+                }
+
+                // Accumulate cache hits
+                cache_hits.fetch_add(thread_cache_hits, std::sync::atomic::Ordering::Relaxed);
+                
+                // Return hashes from this group via channel
+                thread_local_tx.send(Ok(hashes_in_group)).expect("Channel to be open");
+            });
+    });
+    
+    // Process results from hashing threads
+    let mut files_hashed = 0;
+    let mut duplicate_bytes = 0;
+    
+    while let Ok(result) = local_rx.try_recv() {
+        match result {
+            Ok(hashes_in_group) => {
+                groups_hashed_count += 1;
+                
+                // Count files to be processed for progress updates
+                let files_in_group = hashes_in_group.values().map(|v| v.len()).sum::<usize>();
+                files_hashed += files_in_group;
+                
+                // Only keep duplicate sets (with 2+ files)
+                for (hash, files) in hashes_in_group {
+                    if files.len() >= 2 {
+                        // Count the duplicate bytes (size * (count-1) because we keep one copy)
+                        let size = files[0].size;
+                        duplicate_bytes += size * (files.len() as u64 - 1);
+                        
+                        // Stream each duplicate set as it's found if in JSON mode
+                        if cli.json {
+                            let duplicate_set = DuplicateSet {
+                                files: files.clone(),
+                                size,
+                                hash: hash.clone(),
+                            };
+                            
+                            let json_output = JsonOutput::DuplicateSet(duplicate_set);
+                            if let Ok(json_str) = serde_json::to_string(&json_output) {
+                                println!("{}", json_str);
+                            }
+                        }
+                        
+                        duplicate_sets.push(DuplicateSet {
+                            files,
+                            size,
+                            hash,
+                        });
+                    }
+                }
+                
+                // Update progress UI periodically to avoid too many updates
+                let now = std::time::Instant::now();
+                if now.duration_since(last_update_time) >= update_interval || groups_hashed_count == total_groups_to_hash {
+                    last_update_time = now;
+                    files_hashed_count += files_hashed;
+                    files_hashed = 0;
+                    
+                    let percent = (groups_hashed_count as f32 / total_groups_to_hash as f32) * 100.0;
+                    let status = format!(
+                        "Hashed {} of {} files ({:.1}%, {} duplicate sets found)",
+                        files_hashed_count, total_files_to_hash, percent, duplicate_sets.len()
+                    );
+                    
+                    send_json_progress(3, "Hashing", files_hashed_count, total_files_to_hash, 
+                        0, total_bytes, &status);
+                }
+            }
+            Err(e) => {
+                log::error!("Error during hashing: {}", e);
+                if cli.json {
+                    let error = JsonOutput::Error {
+                        message: format!("Error during hashing: {}", e),
+                        code: Some(1),
+                    };
+                    if let Ok(json_str) = serde_json::to_string(&error) {
+                        println!("{}", json_str);
+                    }
+                }
+            }
+        }
+    }
+
+    // Final progress update
+    let status = format!(
+        "Scan complete. Found {} duplicate sets with {} files.",
+        duplicate_sets.len(), duplicate_sets.iter().map(|s| s.files.len()).sum::<usize>()
+    );
+    
+    send_json_progress(3, "Complete", total_files, total_files, 
+        total_bytes, total_bytes, &status);
+        
+    // Output final result summary
+    if cli.json {
+        let result = JsonOutput::Result {
+            duplicate_count: duplicate_sets.len(),
+            total_files,
+            total_bytes,
+            duplicate_bytes,
+            elapsed_seconds: start_time.elapsed().as_secs_f64(),
+        };
+        
+        if let Ok(json_str) = serde_json::to_string(&result) {
+            println!("{}", json_str);
+        }
+    }
+
+    // Sort sets by size (largest first) for more useful output
+    duplicate_sets.sort_by(|a, b| b.size.cmp(&a.size));
+
+    Ok(duplicate_sets)
+}

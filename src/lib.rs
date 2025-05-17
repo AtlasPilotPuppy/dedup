@@ -105,6 +105,10 @@ pub struct Cli {
     /// Output format for the duplicates file.
     #[clap(short, long, value_parser = clap::builder::PossibleValuesParser::new(["json", "toml"]), default_value = "json", help = "Format for the output file [json|toml]")]
     pub format: String,
+    
+    /// Output results in JSON format to stdout
+    #[clap(long, help = "Output results in JSON format to stdout")]
+    pub json: bool,
 
     /// Hashing algorithm to use for comparing files.
     #[clap(short, long, value_parser = clap::builder::PossibleValuesParser::new(["md5", "sha1", "sha256", "blake3", "xxhash", "gxhash", "fnv1a", "crc32"]), default_value = "xxhash", help = "Hashing algorithm [md5|sha1|sha256|blake3|xxhash|gxhash|fnv1a|crc32]")]
@@ -312,6 +316,13 @@ impl Cli {
 
         if self.format.is_empty() {
             self.format = config.format;
+        }
+        
+        // Apply JSON setting from config if not explicitly set on command line
+        // Note: Since json is a bool, we need to check if the config value is true
+        // and the CLI value is false (default)
+        if !self.json && config.json {
+            self.json = config.json;
         }
 
         if !self.progress && config.progress {

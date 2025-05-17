@@ -503,7 +503,7 @@ impl SshProtocol {
         Ok(())
     }
     
-    /// Execute dedups command on remote system
+    /// Execute dedups command on remote system with support for streaming JSON output
     pub fn execute_dedups(&self, args: &[&str]) -> Result<String> {
         // Build SSH command
         let mut ssh_cmd = vec!["ssh".to_string()];
@@ -515,6 +515,21 @@ impl SshProtocol {
         
         // Add custom SSH options
         ssh_cmd.extend(self.remote.ssh_options.clone());
+        
+        // Check if we're using JSON output to adjust SSH options
+        let using_json = args.contains(&"--json");
+        
+        // When using JSON, we need to ensure SSH doesn't add any extra output
+        if using_json {
+            // Add options to prevent MOTD, banner, etc.
+            ssh_cmd.extend(vec![
+                "-T".to_string(),            // Disable pseudo-terminal allocation
+                "-o".to_string(), "LogLevel=QUIET".to_string(), 
+                "-o".to_string(), "UserKnownHostsFile=/dev/null".to_string(),
+                "-o".to_string(), "StrictHostKeyChecking=no".to_string(),
+                "-o".to_string(), "BatchMode=yes".to_string(),
+            ]);
+        }
         
         // Add host with optional user
         let host = if let Some(user) = &self.remote.user {
@@ -545,35 +560,116 @@ impl SshProtocol {
         ssh_cmd.push(command);
         
         log::debug!("Executing remote command: {}", ssh_cmd.join(" "));
-        
-        let output = std::process::Command::new(&ssh_cmd[0])
-            .args(&ssh_cmd[1..])
-            .output()
-            .with_context(|| format!("Failed to execute command on host '{}'", self.remote.host))?;
+
+        // For JSON streaming output, we need to process the output line by line
+        if using_json {
+            let mut command = std::process::Command::new(&ssh_cmd[0]);
+            command.args(&ssh_cmd[1..]);
             
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let stdout = String::from_utf8_lossy(&output.stdout);
+            // Create pipes for stdout and stderr
+            let mut child = command.stdout(std::process::Stdio::piped())
+                                   .stderr(std::process::Stdio::piped())
+                                   .spawn()
+                                   .with_context(|| format!("Failed to execute command on host '{}'", self.remote.host))?;
             
-            if !stderr.is_empty() {
-                log::error!("Remote command failed with stderr: {}", stderr);
-                return Err(anyhow::anyhow!(
-                    "Remote dedups command failed: {}",
-                    stderr
-                ));
-            } else {
-                log::error!("Remote command failed with output: {}", stdout);
-                return Err(anyhow::anyhow!(
-                    "Remote dedups command failed: {}",
-                    stdout
-                ));
+            // Create a reader for stdout
+            let stdout = child.stdout.take().unwrap();
+            let mut reader = std::io::BufReader::new(stdout);
+            let mut line = String::new();
+            let mut output = String::new();
+            
+            // Process each line as it comes in
+            use std::io::BufRead;
+            
+            while let Ok(bytes) = reader.read_line(&mut line) {
+                if bytes == 0 {
+                    break; // End of stream
+                }
+                
+                // If this is valid JSON, pass it through immediately
+                if line.trim().starts_with('{') {
+                    // Pass through the JSON line to stdout
+                    println!("{}", line.trim());
+                }
+                
+                // Accumulate the full output
+                output.push_str(&line);
+                line.clear();
             }
+            
+            // Check if the command succeeded
+            let status = child.wait()
+                .with_context(|| format!("Failed to wait for command on host '{}'", self.remote.host))?;
+                
+            if !status.success() {
+                // Check if the output contains any valid JSON
+                if output.contains("\"type\":\"error\"") {
+                    // Error was already output in JSON format, just return it
+                    return Ok(output);
+                }
+                
+                // Get stderr
+                let mut stderr = String::new();
+                if let Some(mut stderr_handle) = child.stderr {
+                    use std::io::Read;
+                    let _ = stderr_handle.read_to_string(&mut stderr);
+                }
+                
+                if !stderr.is_empty() {
+                    log::error!("Remote command failed with stderr: {}", stderr);
+                    // Create a JSON error
+                    let error_json = format!("{{\"type\":\"error\",\"message\":\"{}\",\"code\":{}}}",
+                        stderr.replace('\"', "\\\"").replace('\n', "\\n"),
+                        status.code().unwrap_or(1));
+                    
+                    // Output error JSON and return it
+                    println!("{}", error_json);
+                    return Ok(error_json);
+                } else {
+                    log::error!("Remote command failed with output: {}", output);
+                    // Create a JSON error from the output
+                    let error_json = format!("{{\"type\":\"error\",\"message\":\"{}\",\"code\":{}}}",
+                        output.replace('\"', "\\\"").replace('\n', "\\n"),
+                        status.code().unwrap_or(1));
+                    
+                    // Output error JSON and return it
+                    println!("{}", error_json);
+                    return Ok(error_json);
+                }
+            }
+            
+            return Ok(output);
+        } else {
+            // Original implementation for non-JSON output
+            let output = std::process::Command::new(&ssh_cmd[0])
+                .args(&ssh_cmd[1..])
+                .output()
+                .with_context(|| format!("Failed to execute command on host '{}'", self.remote.host))?;
+                
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                
+                if !stderr.is_empty() {
+                    log::error!("Remote command failed with stderr: {}", stderr);
+                    return Err(anyhow::anyhow!(
+                        "Remote dedups command failed: {}",
+                        stderr
+                    ));
+                } else {
+                    log::error!("Remote command failed with output: {}", stdout);
+                    return Err(anyhow::anyhow!(
+                        "Remote dedups command failed: {}",
+                        stdout
+                    ));
+                }
+            }
+            
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            log::debug!("Command output: {}", stdout);
+            
+            Ok(stdout.into_owned())
         }
-        
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        log::debug!("Command output: {}", stdout);
-        
-        Ok(stdout.into_owned())
     }
     
     /// Close the SSH connection
