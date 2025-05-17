@@ -341,25 +341,32 @@ impl DedupServer {
             }
         }
 
-        // Special handling for handshake command - respond immediately with a success message
-        if command_msg.command == "handshake" {
+        // Special handling for internal_handshake command - respond immediately with a success message
+        if command_msg.command == "internal_handshake" {
             if verbose >= 1 {
-                log::info!("Received handshake request, responding with confirmation");
+                log::info!("Received internal_handshake request, responding with confirmation.");
             }
             
             // Send handshake success response
+            // Include server version or other useful info if available in the future
+            let result_payload = serde_json::json!({
+                "status": "handshake_ack",
+                "message": "Server ready and acknowledged handshake.",
+                "server_version": env!("CARGO_PKG_VERSION") // Example: Include server version
+            }).to_string();
+
             let result_msg = DedupMessage {
                 message_type: MessageType::Result,
-                payload: r#"{"status":"handshake_ok","message":"Server ready"}"#.to_string(),
+                payload: result_payload,
             };
             
             if let Err(e) = protocol.send_message(result_msg) {
-                log::error!("Failed to send handshake response: {}", e);
-                return Err(anyhow::anyhow!("Failed to send handshake response: {}", e));
+                log::error!("Failed to send internal_handshake response: {}", e);
+                return Err(anyhow::anyhow!("Failed to send internal_handshake response: {}", e));
             }
             
             if verbose >= 2 {
-                log::info!("Server communication established via handshake");
+                log::info!("Server communication established via internal_handshake.");
             }
             
             return Ok(());

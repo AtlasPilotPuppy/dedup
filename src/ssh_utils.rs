@@ -736,22 +736,24 @@ impl SshProtocol {
             server_flags.extend(std::iter::repeat_n("-v", cli.verbose as usize));
         }
         
-        // Add a special handshake flag that the server will respond to
-        server_flags.push("--server-handshake");
-        
-        let server_cmd = format!(
-            r#"ssh {ssh_options} {remote_addr} bash -c '{rust_log_export} export PATH="$HOME/.local/bin:$PATH"; if [ -f "$HOME/.bashrc" ]; then source "$HOME/.bashrc"; fi; echo "Starting dedups server on port {port}"; dedups {server_flags}'"#,
-            ssh_options = ssh_opts.join(" "),
-            remote_addr = remote_addr,
+        let server_cmd_for_remote_shell = format!(
+            r#"{rust_log_export} export PATH="$HOME/.local/bin:$PATH"; if [ -f "$HOME/.bashrc" ]; then source "$HOME/.bashrc"; fi; echo "INFO: Dedups server starting on remote port {port} via SSH tunnel command."; dedups {server_flags}"#,
             rust_log_export = rust_log_export,
             port = local_port,
             server_flags = server_flags.join(" ")
         );
 
-        if cli.verbose >= 3 {
-            log::debug!("Starting SSH tunnel and server with command: {}", server_cmd);
-        } else {
-            log::info!("Starting SSH tunnel and remote server on port {}", local_port);
+        let server_cmd = format!(
+            r#"ssh {ssh_options} {remote_addr} bash -c "{shell_command}""#,
+            ssh_options = ssh_opts.join(" "), // ssh_opts contains the -L for tunnel
+            remote_addr = remote_addr,
+            shell_command = server_cmd_for_remote_shell.replace('\"', "\\\"") // Escape quotes for the shell command
+        );
+
+        if cli.verbose >= 1 { // Log this important command more readily
+            log::info!("Attempting to spawn SSH tunnel and server with command: [{}]", server_cmd);
+        } else if cli.verbose >= 3 { // Fallback for older verbosity setting if any
+             log::debug!("Attempting to spawn SSH tunnel and server with command: [{}]", server_cmd);
         }
 
         // Start the SSH tunnel in background with better piping
@@ -761,7 +763,7 @@ impl SshProtocol {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
-            .context("Failed to start SSH tunnel")?;
+            .context(format!("Failed to start SSH tunnel. Command was: [{}]", server_cmd))?;
 
         // Set up readers for both stdout and stderr to capture server startup messages
         let stdout = child.stdout.take().expect("Failed to capture stdout");
@@ -885,24 +887,25 @@ impl SshProtocol {
                     }
                     
                     // Send a handshake command to verify the connection
-                    let mut handshake_env = HashMap::new();
-                    handshake_env.insert("HANDSHAKE".to_string(), "1".to_string());
-                    handshake_env.insert("VERBOSITY".to_string(), cli.verbose.to_string());
+                    let mut handshake_env = HashMap::new(); // Keep options minimal for handshake
                     
-                    // Execute a simple handshake command
-                    match client.execute_command("handshake".to_string(), Vec::new(), handshake_env) {
+                    if cli.verbose >= 2 {
+                        log::info!("Attempting internal handshake with remote server.");
+                    }
+                    match client.execute_command("internal_handshake".to_string(), Vec::new(), handshake_env) {
                         Ok(response) => {
-                            if response.contains("handshake_ok") {
+                            // Expect a JSON response like {"status":"handshake_ack", ...}
+                            if response.contains("handshake_ack") {
                                 handshake_received = true;
                                 if cli.verbose >= 1 {
-                                    log::info!("Handshake successful - server communication established");
+                                    log::info!("Internal handshake successful - server communication established. Response: {}", response.trim());
                                 }
                             } else {
-                                log::warn!("Handshake response received but not recognized: {}", response);
+                                log::warn!("Internal handshake response received but not recognized: [{}]", response.trim());
                             }
                         }
                         Err(e) => {
-                            log::warn!("Handshake failed: {}", e);
+                            log::warn!("Internal handshake command failed: {}", e);
                         }
                     }
                     
@@ -963,7 +966,7 @@ impl SshProtocol {
         
         // If we got this far but didn't get a handshake, at least we have a connection
         if !handshake_received && cli.verbose >= 1 {
-            log::warn!("Connection established but server handshake not received");
+            log::warn!("Connection established but server internal handshake NOT successful/received.");
             // We'll still try to proceed since we have a connection
         }
 
@@ -1025,6 +1028,8 @@ impl SshProtocol {
             println!("Server communication established");
         } else if connected {
             println!("Using fallback mode - server connected but handshake failed");
+        } else {
+            println!("Server communication failed - no connection");
         }
 
         Ok(output)
