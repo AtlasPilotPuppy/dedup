@@ -2009,24 +2009,51 @@ fn handle_remote_directory(cli: &crate::Cli, dir_path: &Path) -> Result<Vec<File
             
             // Prepare dedups arguments for remote execution
             let mut args_vec = Vec::new();
+            
+            // Create bindings for values that need to live long enough
+            let similarity_str = cli.media_similarity.to_string();
+            
+            // Always use the absolute path to the directory
             args_vec.push(remote.path.to_str().unwrap_or("/"));
+            
+            // Setup JSON flag for remote when needed
+            if cli.json {
+                args_vec.push("--json");
+            }
+            
+            // Add algorithm, which is important for hash consistency
+            if !cli.algorithm.is_empty() {
+                args_vec.push("--algorithm");
+                args_vec.push(&cli.algorithm);
+            }
             
             // Add common arguments that make sense for remote execution
             if !cli.include.is_empty() {
-                args_vec.push("--include");
                 for pattern in &cli.include {
+                    args_vec.push("--include");
                     args_vec.push(pattern);
                 }
             }
             if !cli.exclude.is_empty() {
-                args_vec.push("--exclude");
                 for pattern in &cli.exclude {
+                    args_vec.push("--exclude");
                     args_vec.push(pattern);
                 }
             }
             if let Some(ref filter_file) = cli.filter_from {
                 args_vec.push("--filter-from");
                 args_vec.push(filter_file.to_str().unwrap_or(""));
+            }
+            if cli.media_mode {
+                args_vec.push("--media-mode");
+                args_vec.push("--media-similarity");
+                args_vec.push(&similarity_str);
+                args_vec.push("--media-resolution");
+                args_vec.push(&cli.media_resolution);
+                for format in &cli.media_formats {
+                    args_vec.push("--media-formats");
+                    args_vec.push(format);
+                }
             }
             
             // Create a vector of string slices manually
@@ -2036,15 +2063,118 @@ fn handle_remote_directory(cli: &crate::Cli, dir_path: &Path) -> Result<Vec<File
             }
             
             // Execute remote dedups scan and parse results
-            let output = protocol.execute_dedups(&args)?;
+            let output = protocol.execute_dedups(&args, cli)?;
             log::debug!("Remote dedups raw output length: {} bytes", output.len());
-            if let Ok(scan_result) = serde_json::from_str::<Vec<FileInfo>>(&output) {
-                log::debug!("Successfully parsed remote dedups JSON: {} files", scan_result.len());
+            
+            // Now try to parse the JSON output
+            if cli.json {
+                // Try to extract duplicate sets from the stream of JSON responses
+                let mut duplicate_sets = Vec::new();
+                let mut file_infos = Vec::new();
+                
+                for line in output.lines() {
+                    let line = line.trim();
+                    if line.is_empty() {
+                        continue;
+                    }
+                    
+                    // Check if it's a valid JSON line
+                    if !line.starts_with('{') || !line.ends_with('}') {
+                        continue;
+                    }
+                    
+                    // Try to parse as different JSON output types
+                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(line) {
+                        if let Some(type_val) = parsed.get("type") {
+                            let type_str = type_val.as_str().unwrap_or("");
+                            
+                            match type_str {
+                                "duplicate_set" => {
+                                    // Extract the duplicate set
+                                    if let Some(duplicate_set) = parsed.get("files") {
+                                        if let Some(files_array) = duplicate_set.as_array() {
+                                            let mut files = Vec::new();
+                                            
+                                            // Process each file
+                                            for file in files_array {
+                                                if let Some(path_str) = file.get("path").and_then(|p| p.as_str()) {
+                                                    let size = file.get("size").and_then(|s| s.as_u64()).unwrap_or(0);
+                                                    let hash = file.get("hash").and_then(|h| h.as_str()).map(|s| s.to_string());
+                                                    
+                                                    let file_info = FileInfo {
+                                                        path: PathBuf::from(path_str),
+                                                        size,
+                                                        hash: hash.clone(),
+                                                        modified_at: None, // These would be in the JSON but we're simplified here
+                                                        created_at: None,
+                                                    };
+                                                    
+                                                    let file_info_clone = file_info.clone();
+                                                    files.push(file_info);
+                                                    file_infos.push(file_info_clone);
+                                                }
+                                            }
+                                            
+                                            if !files.is_empty() {
+                                                let size = files[0].size;
+                                                let hash = files[0].hash.clone().unwrap_or_default();
+                                                
+                                                duplicate_sets.push(DuplicateSet {
+                                                    files,
+                                                    size,
+                                                    hash,
+                                                });
+                                            }
+                                        }
+                                    }
+                                },
+                                "result" => {
+                                    // Final result, just log statistics
+                                    let duplicate_count = parsed.get("duplicate_count").and_then(|v| v.as_u64()).unwrap_or(0);
+                                    let total_files = parsed.get("total_files").and_then(|v| v.as_u64()).unwrap_or(0);
+                                    
+                                    log::info!(
+                                        "Remote scan complete: {} duplicate sets across {} files",
+                                        duplicate_count, total_files
+                                    );
+                                },
+                                "error" => {
+                                    // Error message from remote
+                                    let message = parsed.get("message").and_then(|v| v.as_str()).unwrap_or("Unknown error");
+                                    log::error!("Remote error: {}", message);
+                                    
+                                    return Err(anyhow::anyhow!("Remote error: {}", message));
+                                },
+                                _ => {
+                                    // Other types like progress we can just pass through
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                // If we found FileInfo objects, we can process those directly
+                if !file_infos.is_empty() {
+                    return Ok(file_infos);
+                }
+                
+                // If we found DuplicateSets, we need to convert to FileInfo objects
+                if !duplicate_sets.is_empty() {
+                    let mut all_files = Vec::new();
+                    for set in duplicate_sets {
+                        all_files.extend(set.files);
+                    }
+                    return Ok(all_files);
+                }
+            } else if let Ok(scan_result) = serde_json::from_str::<Vec<FileInfo>>(&output) {
+                // Legacy format - just a list of FileInfo objects
+                log::debug!("Successfully parsed remote dedups response: {} files", scan_result.len());
                 return Ok(scan_result);
             }
-            // Fallback to remote listing
-            log::info!("Remote dedups output could not be parsed as JSON; falling back to basic remote listing");
-            return handle_remote_fallback(cli, &remote);
+            
+            // If we reach here, JSON parsing failed
+            log::info!("Remote dedups output could not be parsed correctly; falling back to basic remote listing");
+            handle_remote_fallback(cli, &remote)
         } else {
             log::info!("Remote dedups found at {} but use_remote_dedups is disabled", dedups_path);
             handle_remote_fallback(cli, &remote)

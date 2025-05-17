@@ -99,6 +99,10 @@ pub struct SshConfig {
     #[serde(default = "default_use_sudo")]
     pub use_sudo: bool,
 
+    /// Whether to use SSH tunneling for reliable JSON streaming
+    #[serde(default = "default_use_ssh_tunnel")]
+    pub use_ssh_tunnel: bool,
+
     /// Default SSH options
     #[serde(default)]
     pub ssh_options: Vec<String>,
@@ -144,12 +148,18 @@ fn default_use_sudo() -> bool {
 }
 
 #[cfg(feature = "ssh")]
+fn default_use_ssh_tunnel() -> bool {
+    true
+}
+
+#[cfg(feature = "ssh")]
 impl Default for SshConfig {
     fn default() -> Self {
         Self {
             allow_remote_install: default_allow_remote_install(),
             use_remote_dedups: default_use_remote_dedups(),
             use_sudo: default_use_sudo(),
+            use_ssh_tunnel: default_use_ssh_tunnel(),
             ssh_options: Vec::new(),
             rsync_options: Vec::new(),
         }

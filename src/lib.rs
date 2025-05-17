@@ -256,6 +256,11 @@ pub struct Cli {
     #[cfg(feature = "ssh")]
     #[clap(long, help = "Use sudo for remote installation (will prompt for password)")]
     pub use_sudo: bool,
+
+    /// Whether to use SSH tunneling for JSON streaming (more reliable than plain SSH)
+    #[cfg(feature = "ssh")]
+    #[clap(long, default_value_t = true, help = "Use SSH tunneling for JSON streaming (more reliable)")]
+    pub use_ssh_tunnel: bool,
 }
 
 impl Cli {
@@ -399,6 +404,11 @@ impl Cli {
             if self.use_remote_dedups == true && config.ssh.use_remote_dedups == false {
                 // If config is false but CLI default is true, use config value
                 self.use_remote_dedups = config.ssh.use_remote_dedups;
+            }
+            
+            if self.use_ssh_tunnel == true && config.ssh.use_ssh_tunnel == false {
+                // If config is false but CLI default is true, use config value
+                self.use_ssh_tunnel = config.ssh.use_ssh_tunnel;
             }
         }
 

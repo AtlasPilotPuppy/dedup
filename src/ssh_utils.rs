@@ -504,7 +504,204 @@ impl SshProtocol {
     }
     
     /// Execute dedups command on remote system with support for streaming JSON output
-    pub fn execute_dedups(&self, args: &[&str]) -> Result<String> {
+    /// Uses a dedicated socket/tunnel approach for better streaming
+    pub fn execute_dedups(&self, args: &[&str], cli: &crate::Cli) -> Result<String> {
+        // Check if we're using JSON output to adjust approach
+        let using_json = args.contains(&"--json");
+        
+        if using_json && cli.use_ssh_tunnel {
+            log::debug!("Using SSH tunnel for JSON streaming (use_ssh_tunnel=true)");
+            self.execute_dedups_with_tunnel(args)
+        } else {
+            if using_json {
+                log::debug!("Using standard SSH for JSON (use_ssh_tunnel=false)");
+            }
+            self.execute_dedups_standard(args)
+        }
+    }
+
+    /// Execute dedups command using a socket tunnel for reliable JSON streaming
+    fn execute_dedups_with_tunnel(&self, args: &[&str]) -> Result<String> {
+        log::debug!("Executing remote dedups with tunnel for reliable JSON streaming");
+        
+        // First check if netcat is available on the remote system
+        let check_nc_cmd = r#"
+            command -v nc >/dev/null 2>&1 || command -v netcat >/dev/null 2>&1 || 
+            { echo "MISSING"; exit 1; }
+        "#;
+        
+        match self.remote.run_command(check_nc_cmd) {
+            Ok(output) => {
+                if output.trim() == "MISSING" {
+                    log::warn!("netcat (nc) not found on remote system, falling back to standard SSH");
+                    return self.execute_dedups_standard(args);
+                }
+            },
+            Err(e) => {
+                log::warn!("Failed to check for netcat: {}, falling back to standard SSH", e);
+                return self.execute_dedups_standard(args);
+            }
+        }
+        
+        // Find a free local port for the tunnel
+        let local_port = find_available_port()?;
+        log::debug!("Using local port {} for SSH tunnel", local_port);
+        
+        // Set up the socket server on the remote system
+        let socket_setup_cmd = format!(
+            r#"
+            # Create a temporary directory for the socket
+            SOCKET_DIR=$(mktemp -d)
+            echo "Socket directory: $SOCKET_DIR"
+            
+            # Start a background process to run dedups and write to a fifo
+            (
+                # Set up environment
+                export PATH="$HOME/.local/bin:$PATH"
+                [ -f "$HOME/.bashrc" ] && source "$HOME/.bashrc"
+                [ -f "$HOME/.profile" ] && source "$HOME/.profile"
+                
+                # Create the command with proper JSON formatting
+                DEDUPS_CMD="dedups {}"
+                echo "Running command: $DEDUPS_CMD"
+                
+                # Execute and redirect output to netcat listening on our port
+                # Use stdbuf to disable buffering
+                stdbuf -o0 $DEDUPS_CMD | nc -l {} -q 0
+                
+                # Clean up
+                rm -rf "$SOCKET_DIR"
+            ) &
+            
+            # Give the server time to start
+            sleep 1
+            
+            # Return the temporary directory path so it can be cleaned up later
+            echo "$SOCKET_DIR"
+            "#,
+            args.join(" "),
+            local_port
+        );
+        
+        // Build SSH tunnel command
+        let mut tunnel_cmd = vec!["ssh".to_string()];
+        
+        // Add port if specified
+        if let Some(port) = self.remote.port {
+            tunnel_cmd.extend(vec!["-p".to_string(), port.to_string()]);
+        }
+        
+        // Add tunnel option
+        tunnel_cmd.push("-L".to_string());
+        tunnel_cmd.push(format!("{}:localhost:{}", local_port, local_port));
+        
+        // Add custom SSH options
+        tunnel_cmd.extend(self.remote.ssh_options.clone());
+        
+        // Add host with optional user
+        let host = if let Some(user) = &self.remote.user {
+            format!("{}@{}", user, self.remote.host)
+        } else {
+            self.remote.host.clone()
+        };
+        tunnel_cmd.push(host);
+        
+        // Add the socket setup command
+        tunnel_cmd.push(socket_setup_cmd);
+        
+        // Execute the tunnel command
+        log::debug!("Starting SSH tunnel with command: {}", tunnel_cmd.join(" "));
+        let tunnel_process = std::process::Command::new(&tunnel_cmd[0])
+            .args(&tunnel_cmd[1..])
+            .output()
+            .with_context(|| format!("Failed to set up SSH tunnel to host '{}'", self.remote.host))?;
+        
+        if !tunnel_process.status.success() {
+            let stderr = String::from_utf8_lossy(&tunnel_process.stderr);
+            log::error!("Failed to set up SSH tunnel: {}", stderr);
+            return Err(anyhow::anyhow!("Failed to set up SSH tunnel: {}", stderr));
+        }
+        
+        // The socket directory path is the last line of the output
+        let socket_dir = String::from_utf8_lossy(&tunnel_process.stdout)
+            .trim()
+            .lines()
+            .last()
+            .unwrap_or("")
+            .to_string();
+        
+        log::debug!("SSH tunnel established, socket directory: {}", socket_dir);
+        
+        // Connect to the local port to read the JSON output
+        let stream = match std::net::TcpStream::connect(format!("localhost:{}", local_port)) {
+            Ok(s) => s,
+            Err(e) => {
+                log::error!("Failed to connect to local port {}: {}", local_port, e);
+                return Err(anyhow::anyhow!("Failed to connect to local port {}: {}", local_port, e));
+            }
+        };
+        
+        // Set a read timeout
+        stream.set_read_timeout(Some(std::time::Duration::from_secs(2)))?;
+        
+        // Read from the stream
+        let mut reader = std::io::BufReader::new(stream);
+        let mut output = String::new();
+        let mut buf = [0; 4096];
+        
+        // Process the output in chunks
+        loop {
+            use std::io::Read;
+            match reader.read(&mut buf) {
+                Ok(0) => break, // End of stream
+                Ok(n) => {
+                    let chunk = std::str::from_utf8(&buf[0..n])?;
+                    
+                    // Stream JSON lines to stdout
+                    for line in chunk.lines() {
+                        if line.trim().starts_with('{') {
+                            println!("{}", line);
+                        }
+                    }
+                    
+                    output.push_str(chunk);
+                },
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    // Timeout - check if we have any output and if so, we're done
+                    if !output.is_empty() {
+                        break;
+                    }
+                },
+                Err(e) => {
+                    log::error!("Error reading from stream: {}", e);
+                    return Err(anyhow::anyhow!("Error reading from stream: {}", e));
+                }
+            }
+        }
+        
+        // Clean up the remote socket directory
+        if !socket_dir.is_empty() {
+            let cleanup_cmd = format!("rm -rf {}", socket_dir);
+            let _ = self.remote.run_command(&cleanup_cmd);
+        }
+        
+        if output.is_empty() {
+            log::warn!("No output received from remote dedups via tunnel");
+            
+            // Generate a JSON error
+            let error_json = format!(
+                "{{\"type\":\"error\",\"message\":\"No output received from remote dedups\",\"code\":1}}"
+            );
+            
+            println!("{}", error_json);
+            output = error_json;
+        }
+        
+        Ok(output)
+    }
+    
+    /// Standard execution method for non-JSON commands
+    fn execute_dedups_standard(&self, args: &[&str]) -> Result<String> {
         // Build SSH command
         let mut ssh_cmd = vec!["ssh".to_string()];
         
@@ -516,10 +713,10 @@ impl SshProtocol {
         // Add custom SSH options
         ssh_cmd.extend(self.remote.ssh_options.clone());
         
-        // Check if we're using JSON output to adjust SSH options
+        // Check if we're using JSON output
         let using_json = args.contains(&"--json");
         
-        // When using JSON, we need to ensure SSH doesn't add any extra output
+        // For JSON output, add options to minimize SSH noise
         if using_json {
             // Add options to prevent MOTD, banner, etc.
             ssh_cmd.extend(vec![
@@ -550,18 +747,37 @@ impl SshProtocol {
             fi
         "#;
         
-        // Build the command
-        let command = format!(
-            "{}\ndedups {}",
-            setup_env,
-            args.join(" ")
-        );
+        // Build the command, adding unbuffer for JSON mode
+        let command = if using_json {
+            format!(
+                "{}
+                # Try to use stdbuf/unbuffer to reduce buffering issues with JSON output
+                if command -v stdbuf >/dev/null 2>&1; then
+                    stdbuf -o0 -e0 dedups {}
+                elif command -v unbuffer >/dev/null 2>&1; then
+                    unbuffer dedups {}
+                else
+                    # No unbuffering tools available, proceed normally but might have buffering issues
+                    dedups {}
+                fi",
+                setup_env,
+                args.join(" "),
+                args.join(" "),
+                args.join(" ")
+            )
+        } else {
+            format!(
+                "{}\ndedups {}",
+                setup_env,
+                args.join(" ")
+            )
+        };
         
         ssh_cmd.push(command);
         
         log::debug!("Executing remote command: {}", ssh_cmd.join(" "));
-
-        // For JSON streaming output, we need to process the output line by line
+        
+        // Use different approach for JSON to handle streaming
         if using_json {
             let mut command = std::process::Command::new(&ssh_cmd[0]);
             command.args(&ssh_cmd[1..]);
@@ -638,9 +854,19 @@ impl SshProtocol {
                 }
             }
             
-            return Ok(output);
+            // Check if output is valid JSON
+            if Self::is_valid_json(&output) {
+                log::debug!("Received valid JSON from remote dedups");
+                return Ok(output);
+            } else {
+                log::warn!("Remote output not valid JSON, creating error response");
+                // Format as an error response
+                let error_json = format!("{{\"type\":\"error\",\"message\":\"Remote output not valid JSON\",\"code\":1}}");
+                println!("{}", error_json);
+                return Ok(error_json);
+            }
         } else {
-            // Original implementation for non-JSON output
+            // Standard non-JSON execution
             let output = std::process::Command::new(&ssh_cmd[0])
                 .args(&ssh_cmd[1..])
                 .output()
@@ -672,6 +898,12 @@ impl SshProtocol {
         }
     }
     
+    /// Check if a string contains valid JSON
+    fn is_valid_json(text: &str) -> bool {
+        // Check for some JSON structures
+        text.trim().starts_with('{') && text.trim().ends_with('}') && text.contains("\"type\":")
+    }
+    
     /// Close the SSH connection
     pub fn close(&mut self) {
         if self.session.is_some() {
@@ -690,6 +922,15 @@ impl SshProtocol {
         }
         self.session = None;
     }
+}
+
+/// Find an available port on the local system
+#[cfg(feature = "ssh")]
+fn find_available_port() -> Result<u16> {
+    // Try to bind to port 0, which lets the OS choose an available port
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let addr = listener.local_addr()?;
+    Ok(addr.port())
 }
 
 /// Dummy implementation for non-SSH builds

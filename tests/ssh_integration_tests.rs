@@ -145,11 +145,11 @@ fn test_remote_dedups_execution() -> Result<()> {
             protocol.connect()?;
             
             // Try to execute a simple dedups command
-            let output = protocol.execute_dedups(&["--version"])?;
+            let output = protocol.execute_dedups(&["--version"], &cli)?;
             assert!(!output.is_empty(), "dedups --version should return version info");
             
             // Try to scan a directory
-            let scan_output = protocol.execute_dedups(&["/tmp", "--dry-run"])?;
+            let scan_output = protocol.execute_dedups(&["/tmp", "--dry-run"], &cli)?;
             assert!(!scan_output.is_empty(), "dedups scan should return some output");
             
             Ok(())
@@ -167,7 +167,7 @@ fn test_remote_dedups_execution() -> Result<()> {
                 let mut protocol = SshProtocol::new(remote);
                 protocol.connect()?;
                 
-                let output = protocol.execute_dedups(&["--version"])?;
+                let output = protocol.execute_dedups(&["--version"], &cli)?;
                 assert!(!output.is_empty(), "dedups --version should return version info");
                 
                 Ok(())
@@ -196,7 +196,7 @@ fn test_remote_dedups_path_handling() -> Result<()> {
     let mut protocol = SshProtocol::new(remote.clone());
     protocol.connect()?;
     
-    let output = protocol.execute_dedups(&["--version"])?;
+    let output = protocol.execute_dedups(&["--version"], &cli)?;
     assert!(output.contains("dedups v0.1.0-test"), "Should execute the test dedups script");
     
     Ok(())

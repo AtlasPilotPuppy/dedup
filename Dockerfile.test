@@ -27,14 +27,7 @@ RUN mkdir -p /home/testuser/.ssh \
     && chmod 755 /home/testuser/test_data
 
 # Create a script to fix permissions on startup
-COPY <<-'EOT' /usr/local/bin/fix-permissions.sh
-#!/bin/bash
-chown -R testuser:testuser /home/testuser/.ssh
-chmod 700 /home/testuser/.ssh
-chmod 600 /home/testuser/.ssh/authorized_keys
-chown -R testuser:testuser /home/testuser/test_data
-chmod 755 /home/testuser/test_data
-EOT
+RUN echo '#!/bin/bash\nchown -R testuser:testuser /home/testuser/.ssh\nchmod 700 /home/testuser/.ssh\nchmod 600 /home/testuser/.ssh/authorized_keys\nchown -R testuser:testuser /home/testuser/test_data\nchmod 755 /home/testuser/test_data' > /usr/local/bin/fix-permissions.sh
 
 RUN chmod +x /usr/local/bin/fix-permissions.sh
 

@@ -462,6 +462,9 @@ dedups ssh:server.example.com:/data:-i,~/.ssh/custom_key,-o,StrictHostKeyCheckin
 
 # Use custom rsync options
 dedups /local/data ssh:server.example.com:/remote/data::--info=progress2,--no-perms
+
+# Use SSH tunnel for reliable JSON streaming (for interactive progress monitoring)
+dedups ssh:server.example.com:/home/user/photos --json --use-ssh-tunnel
 ```
 
 ### Requirements
@@ -470,6 +473,7 @@ dedups /local/data ssh:server.example.com:/remote/data::--info=progress2,--no-pe
 - SSH key authentication configured (password auth is not supported)
 - rsync installed on both local and remote systems for file transfers
 - Optional: dedups installed on the remote system for advanced features
+- For SSH tunneling: `netcat` (nc) on the remote system for reliable JSON streaming
 
 ### Remote Dedups Detection
 
@@ -482,10 +486,34 @@ You can control this behavior with:
 - `--allow-remote-install=[true|false]` - Allow or prevent remote installation
 - `--use-remote-dedups=[true|false]` - Enable or disable using remote dedups
 - `--use-sudo` - Use sudo for installation (will prompt for password if needed)
+- `--use-ssh-tunnel=[true|false]` - Enable or disable SSH tunneling for JSON streaming (default: true)
 
 The installation location depends on sudo access:
 - With sudo: `/usr/local/bin` (system-wide installation)
 - Without sudo: `~/.local/bin` (user-specific installation)
+
+### SSH Tunneling for JSON Output
+
+When using remote dedups with JSON output (which is used for interactive features and progress monitoring), 
+dedups uses an SSH tunnel to ensure reliable JSON streaming between the local and remote instances.
+
+This feature:
+- Creates a secure tunnel for JSON data transmission
+- Uses netcat (nc) on the remote system for unbuffered streaming
+- Provides real-time progress updates from remote operations
+- Falls back to standard SSH if tunneling is unavailable
+
+You can control this behavior with:
+- `--use-ssh-tunnel` - Enable SSH tunneling (default)
+- `--no-use-ssh-tunnel` - Disable SSH tunneling and use standard SSH connection
+
+Requirements for optimal tunneling:
+- netcat (nc) installed on the remote system
+- Local port available for tunnel creation (automatically selected)
+- SSH port forwarding permissions
+
+If netcat is unavailable, dedups will try to use `stdbuf` or `unbuffer` for improved streaming
+over standard SSH connections.
 
 ### Remote File Operations
 

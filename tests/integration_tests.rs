@@ -234,6 +234,8 @@ impl TestEnv {
             use_remote_dedups: true,
             #[cfg(feature = "ssh")]
             use_sudo: false,
+            #[cfg(feature = "ssh")]
+            use_ssh_tunnel: true,
         }
     }
 }
