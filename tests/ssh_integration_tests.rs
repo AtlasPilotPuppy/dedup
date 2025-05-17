@@ -103,22 +103,22 @@ fn test_file_operations() -> Result<()> {
 #[ignore] // These tests require a configured SSH host and are ignored by default
 fn test_handle_directory() -> Result<()> {
     // Create a minimal CLI configuration
-    let mut cli = Cli::parse_from(["dedups", "ssh:test-dedups:/tmp"]);
+    let mut cli = Cli::parse_from(["dedups", "ssh:test-dedups:/home/testuser/test_data"]);
     
     // Override any config that might be set
     cli.allow_remote_install = false; // Don't try to install dedups for this test
     
     // Try to scan the remote directory
-    let files = file_utils::handle_directory(&cli, Path::new("ssh:test-dedups:/tmp"))?;
+    let files = file_utils::handle_directory(&cli, Path::new("ssh:test-dedups:/home/testuser/test_data"))?;
     
     // Print some info about the files found
-    println!("Found {} files in remote /tmp directory", files.len());
+    println!("Found {} files in remote test directory", files.len());
     for (i, file) in files.iter().take(5).enumerate() {
         println!("  File {}: {}", i + 1, file.path.display());
     }
     
     // We should have found at least some files
-    assert!(!files.is_empty(), "No files found in remote /tmp directory");
+    assert!(!files.is_empty(), "No files found in remote test directory");
     
     Ok(())
 }
@@ -187,14 +187,6 @@ fn test_remote_dedups_path_handling() -> Result<()> {
     // Set up remote connection
     let remote = RemoteLocation::parse("ssh:test-dedups:/tmp")?;
     
-    // Create a test file in ~/.local/bin to simulate local installation
-    let setup_cmd = r#"
-        mkdir -p ~/.local/bin
-        echo '#!/bin/bash\necho "test dedups v0.1.0"' > ~/.local/bin/dedups
-        chmod +x ~/.local/bin/dedups
-    "#;
-    remote.run_command(setup_cmd)?;
-    
     // Verify dedups is found
     let rt = tokio::runtime::Runtime::new()?;
     let dedups_path = rt.block_on(remote.check_dedups_installed())?;
@@ -205,10 +197,7 @@ fn test_remote_dedups_path_handling() -> Result<()> {
     protocol.connect()?;
     
     let output = protocol.execute_dedups(&["--version"])?;
-    assert!(output.contains("test dedups"), "Should execute the test dedups script");
-    
-    // Clean up
-    remote.run_command("rm -f ~/.local/bin/dedups")?;
+    assert!(output.contains("dedups v0.1.0-test"), "Should execute the test dedups script");
     
     Ok(())
 } 

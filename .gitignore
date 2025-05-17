@@ -1,1 +1,10 @@
 /target
+
+# Test environment
+test_env/test_data/
+test_env/container_home/
+test_env/ssh/
+*.log
+
+**/*.rs.bk
+.DS_Store

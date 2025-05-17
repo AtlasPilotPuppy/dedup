@@ -1,0 +1,30 @@
+#!/bin/bash
+
+# Mock dedups implementation for testing
+# This script simulates the basic behavior of dedups for SSH integration tests
+
+VERSION="0.1.0-test"
+
+function print_version() {
+    echo "dedups v${VERSION}"
+}
+
+function print_help() {
+    echo "Mock dedups help message"
+    echo "Usage: dedups [OPTIONS] <DIRECTORIES>..."
+}
+
+# Parse command line arguments
+case "$1" in
+    --version)
+        print_version
+        ;;
+    --help)
+        print_help
+        ;;
+    *)
+        echo "Running dedups with arguments: $@"
+        echo "Mock scan complete"
+        echo "Success"
+        ;;
+esac 

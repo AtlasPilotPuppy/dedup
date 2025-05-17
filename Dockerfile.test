@@ -1,0 +1,45 @@
+FROM ubuntu:22.04
+
+# Install minimal required packages
+RUN apt-get update && apt-get install -y \
+    openssh-server \
+    sudo \
+    rsync \
+    && rm -rf /var/lib/apt/lists/*
+
+# Configure SSH server
+RUN mkdir /var/run/sshd
+RUN sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin no/' /etc/ssh/sshd_config
+RUN sed -i 's/#PubkeyAuthentication yes/PubkeyAuthentication yes/' /etc/ssh/sshd_config
+RUN sed -i 's/#PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config
+
+# Create test user with sudo access
+RUN useradd -m -s /bin/bash testuser
+RUN echo 'testuser ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers
+
+# Create mount points and set permissions
+RUN mkdir -p /home/testuser/.ssh \
+    && mkdir -p /home/testuser/.local/bin \
+    && mkdir -p /home/testuser/test_data \
+    && chown -R testuser:testuser /home/testuser \
+    && chmod 700 /home/testuser/.ssh \
+    && chmod 755 /home/testuser/.local/bin \
+    && chmod 755 /home/testuser/test_data
+
+# Create a script to fix permissions on startup
+COPY <<-'EOT' /usr/local/bin/fix-permissions.sh
+#!/bin/bash
+chown -R testuser:testuser /home/testuser/.ssh
+chmod 700 /home/testuser/.ssh
+chmod 600 /home/testuser/.ssh/authorized_keys
+chown -R testuser:testuser /home/testuser/test_data
+chmod 755 /home/testuser/test_data
+EOT
+
+RUN chmod +x /usr/local/bin/fix-permissions.sh
+
+# Expose SSH port
+EXPOSE 22
+
+# Start SSH daemon and fix permissions
+CMD /usr/local/bin/fix-permissions.sh && /usr/sbin/sshd -D 
