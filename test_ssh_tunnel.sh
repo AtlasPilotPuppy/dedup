@@ -6,10 +6,12 @@ CONTAINER_NAME="dedups-test-container"
 SSH_PORT=2222
 DATA_DIR="$(pwd)/test_data"
 TARGET_DIR="/data"
+IMAGE_NAME="dedups-test"
 
 # Colors for output
 GREEN='\033[0;32m'
 RED='\033[0;31m'
+BLUE='\033[0;34m'
 NC='\033[0m'
 
 # Ensure clean state
@@ -27,8 +29,13 @@ setup_test_data() {
     cp "$DATA_DIR/source/file1.txt" "$DATA_DIR/source/file1_dup.txt"
 }
 
-# Build Docker image
+# Build Docker image if it doesn't exist
 build_image() {
+    if docker image inspect $IMAGE_NAME >/dev/null 2>&1; then
+        echo -e "${BLUE}Using existing Docker image${NC}"
+        return 0
+    fi
+    
     echo "Building test Docker image..."
     
     # Create SSH key if it doesn't exist
@@ -91,7 +98,7 @@ CMD ["/usr/sbin/sshd", "-D"]
 EOF
     
     # Build the Docker image
-    docker build -t dedups-test -f $TMPDIR/Dockerfile $TMPDIR
+    docker build -t $IMAGE_NAME -f $TMPDIR/Dockerfile $TMPDIR
     
     # Clean up temporary directory
     rm -rf $TMPDIR
@@ -99,8 +106,13 @@ EOF
 
 # Start test container
 start_container() {
+    if docker ps -q --filter "name=$CONTAINER_NAME" | grep -q .; then
+        echo -e "${BLUE}Container already running${NC}"
+        return 0
+    fi
+    
     echo "Starting test container..."
-    docker run -d --name $CONTAINER_NAME -p $SSH_PORT:22 -v "$DATA_DIR:$TARGET_DIR" dedups-test
+    docker run -d --name $CONTAINER_NAME -p $SSH_PORT:22 -v "$DATA_DIR:$TARGET_DIR" $IMAGE_NAME
     
     # Wait for SSH to be available
     echo -n "Waiting for SSH to be ready "
@@ -143,17 +155,25 @@ test_dedups_version() {
 test_direct_tunnel() {
     echo "Testing direct tunnel connection..."
     
-    # Start netcat server on remote host
-    ssh -i ~/.ssh/dedups_test_key -o StrictHostKeyChecking=no -p $SSH_PORT -f testuser@localhost "nc -l 10000 > /tmp/tunnel_test.txt" 
+    # Kill any existing netcat processes
+    ssh -i ~/.ssh/dedups_test_key -o StrictHostKeyChecking=no -p $SSH_PORT testuser@localhost "pkill -f 'nc -l' || true"
+    
+    # Start netcat server on remote host with timeout
+    ssh -i ~/.ssh/dedups_test_key -o StrictHostKeyChecking=no -p $SSH_PORT testuser@localhost "nc -l 10000 > /tmp/tunnel_test.txt & sleep 5 && pkill -f 'nc -l'" &
+    SERVER_PID=$!
+    
+    # Wait for server to start
     sleep 1
     
-    # Set up SSH tunnel
+    # Set up SSH tunnel with timeout
     ssh -i ~/.ssh/dedups_test_key -o StrictHostKeyChecking=no -p $SSH_PORT -L 10000:localhost:10000 -f testuser@localhost sleep 5
     sleep 1
     
-    # Send test data through tunnel
-    echo "Test data through tunnel" | nc localhost 10000
-    sleep 1
+    # Send test data through tunnel with timeout
+    echo "Test data through tunnel" | nc -w 5 localhost 10000
+    
+    # Wait for server to finish
+    wait $SERVER_PID
     
     # Check if data was received
     if ssh -i ~/.ssh/dedups_test_key -o StrictHostKeyChecking=no -p $SSH_PORT testuser@localhost "cat /tmp/tunnel_test.txt" | grep -q "Test data through tunnel"; then
@@ -197,30 +217,27 @@ test_dedups_json_direct() {
 test_ssh_json_tunnel() {
     echo "Testing JSON streaming through SSH tunnel..."
     
-    # Create temporary directory for socket
+    # Kill any existing netcat processes
+    ssh -i ~/.ssh/dedups_test_key -o StrictHostKeyChecking=no -p $SSH_PORT testuser@localhost "pkill -f 'nc -l' || true"
+    
     TUNNEL_PORT=10000
     
     # Start netcat server on remote host with timeout
-    ssh -i ~/.ssh/dedups_test_key -o StrictHostKeyChecking=no -p $SSH_PORT testuser@localhost "~/.local/bin/dedups /data/test --json > /tmp/output.json" 
-    ssh -i ~/.ssh/dedups_test_key -o StrictHostKeyChecking=no -p $SSH_PORT testuser@localhost "cat /tmp/output.json | nc -l $TUNNEL_PORT" &
+    ssh -i ~/.ssh/dedups_test_key -o StrictHostKeyChecking=no -p $SSH_PORT testuser@localhost "~/.local/bin/dedups /data/test --json > /tmp/output.json && cat /tmp/output.json | nc -l $TUNNEL_PORT & sleep 5 && pkill -f 'nc -l'" &
     SERVER_PID=$!
     
     # Give the remote server time to start
     sleep 2
     
-    # Set up SSH tunnel
-    ssh -i ~/.ssh/dedups_test_key -o StrictHostKeyChecking=no -p $SSH_PORT -L $TUNNEL_PORT:localhost:$TUNNEL_PORT -f testuser@localhost sleep 10
+    # Set up SSH tunnel with timeout
+    ssh -i ~/.ssh/dedups_test_key -o StrictHostKeyChecking=no -p $SSH_PORT -L $TUNNEL_PORT:localhost:$TUNNEL_PORT -f testuser@localhost sleep 5
     
-    # Check if tunnel is established - use direct test
-    echo "Waiting for tunnel..."
-    sleep 3
-    
-    # Read from the tunnel
+    # Read from the tunnel with timeout
     RESULT=$(echo "" | nc -w 5 localhost $TUNNEL_PORT)
     echo "Tunnel result: $RESULT"
     
-    # Clean up
-    kill $SERVER_PID 2>/dev/null || true
+    # Wait for server to finish
+    wait $SERVER_PID
     
     # Check if we got valid JSON
     if echo "$RESULT" | grep -q '"type":"result"'; then
@@ -257,10 +274,10 @@ main() {
     # Set up test data
     setup_test_data
     
-    # Build Docker image
+    # Build Docker image if needed
     build_image
     
-    # Start container
+    # Start container if needed
     start_container
     
     # Run tests

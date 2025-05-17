@@ -300,10 +300,21 @@ jobs:
           echo "OpenSSL Include Dir: $OPENSSL_INCLUDE_DIR"
           echo "PKG_CONFIG_PATH: $PKG_CONFIG_PATH"
           
+          # Set architecture-specific flags
+          if [[ "${{ matrix.target }}" == "x86_64-unknown-linux-gnu" ]]; then
+            export RUSTFLAGS="-C target-cpu=x86-64-v3"
+          elif [[ "${{ matrix.target }}" == "aarch64-unknown-linux-gnu" ]]; then
+            export RUSTFLAGS="-C target-cpu=generic -C target-feature=+neon"
+            # Set cross-compilation environment variables
+            export PKG_CONFIG_PATH="/usr/lib/aarch64-linux-gnu/pkgconfig"
+            export PKG_CONFIG_ALLOW_CROSS=1
+            export OPENSSL_LIB_DIR=/usr/lib/aarch64-linux-gnu
+            export OPENSSL_INCLUDE_DIR=/usr/include
+          fi
+          
           # Build with OpenSSL configuration
           OPENSSL_NO_VENDOR=1 cargo build --release --target ${{ matrix.target }} ${{ matrix.features_flag }}
         env:
-          RUSTFLAGS: "-C target-cpu=native"
           OPENSSL_NO_VENDOR: "1"
           OPENSSL_STATIC: "0"
       
@@ -313,7 +324,7 @@ jobs:
         run: |
           cargo build --release --target ${{ matrix.target }} ${{ matrix.features_flag }}
         env:
-          RUSTFLAGS: "-C target-feature=+aes,+neon"
+          RUSTFLAGS: "-C target-feature=+neon"
       
       # Build with macOS x86_64 flags
       - name: Build (macOS x86_64)
@@ -335,12 +346,18 @@ jobs:
           MACOSX_DEPLOYMENT_TARGET: "11.0"
           OPENSSL_NO_VENDOR: "1"
           OPENSSL_STATIC: "0"
-          RUSTFLAGS: "-C target-feature=+crt-static"
+          RUSTFLAGS: "-C target-cpu=x86-64-v2"
       
-      # Standard build for Windows
+      # Build with Windows-specific flags
       - name: Build (Windows)
         if: matrix.os == 'windows-latest'
         run: |
+          # Set architecture-specific flags
+          if [[ "${{ matrix.target }}" == "x86_64-pc-windows-msvc" ]]; then
+            export RUSTFLAGS="-C target-cpu=x86-64-v2"
+          elif [[ "${{ matrix.target }}" == "aarch64-pc-windows-msvc" ]]; then
+            export RUSTFLAGS="-C target-feature=+neon"
+          fi
           cargo build --release --target ${{ matrix.target }} ${{ matrix.features_flag }}
       
       # Prepare artifact on Linux/macOS
