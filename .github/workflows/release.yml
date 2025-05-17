@@ -127,18 +127,26 @@ jobs:
       - name: Set up x86_64 Homebrew
         if: matrix.os == 'macos-latest' && matrix.target == 'x86_64-apple-darwin'
         run: |
-          # Create and set up /usr/local for x86_64 Homebrew
-          sudo mkdir -p /usr/local/bin /usr/local/lib /usr/local/include
+          # Remove existing Homebrew if any
+          sudo rm -rf /usr/local/Homebrew /usr/local/Caskroom /usr/local/Cellar /usr/local/bin/brew
+
+          # Set up directories with proper permissions
+          sudo mkdir -p /usr/local
           sudo chown -R $(whoami) /usr/local/*
-          
-          # Install x86_64 Homebrew if not exists
-          if [ ! -f /usr/local/bin/brew ]; then
-            curl -L https://github.com/Homebrew/brew/tarball/master | tar xz --strip 1 -C /usr/local
-            echo "/usr/local/bin" >> $GITHUB_PATH
-          fi
+          sudo chown -R $(whoami) /usr/local/
+
+          # Install x86_64 Homebrew
+          NONINTERACTIVE=1 arch -x86_64 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+
+          # Add Homebrew to PATH
+          echo "/usr/local/bin" >> $GITHUB_PATH
           
           # Use x86_64 Homebrew
           eval "$(/usr/local/bin/brew shellenv)"
+          
+          # Verify installation
+          which brew
+          brew --version
           
           # Verify architecture
           arch_name="$(uname -m)"
@@ -147,6 +155,9 @@ jobs:
           else
             echo "Will use Rosetta 2 for Intel builds on ${arch_name}"
           fi
+          
+          # Update Homebrew
+          brew update
 
       # Install macOS x86_64 dependencies
       - name: Install macOS x86_64 dependencies
