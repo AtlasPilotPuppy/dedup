@@ -736,10 +736,22 @@ impl SshProtocol {
             server_flags.extend(std::iter::repeat_n("-v", cli.verbose as usize));
         }
         
+        // Determine the remote dedups binary path so we can invoke it explicitly (avoid relying on PATH)
+        let remote_dedups_bin: String = {
+            match tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(self.remote.check_dedups_installed())
+            {
+                Ok(Some(path)) if !path.trim().is_empty() => path.trim().to_string(),
+                _ => "dedups".to_string(), // Fallback
+            }
+        };
+
         let server_cmd_for_remote_shell = format!(
-            r#"{rust_log_export} export PATH="$HOME/.local/bin:$PATH"; if [ -f "$HOME/.bashrc" ]; then source "$HOME/.bashrc"; fi; echo "INFO: Dedups server starting on remote port {port} via SSH tunnel command."; dedups {server_flags}"#,
+            r#"{rust_log_export} export PATH="$HOME/.local/bin:$PATH"; if [ -f "$HOME/.bashrc" ]; then source "$HOME/.bashrc"; fi; echo "INFO: Dedups server starting on remote port {port} via SSH tunnel command."; {dedups_bin} {server_flags}"#,
             rust_log_export = rust_log_export,
             port = local_port,
+            dedups_bin = remote_dedups_bin,
             server_flags = server_flags.join(" ")
         );
 
@@ -887,7 +899,7 @@ impl SshProtocol {
                     }
                     
                     // Send a handshake command to verify the connection
-                    let mut handshake_env = HashMap::new(); // Keep options minimal for handshake
+                    let handshake_env = HashMap::new(); // Keep options minimal for handshake
                     
                     if cli.verbose >= 2 {
                         log::info!("Attempting internal handshake with remote server.");
@@ -1084,26 +1096,29 @@ impl SshProtocol {
                 .unwrap_or_default()
         );
 
+        // Determine explicit dedups binary path
+        let remote_dedups_bin: String = {
+            match tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(self.remote.check_dedups_installed())
+            {
+                Ok(Some(path)) if !path.trim().is_empty() => path.trim().to_string(),
+                _ => "dedups".to_string(),
+            }
+        };
+
         // Build the command, adding unbuffer for JSON mode
         let command = if using_json {
             format!(
-                "{}
-                # Try to use stdbuf/unbuffer to reduce buffering issues with JSON output
-                if command -v stdbuf >/dev/null 2>&1; then
-                    stdbuf -o0 -e0 dedups {}
-                elif command -v unbuffer >/dev/null 2>&1; then
-                    unbuffer dedups {}
-                else
-                    # No unbuffering tools available, proceed normally but might have buffering issues
-                    dedups {}
-                fi",
+                "{}\n                # Try to use stdbuf/unbuffer to reduce buffering issues with JSON output\n                if command -v stdbuf >/dev/null 2>&1; then\n                    stdbuf -o0 -e0 {dedups_bin} {}\n                elif command -v unbuffer >/dev/null 2>&1; then\n                    unbuffer {dedups_bin} {}\n                else\n                    # No unbuffering tools available, proceed normally but might have buffering issues\n                    {dedups_bin} {}\n                fi",
                 setup_env,
                 args.join(" "),
                 args.join(" "),
-                args.join(" ")
+                args.join(" "),
+                dedups_bin = remote_dedups_bin
             )
         } else {
-            format!("{}\ndedups {}", setup_env, args.join(" "))
+            format!("{}\n{dedups_bin} {}", setup_env, args.join(" "), dedups_bin = remote_dedups_bin)
         };
 
         ssh_cmd.push(command);

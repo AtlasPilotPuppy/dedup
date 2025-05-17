@@ -27,7 +27,30 @@ HAS_PROTO_FEATURES=$(./target/release/dedups --help | grep -- "--use-protobuf" |
 
 # Check remote dedups features
 echo "Checking remote dedups features..."
-REMOTE_DEDUPS_PATH=$(ssh $SSH_HOST "command -v dedups 2>/dev/null || [ -x ~/.local/bin/dedups ] && echo ~/.local/bin/dedups" || echo "")
+# Prioritize ~/.local/bin then search PATH. If not found, try a broader search.
+REMOTE_DEDUPS_PATH_CMD="
+if [ -x \\"\$HOME/.local/bin/dedups\\" ]; then
+    echo \\"\$HOME/.local/bin/dedups\\"
+else
+    command -v dedups 2>/dev/null
+fi
+"
+REMOTE_DEDUPS_PATH=$(ssh $SSH_HOST "$REMOTE_DEDUPS_PATH_CMD" || echo "")
+
+if [[ -z "$REMOTE_DEDUPS_PATH" ]]; then
+    echo "WARNING: dedups not found on remote system using preferred checks (~/.local/bin/dedups or command -v dedups in PATH)."
+    echo "Attempting a broader search for dedups on remote (this might take a moment)..."
+    # This broader search can be slow and is a last resort.
+    REMOTE_DEDUPS_PATH=$(ssh $SSH_HOST "find \\$HOME /usr/local /opt -name dedups -type f -executable -print -quit 2>/dev/null" || echo "")
+    if [[ -n "$REMOTE_DEDUPS_PATH" ]]; then
+        echo "Dedups found via broader search at: $REMOTE_DEDUPS_PATH (ensure this is the intended instance)"
+    else
+        echo "CRITICAL WARNING: dedups executable NOT FOUND on remote system ('$SSH_HOST') after all checks."
+        echo "Remote operations will likely fail. Please ensure dedups is installed and accessible on the remote system."
+        # It might be prudent to exit here if remote dedups is essential for the script's purpose
+    fi
+fi
+
 if [[ -n "$REMOTE_DEDUPS_PATH" ]]; then
     echo "Remote dedups found at: $REMOTE_DEDUPS_PATH"
     # Use the full path to run dedups
@@ -44,8 +67,8 @@ if [[ -n "$REMOTE_DEDUPS_PATH" ]]; then
         echo "Remote dedups has all required features enabled"
     fi
 else
-    echo "WARNING: dedups not found on remote system"
-    echo "The remote system will use fallback mode with limited functionality"
+    echo "WARNING: dedups not found on remote system (path determined as empty or check failed)."
+    echo "The remote system will likely use fallback mode or fail if the dedups client attempts remote execution."
 fi
 echo ""
 
@@ -83,33 +106,57 @@ if [[ -z "$HAS_PROTO_FEATURES" ]]; then
 fi
 
 # Execute the command and capture output
-echo "Establishing SSH tunnel and starting remote server..."
+echo "Establishing SSH tunnel and starting remote server (delegated to dedups client)..."
+echo "NOTE: Success depends on the dedups client correctly:"
+echo "  1. Using an appropriate remote dedups executable (ideally found at '$REMOTE_DEDUPS_PATH')."
+echo "  2. Forcing the remote dedups instance into --server-mode."
+echo "  3. Establishing the SSH tunnel for API communication over Protobuf."
 OUTPUT=$(eval "$CMD" 2>&1)
 TUNNEL_API_EXIT_CODE=$?
 
-# Check for server communication status
-if echo "$OUTPUT" | grep -q "Server communication established"; then
-    echo "✅ Server communication established successfully"
+# Check for JSON errors first, as dedups might exit 0 even if there's an internal error
+JSON_ERROR_MESSAGE=$(echo "$OUTPUT" | grep '{"type":"error","message":')
+
+if [[ $TUNNEL_API_EXIT_CODE -ne 0 ]] || [[ -n "$JSON_ERROR_MESSAGE" ]]; then
+    echo "❌ Error reported during dedups execution with tunnel mode."
+    if [[ -n "$JSON_ERROR_MESSAGE" ]]; then
+        # Try to extract a cleaner error message from JSON if possible
+        ERROR_DETAIL=$(echo "$JSON_ERROR_MESSAGE" | sed -n 's/.*"message":"\([^"]*\)".*/\1/p' | head -n 1)
+        CODE_DETAIL=$(echo "$JSON_ERROR_MESSAGE" | sed -n 's/.*"code":\([0-9]*\).*/\1/p' | head -n 1)
+        echo "Dedups internal error: $ERROR_DETAIL (code: $CODE_DETAIL)"
+    fi
+    if [[ $TUNNEL_API_EXIT_CODE -ne 0 ]]; then
+        echo "Dedups process exit code: $TUNNEL_API_EXIT_CODE"
+    fi
     echo ""
-    echo "Server output details:"
-    echo "----------------------"
-    echo "$OUTPUT" | grep -E "Server|communication" || true
+    echo "Full output/debug information for tunnel mode (last 20 lines):"
+    echo "-------------------------------------------------------------"
+    echo "$OUTPUT" | tail -20
+elif echo "$OUTPUT" | grep -q "Server communication established"; then
+    echo "✅ Server communication established successfully via tunnel API mode."
+    echo ""
+    echo "Server output details (filtered for 'Server' or 'communication'):"
+    echo "-----------------------------------------------------------------"
+    echo "$OUTPUT" | grep -E "Server|communication" || echo "(No specific 'Server' or 'communication' lines in output)"
 elif echo "$OUTPUT" | grep -q "Using fallback mode"; then
-    echo "⚠️  Using fallback mode - server connected but handshake failed"
+    echo "⚠️  Dedups appears to be using fallback mode."
+    echo "This indicates tunnel API mode (--tunnel-api-mode) may not have been fully established or dedups chose not to use it."
     echo ""
-    echo "Server connection details:"
-    echo "-------------------------"
-    echo "$OUTPUT" | grep -E "Server|connection|fallback" || true
+    echo "Server connection details (filtered for 'Server', 'connection', 'fallback'):"
+    echo "--------------------------------------------------------------------------"
+    echo "$OUTPUT" | grep -E "Server|connection|fallback" || echo "(No specific 'Server', 'connection', or 'fallback' lines in output)"
 else
-    echo "❌ Server communication status unknown"
+    echo "❔ Server communication status unknown for tunnel mode."
+    echo "No explicit success, fallback, or JSON error message was detected in the output."
+    echo "This could mean tunnel mode did not engage as expected or output is not conforming to expected patterns."
     echo ""
-    echo "Debug information:"
-    echo "-----------------"
+    echo "Full output/debug information for tunnel mode (last 20 lines):"
+    echo "-------------------------------------------------------------"
     echo "$OUTPUT" | tail -20
 fi
 
 echo ""
-echo "Exit code: $TUNNEL_API_EXIT_CODE"
+echo "Dedups (tunnel mode command) exit code captured by script: $TUNNEL_API_EXIT_CODE"
 echo ""
 
 # Second command: Run without tunnel mode to show the difference
@@ -118,11 +165,36 @@ echo "=================================================================="
 echo "$ ./target/release/dedups $SSH_PATH -vvv --json"
 echo "=================================================================="
 
-./target/release/dedups "$SSH_PATH" -vvv --json
+OUTPUT_STDOUT=$(./target/release/dedups "$SSH_PATH" -vvv --json 2>&1)
 STDOUT_API_EXIT_CODE=$?
+JSON_ERROR_STDOUT=$(echo "$OUTPUT_STDOUT" | grep '{"type":"error","message":')
+
+if [[ $STDOUT_API_EXIT_CODE -ne 0 ]] || [[ -n "$JSON_ERROR_STDOUT" ]]; then
+    echo "❌ Error reported during dedups execution (stdout parsing mode)."
+    if [[ -n "$JSON_ERROR_STDOUT" ]]; then
+        ERROR_DETAIL_STDOUT=$(echo "$JSON_ERROR_STDOUT" | sed -n 's/.*"message":"\([^"]*\)".*/\1/p' | head -n 1)
+        CODE_DETAIL_STDOUT=$(echo "$JSON_ERROR_STDOUT" | sed -n 's/.*"code":\([0-9]*\).*/\1/p' | head -n 1)
+        echo "Dedups internal error: $ERROR_DETAIL_STDOUT (code: $CODE_DETAIL_STDOUT)"
+    fi
+    if [[ $STDOUT_API_EXIT_CODE -ne 0 ]]; then
+        echo "Dedups process exit code: $STDOUT_API_EXIT_CODE"
+    fi
+    echo ""
+    echo "Full output/debug information for stdout mode (last 20 lines):"
+    echo "-------------------------------------------------------------"
+    echo "$OUTPUT_STDOUT" | tail -20
+else
+    # Basic check if any output was produced, assuming success if no error and some output
+    if [[ -n "$OUTPUT_STDOUT" ]]; then
+        echo "✅ Dedups (stdout parsing mode) completed. Output (first 10 lines):"
+        echo "$OUTPUT_STDOUT" | head -10
+    else
+        echo "❔ Dedups (stdout parsing mode) completed with no output and no explicit error."
+    fi
+fi
 
 echo ""
-echo "Exit code: $STDOUT_API_EXIT_CODE"
+echo "Dedups (stdout parsing mode command) exit code captured by script: $STDOUT_API_EXIT_CODE"
 echo ""
 
 echo "====================================================================="
