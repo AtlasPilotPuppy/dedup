@@ -123,18 +123,47 @@ jobs:
           # Set pkg-config path
           echo "PKG_CONFIG_PATH=/usr/lib/x86_64-linux-gnu/pkgconfig" >> $GITHUB_ENV
 
-      # Install macOS dependencies (x86_64)
+      # Set up x86_64 Homebrew for Intel builds
+      - name: Set up x86_64 Homebrew
+        if: matrix.os == 'macos-latest' && matrix.target == 'x86_64-apple-darwin'
+        run: |
+          # Create and set up /usr/local for x86_64 Homebrew
+          sudo mkdir -p /usr/local/bin /usr/local/lib /usr/local/include
+          sudo chown -R $(whoami) /usr/local/*
+          
+          # Install x86_64 Homebrew if not exists
+          if [ ! -f /usr/local/bin/brew ]; then
+            curl -L https://github.com/Homebrew/brew/tarball/master | tar xz --strip 1 -C /usr/local
+            echo "/usr/local/bin" >> $GITHUB_PATH
+          fi
+          
+          # Use x86_64 Homebrew
+          eval "$(/usr/local/bin/brew shellenv)"
+          
+          # Verify architecture
+          arch_name="$(uname -m)"
+          if [ "${arch_name}" = "x86_64" ]; then
+            echo "Running on Intel (${arch_name})"
+          else
+            echo "Will use Rosetta 2 for Intel builds on ${arch_name}"
+          fi
+
+      # Install macOS x86_64 dependencies
       - name: Install macOS x86_64 dependencies
         if: matrix.os == 'macos-latest' && matrix.target == 'x86_64-apple-darwin'
         run: |
-          # Remove any existing OpenSSL installations
+          # Use x86_64 Homebrew
+          eval "$(/usr/local/bin/brew shellenv)"
+          
+          # Clean up any existing OpenSSL
           brew uninstall --ignore-dependencies openssl@3 openssl@1.1 || true
+          rm -rf /usr/local/opt/openssl* || true
           
-          # Install x86_64 OpenSSL
-          arch -x86_64 brew install openssl@3
-          arch -x86_64 brew install pkg-config
+          # Install dependencies with x86_64 architecture
+          brew install openssl@3
+          brew install pkg-config
           
-          # Set OpenSSL environment variables
+          # Set OpenSSL environment variables for x86_64
           echo "OPENSSL_DIR=/usr/local/opt/openssl@3" >> $GITHUB_ENV
           echo "OPENSSL_ROOT_DIR=/usr/local/opt/openssl@3" >> $GITHUB_ENV
           echo "OPENSSL_INCLUDE_DIR=/usr/local/opt/openssl@3/include" >> $GITHUB_ENV
@@ -142,34 +171,49 @@ jobs:
           echo "PKG_CONFIG_PATH=/usr/local/opt/openssl@3/lib/pkgconfig" >> $GITHUB_ENV
           
           if [[ "${{ matrix.features }}" == *"ssh"* ]]; then
-            # Install libssh2 with x86_64 architecture
-            arch -x86_64 brew install libssh2
+            brew install libssh2
             echo "LIBSSH2_DIR=/usr/local/opt/libssh2" >> $GITHUB_ENV
             echo "PKG_CONFIG_PATH=/usr/local/opt/openssl@3/lib/pkgconfig:/usr/local/opt/libssh2/lib/pkgconfig" >> $GITHUB_ENV
           fi
           
           # Verify OpenSSL installation
-          pkg-config --libs openssl
-          pkg-config --modversion openssl
+          pkg-config --libs openssl || true
+          pkg-config --modversion openssl || true
           ls -la /usr/local/opt/openssl@3/lib/
           
           # Link OpenSSL properly
-          ln -sf /usr/local/opt/openssl@3/lib/pkgconfig/* /usr/local/lib/pkgconfig/ || true
+          mkdir -p /usr/local/lib/pkgconfig
+          ln -sf /usr/local/opt/openssl@3/lib/pkgconfig/* /usr/local/lib/pkgconfig/
 
-      # Install macOS dependencies (ARM64)
+      # Install macOS ARM64 dependencies
       - name: Install macOS ARM64 dependencies
         if: matrix.os == 'macos-latest' && matrix.target == 'aarch64-apple-darwin'
         run: |
+          # Use ARM64 Homebrew
+          eval "$(/opt/homebrew/bin/brew shellenv)"
+          
           # Install ARM64 OpenSSL
-          arch -arm64 brew install openssl@3
+          brew install openssl@3
+          brew install pkg-config
+          
+          # Set OpenSSL environment variables for ARM64
           echo "OPENSSL_DIR=/opt/homebrew/opt/openssl@3" >> $GITHUB_ENV
           echo "OPENSSL_ROOT_DIR=/opt/homebrew/opt/openssl@3" >> $GITHUB_ENV
+          echo "OPENSSL_INCLUDE_DIR=/opt/homebrew/opt/openssl@3/include" >> $GITHUB_ENV
+          echo "OPENSSL_LIB_DIR=/opt/homebrew/opt/openssl@3/lib" >> $GITHUB_ENV
+          echo "PKG_CONFIG_PATH=/opt/homebrew/opt/openssl@3/lib/pkgconfig" >> $GITHUB_ENV
+          
           if [[ "${{ matrix.features }}" == *"ssh"* ]]; then
-            arch -arm64 brew install libssh2
+            brew install libssh2
             echo "LIBSSH2_DIR=/opt/homebrew/opt/libssh2" >> $GITHUB_ENV
+            echo "PKG_CONFIG_PATH=/opt/homebrew/opt/openssl@3/lib/pkgconfig:/opt/homebrew/opt/libssh2/lib/pkgconfig" >> $GITHUB_ENV
           fi
-          echo "PKG_CONFIG_PATH=/opt/homebrew/opt/openssl@3/lib/pkgconfig:/opt/homebrew/opt/libssh2/lib/pkgconfig" >> $GITHUB_ENV
-                  
+          
+          # Verify OpenSSL installation
+          pkg-config --libs openssl
+          pkg-config --modversion openssl
+          ls -la /opt/homebrew/opt/openssl@3/lib/
+
       # Set up cross-compilation for ARM on macOS
       - name: Install cross-compilation tools for macOS ARM
         if: matrix.target == 'aarch64-apple-darwin'
@@ -205,6 +249,9 @@ jobs:
       - name: Build (macOS x86_64)
         if: matrix.os == 'macos-latest' && matrix.target == 'x86_64-apple-darwin'
         run: |
+          # Use x86_64 Homebrew environment
+          eval "$(/usr/local/bin/brew shellenv)"
+          
           # Verify environment
           echo "OpenSSL Dir: $OPENSSL_DIR"
           echo "OpenSSL Root Dir: $OPENSSL_ROOT_DIR"
