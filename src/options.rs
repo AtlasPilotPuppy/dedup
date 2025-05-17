@@ -140,7 +140,7 @@ impl Default for DedupOptions {
             #[cfg(feature = "proto")]
             use_compression: true,
             #[cfg(feature = "proto")]
-            compression_level: 18,
+            compression_level: 6,
         }
     }
 }

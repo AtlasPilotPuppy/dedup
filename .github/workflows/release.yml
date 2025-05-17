@@ -215,6 +215,12 @@ jobs:
           brew install openssl@3
           brew install pkg-config
           
+          # Install protobuf if proto feature is enabled
+          if [[ "${{ matrix.features }}" == *"proto"* ]]; then
+            brew install protobuf
+            echo "PROTOC=/usr/local/bin/protoc" >> $GITHUB_ENV
+          fi
+          
           # Set OpenSSL environment variables for x86_64
           echo "OPENSSL_DIR=/usr/local/opt/openssl@3" >> $GITHUB_ENV
           echo "OPENSSL_ROOT_DIR=/usr/local/opt/openssl@3" >> $GITHUB_ENV
@@ -247,6 +253,12 @@ jobs:
           # Install ARM64 OpenSSL
           brew install openssl@3
           brew install pkg-config
+          
+          # Install protobuf if proto feature is enabled
+          if [[ "${{ matrix.features }}" == *"proto"* ]]; then
+            brew install protobuf
+            echo "PROTOC=/opt/homebrew/bin/protoc" >> $GITHUB_ENV
+          fi
           
           # Set OpenSSL environment variables for ARM64
           echo "OPENSSL_DIR=/opt/homebrew/opt/openssl@3" >> $GITHUB_ENV
