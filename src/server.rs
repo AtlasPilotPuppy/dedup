@@ -341,6 +341,30 @@ impl DedupServer {
             }
         }
 
+        // Special handling for handshake command - respond immediately with a success message
+        if command_msg.command == "handshake" {
+            if verbose >= 1 {
+                log::info!("Received handshake request, responding with confirmation");
+            }
+            
+            // Send handshake success response
+            let result_msg = DedupMessage {
+                message_type: MessageType::Result,
+                payload: r#"{"status":"handshake_ok","message":"Server ready"}"#.to_string(),
+            };
+            
+            if let Err(e) = protocol.send_message(result_msg) {
+                log::error!("Failed to send handshake response: {}", e);
+                return Err(anyhow::anyhow!("Failed to send handshake response: {}", e));
+            }
+            
+            if verbose >= 2 {
+                log::info!("Server communication established via handshake");
+            }
+            
+            return Ok(());
+        }
+
         // Build and execute the command
         let mut cmd = Command::new(&command_msg.command);
         cmd.args(&command_msg.args);

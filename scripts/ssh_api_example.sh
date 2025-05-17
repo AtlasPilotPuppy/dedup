@@ -21,9 +21,33 @@ SSH_PATH="ssh:$SSH_HOST:$REMOTE_PATH"
 echo "Using remote path: $SSH_PATH"
 echo ""
 
-# Check which features are available
+# Check which features are available locally
 HAS_SSH_FEATURES=$(./target/release/dedups --help | grep -- "--tunnel-api-mode" || echo "")
 HAS_PROTO_FEATURES=$(./target/release/dedups --help | grep -- "--use-protobuf" || echo "")
+
+# Check remote dedups features
+echo "Checking remote dedups features..."
+REMOTE_DEDUPS_PATH=$(ssh $SSH_HOST "command -v dedups 2>/dev/null || [ -x ~/.local/bin/dedups ] && echo ~/.local/bin/dedups" || echo "")
+if [[ -n "$REMOTE_DEDUPS_PATH" ]]; then
+    echo "Remote dedups found at: $REMOTE_DEDUPS_PATH"
+    # Use the full path to run dedups
+    REMOTE_HAS_SSH=$(ssh $SSH_HOST "\"$REMOTE_DEDUPS_PATH\" --help" 2>/dev/null | grep -- "--tunnel-api-mode" || echo "")
+    REMOTE_HAS_PROTO=$(ssh $SSH_HOST "\"$REMOTE_DEDUPS_PATH\" --help" 2>/dev/null | grep -- "--use-protobuf" || echo "")
+    
+    if [[ -z "$REMOTE_HAS_SSH" ]]; then
+        echo "WARNING: Remote dedups does not have SSH features enabled"
+    fi
+    if [[ -z "$REMOTE_HAS_PROTO" ]]; then
+        echo "WARNING: Remote dedups does not have protocol features enabled"
+    fi
+    if [[ -n "$REMOTE_HAS_SSH" && -n "$REMOTE_HAS_PROTO" ]]; then
+        echo "Remote dedups has all required features enabled"
+    fi
+else
+    echo "WARNING: dedups not found on remote system"
+    echo "The remote system will use fallback mode with limited functionality"
+fi
+echo ""
 
 # First command: Run with tunnel API mode and protobuf explicitly enabled if available
 echo "Running with proper API communication mode:"
@@ -58,9 +82,31 @@ if [[ -z "$HAS_PROTO_FEATURES" ]]; then
     echo "The internal protocol defaults will still be used when available."
 fi
 
-# Execute the command
-eval "$CMD"
+# Execute the command and capture output
+echo "Establishing SSH tunnel and starting remote server..."
+OUTPUT=$(eval "$CMD" 2>&1)
 TUNNEL_API_EXIT_CODE=$?
+
+# Check for server communication status
+if echo "$OUTPUT" | grep -q "Server communication established"; then
+    echo "✅ Server communication established successfully"
+    echo ""
+    echo "Server output details:"
+    echo "----------------------"
+    echo "$OUTPUT" | grep -E "Server|communication" || true
+elif echo "$OUTPUT" | grep -q "Using fallback mode"; then
+    echo "⚠️  Using fallback mode - server connected but handshake failed"
+    echo ""
+    echo "Server connection details:"
+    echo "-------------------------"
+    echo "$OUTPUT" | grep -E "Server|connection|fallback" || true
+else
+    echo "❌ Server communication status unknown"
+    echo ""
+    echo "Debug information:"
+    echo "-----------------"
+    echo "$OUTPUT" | tail -20
+fi
 
 echo ""
 echo "Exit code: $TUNNEL_API_EXIT_CODE"

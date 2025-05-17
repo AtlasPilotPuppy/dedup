@@ -652,6 +652,7 @@ impl SshProtocol {
         use crate::client::DedupClient;
         use crate::protocol::find_available_port;
         use std::collections::HashMap;
+        use std::io::{BufRead, BufReader};
 
         if cli.verbose >= 2 {
             log::info!("Executing dedups via SSH tunnel API protocol (not parsing stdout)");
@@ -735,6 +736,9 @@ impl SshProtocol {
             server_flags.push("-v");
         }
         
+        // Add a special handshake flag that the server will respond to
+        server_flags.push("--server-handshake");
+        
         let server_cmd = format!(
             r#"ssh {ssh_options} {remote_addr} bash -c '{rust_log_export} export PATH="$HOME/.local/bin:$PATH"; if [ -f "$HOME/.bashrc" ]; then source "$HOME/.bashrc"; fi; echo "Starting dedups server on port {port}"; dedups {server_flags}'"#,
             ssh_options = ssh_opts.join(" "),
@@ -759,37 +763,86 @@ impl SshProtocol {
             .spawn()
             .context("Failed to start SSH tunnel")?;
 
-        let mut stderr_capture = String::new();
-        if let Some(mut stderr) = child.stderr.take() {
-            use std::io::Read;
-            // Set up thread to read stderr in case of server startup errors
-            let stderr_thread = std::thread::spawn(move || {
-                let mut s = String::new();
-                if let Err(e) = stderr.read_to_string(&mut s) {
-                    log::warn!("Failed to read stderr from SSH tunnel startup: {}", e);
+        // Set up readers for both stdout and stderr to capture server startup messages
+        let stdout = child.stdout.take().expect("Failed to capture stdout");
+        let stderr = child.stderr.take().expect("Failed to capture stderr");
+        
+        let stdout_reader = BufReader::new(stdout);
+        let stderr_reader = BufReader::new(stderr);
+        
+        // Check for server startup messages
+        let mut server_started = false;
+        let mut server_error = None;
+        let mut handshake_received = false;
+        let mut stdout_lines = Vec::new();
+        let mut stderr_lines = Vec::new();
+        
+        // Start a thread to read stdout
+        let stdout_thread = std::thread::spawn(move || {
+            for line in stdout_reader.lines().map_while(Result::ok) {
+                stdout_lines.push(line);
+            }
+            stdout_lines
+        });
+        
+        // Start a thread to read stderr
+        let stderr_thread = std::thread::spawn(move || {
+            for line in stderr_reader.lines().map_while(Result::ok) {
+                stderr_lines.push(line);
+            }
+            stderr_lines
+        });
+        
+        // Give server some time to start
+        let startup_time = if cli.verbose >= 3 { 3000 } else { 2000 };
+        std::thread::sleep(std::time::Duration::from_millis(startup_time));
+            
+        // Check if the server started by attempting a connection
+        for attempt in 1..=5 {
+            if cli.verbose >= 2 {
+                log::info!("Connection attempt {} of 5 to localhost:{}", attempt, local_port);
+            }
+            
+            match std::net::TcpStream::connect(format!("localhost:{}", local_port)) {
+                Ok(_) => {
+                    server_started = true;
+                    if cli.verbose >= 1 {
+                        log::info!("Successfully established TCP connection to server on port {}", local_port);
+                    }
+                    break;
                 }
-                s
-            });
-            
-            // Give server time to start and establish tunnel
-            let startup_time = if cli.verbose >= 3 { 
-                log::info!("Waiting for server startup and tunnel establishment..."); 
-                2000 
-            } else { 
-                1000 
-            };
-            std::thread::sleep(std::time::Duration::from_millis(startup_time));
-            
-            // If server doesn't connect quickly, get the stderr to help diagnose
-            if let Ok(s) = stderr_thread.join() {
-                stderr_capture = s;
-                if !stderr_capture.is_empty() && cli.verbose >= 2 {
-                    log::debug!("SSH tunnel startup stderr: {}", stderr_capture);
+                Err(e) => {
+                    if cli.verbose >= 2 {
+                        log::warn!("Connection attempt {} failed: {}", attempt, e);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(1000));
                 }
             }
-        } else {
-            // Just wait a bit if we couldn't capture stderr
-            std::thread::sleep(std::time::Duration::from_millis(1000));
+        }
+        
+        // If server doesn't start, get any output to help diagnose
+        if !server_started {
+            // Join the threads to get their output
+            if let Ok(out_lines) = stdout_thread.join() {
+                if !out_lines.is_empty() && cli.verbose >= 1 {
+                    log::info!("Server stdout: {}", out_lines.join("\n"));
+                }
+            }
+            
+            if let Ok(err_lines) = stderr_thread.join() {
+                if !err_lines.is_empty() {
+                    server_error = Some(err_lines.join("\n"));
+                    log::error!("Server stderr: {}", server_error.as_ref().unwrap());
+                }
+            }
+            
+            // Kill the tunnel process
+            let _ = child.kill();
+            
+            return Err(anyhow::anyhow!(
+                "Failed to establish connection to remote dedups server: {}",
+                server_error.unwrap_or_else(|| "No error message available".to_string())
+            ));
         }
 
         // Create options with tunnel settings
@@ -816,6 +869,7 @@ impl SshProtocol {
         // Attempt to connect with retry
         let max_attempts = 5; // Increase retries
         let mut connected = false;
+        let mut handshake_message = String::new();
         
         if cli.verbose >= 2 {
             log::info!("Attempting to connect to remote server on localhost:{}", local_port);
@@ -827,11 +881,33 @@ impl SshProtocol {
             }
             match client.connect() {
                 Ok(_) => {
-                    if cli.verbose >= 2 {
+                    if cli.verbose >= 1 {
                         log::info!("Successfully connected to remote server via SSH tunnel");
-                    } else {
-                        log::debug!("Connected to remote server");
                     }
+                    
+                    // Send a handshake command to verify the connection
+                    let mut handshake_env = HashMap::new();
+                    handshake_env.insert("HANDSHAKE".to_string(), "1".to_string());
+                    handshake_env.insert("VERBOSITY".to_string(), cli.verbose.to_string());
+                    
+                    // Execute a simple handshake command
+                    match client.execute_command("handshake".to_string(), Vec::new(), handshake_env) {
+                        Ok(response) => {
+                            if response.contains("handshake_ok") {
+                                handshake_received = true;
+                                handshake_message = "Handshake successful - server communication established".to_string();
+                                if cli.verbose >= 1 {
+                                    log::info!("{}", handshake_message);
+                                }
+                            } else {
+                                log::warn!("Handshake response received but not recognized: {}", response);
+                            }
+                        }
+                        Err(e) => {
+                            log::warn!("Handshake failed: {}", e);
+                        }
+                    }
+                    
                     connected = true;
                     break;
                 }
@@ -844,9 +920,21 @@ impl SshProtocol {
                         std::thread::sleep(std::time::Duration::from_millis(attempt * 500));
                     } else {
                         log::error!("Failed to connect after {} attempts: {}", max_attempts, e);
-                        if !stderr_capture.is_empty() {
-                            log::error!("SSH tunnel stderr: {}", stderr_capture);
+                        
+                        // Join the threads to get their output
+                        if let Ok(out_lines) = stdout_thread.join() {
+                            if !out_lines.is_empty() && cli.verbose >= 1 {
+                                log::info!("Server stdout: {}", out_lines.join("\n"));
+                            }
                         }
+                        
+                        if let Ok(err_lines) = stderr_thread.join() {
+                            if !err_lines.is_empty() {
+                                server_error = Some(err_lines.join("\n"));
+                                log::error!("Server stderr: {}", server_error.as_ref().unwrap());
+                            }
+                        }
+                        
                         // Kill the tunnel process if connection failed
                         let _ = child.kill();
                         return Err(anyhow::anyhow!("Failed to establish connection to remote dedups instance: {}", e));
@@ -857,10 +945,28 @@ impl SshProtocol {
         
         if !connected {
             let _ = child.kill();
-            if !stderr_capture.is_empty() {
-                log::error!("SSH tunnel stderr: {}", stderr_capture);
+            
+            // Join the threads to get their output
+            if let Ok(out_lines) = stdout_thread.join() {
+                if !out_lines.is_empty() && cli.verbose >= 1 {
+                    log::info!("Server stdout: {}", out_lines.join("\n"));
+                }
             }
+            
+            if let Ok(err_lines) = stderr_thread.join() {
+                if !err_lines.is_empty() {
+                    server_error = Some(err_lines.join("\n"));
+                    log::error!("Server stderr: {}", server_error.as_ref().unwrap());
+                }
+            }
+            
             return Err(anyhow::anyhow!("Failed to establish connection to remote dedups instance"));
+        }
+        
+        // If we got this far but didn't get a handshake, at least we have a connection
+        if !handshake_received && cli.verbose >= 1 {
+            log::warn!("Connection established but server handshake not received");
+            // We'll still try to proceed since we have a connection
         }
 
         // Convert &[&str] to Vec<String>
@@ -875,6 +981,11 @@ impl SshProtocol {
         // Add tunnel mode and verbosity as hints for the remote instance
         env_options.insert("USE_TUNNEL_API".to_string(), "1".to_string());
         env_options.insert("VERBOSITY".to_string(), cli.verbose.to_string());
+        
+        // Include handshake status in environment for the actual command
+        if handshake_received {
+            env_options.insert("SERVER_COMMUNICATION_ESTABLISHED".to_string(), "1".to_string());
+        }
 
         // Execute command and get output
         if cli.verbose >= 2 {
@@ -909,6 +1020,13 @@ impl SshProtocol {
 
         if cli.verbose >= 3 {
             log::debug!("API communication completed successfully");
+        }
+        
+        // Add server communication status to output for ssh_api_example.sh to detect
+        if handshake_received {
+            println!("Server communication established");
+        } else if connected {
+            println!("Using fallback mode - server connected but handshake failed");
         }
 
         Ok(output)
