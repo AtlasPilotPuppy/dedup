@@ -1,16 +1,9 @@
 #[cfg(feature = "ssh")]
 use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
 #[cfg(feature = "ssh")]
 use ssh2::Session;
-#[cfg(feature = "ssh")]
-use std::collections::HashMap;
-use std::ffi::OsStr;
-use std::io::{BufRead, BufReader};
+use std::io::BufRead;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
-use std::str::FromStr;
-use std::sync::{mpsc, Arc, Mutex};
 
 /// Represents a remote location parsed from an SSH URI
 #[cfg(feature = "ssh")]

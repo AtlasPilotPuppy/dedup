@@ -37,9 +37,13 @@ done
 # Function to measure time
 time_command() {
     local start_time=$(date +%s.%N)
-    "$@"
+    # Run the command and capture its output
+    local output=$("$@")
     local end_time=$(date +%s.%N)
-    echo "$end_time - $start_time" | bc
+    # Calculate elapsed time
+    local elapsed=$(echo "$end_time - $start_time" | bc)
+    # Return both the elapsed time and the command output
+    echo "$elapsed"
 }
 
 # Function to test protocol with performance measurement
@@ -90,8 +94,8 @@ test_protocol_perf() {
     print_info "Total time: ${total_time}s"
     
     # Kill server
-    kill $SERVER_PID
-    wait $SERVER_PID 2>/dev/null
+    kill $SERVER_PID 2>/dev/null || true
+    wait $SERVER_PID 2>/dev/null || true
     
     print_status "Protocol test completed"
     echo "----------------------------------------"
