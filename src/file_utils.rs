@@ -15,6 +15,8 @@ use walkdir::WalkDir;
 use crate::tui_app::ScanMessage;
 use crate::options::Options;
 use std::sync::mpsc::Sender as StdMpscSender;
+use humansize::{format_size, DECIMAL};
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortCriterion {
@@ -292,6 +294,37 @@ pub fn find_duplicate_files_with_progress(
     );
     let filter_rules = FilterRules::new(options)?;
 
+    // Setup progress bars for CLI mode
+    let multi_progress = if options.progress && !options.progress_tui {
+        Some(MultiProgress::new())
+    } else {
+        None
+    };
+    
+    let discovery_pb = if let Some(mp) = &multi_progress {
+        let pb = mp.add(ProgressBar::new(0));
+        pb.set_style(ProgressStyle::default_bar()
+            .template("{prefix:.bold.dim} [{bar:40.cyan/blue}] {pos}/{len} ({percent}%) {msg}")
+            .unwrap()
+            .progress_chars("█▓▒░  "));
+        pb.set_prefix("Stage 1/3: Discovery");
+        Some(pb)
+    } else {
+        None
+    };
+    
+    let hashing_pb = if let Some(mp) = &multi_progress {
+        let pb = mp.add(ProgressBar::new(0));
+        pb.set_style(ProgressStyle::default_bar()
+            .template("{prefix:.bold.dim} [{bar:40.green/blue}] {pos}/{len} ({percent}%) {msg}")
+            .unwrap()
+            .progress_chars("█▓▒░  "));
+        pb.set_prefix("Stage 3/3: Hashing");
+        Some(pb)
+    } else {
+        None
+    };
+
     // Initialize file cache if using fast mode
     let file_cache = if options.fast_mode && options.cache_location.is_some() {
         let cache_dir = options.cache_location.as_ref().unwrap();
@@ -334,15 +367,27 @@ pub fn find_duplicate_files_with_progress(
         ),
     );
 
+    if let Some(pb) = &discovery_pb {
+        pb.set_message(format!("Counting files in {}", options.directories[0].display()));
+        pb.enable_steady_tick(std::time::Duration::from_millis(100));
+    }
+
     // Pre-scan to count total files
     let total_files = match count_files_in_directory(&options.directories[0], &filter_rules) {
         Ok(count) => {
             send_status(0, format!("Pre-scan complete: Found {} total files", count));
+            if let Some(pb) = &discovery_pb {
+                pb.set_message(format!("Found {} total files", count));
+                pb.set_length(count as u64);
+            }
             count
         }
         Err(e) => {
             log::warn!("[ScanThread] Failed to count files: {}", e);
             send_status(0, format!("Pre-scan failed: {}", e));
+            if let Some(pb) = &discovery_pb {
+                pb.set_message(format!("Pre-scan failed: {}", e));
+            }
             0 // Continue without total count
         }
     };
@@ -387,6 +432,14 @@ pub fn find_duplicate_files_with_progress(
         if entry.file_type().is_file() {
             let path = entry.path().to_path_buf();
             files_scanned_count += 1;
+
+            // Update CLI progress bar if available
+            if let Some(pb) = &discovery_pb {
+                pb.set_position(files_scanned_count as u64);
+                if files_scanned_count % 100 == 0 {
+                    pb.set_message(format!("Scanning: {}", path.display()));
+                }
+            }
 
             // Determine update frequency based on file count
             let should_update = if files_scanned_count < 100 {
@@ -450,23 +503,8 @@ pub fn find_duplicate_files_with_progress(
     // Collect file bytes sum for average calculation before moving files_by_size
     let total_bytes: u64 = files_by_size.iter().map(|(size, paths)| size * paths.len() as u64).sum();
     
-    if total_files > 0 {
-        let percent_found = (files_scanned_count as f64 / total_files as f64) * 100.0;
-        send_status(
-            1,
-            format!(
-                "Stage 1/3: 📁 File discovery complete. Found {} files ({:.1}%) in {} size groups.",
-                file_count, percent_found, size_group_count
-            ),
-        );
-    } else {
-        send_status(
-            1,
-            format!(
-                "Stage 1/3: 📁 File discovery complete. Found {} files in {} size groups.",
-                file_count, size_group_count
-            ),
-        );
+    if let Some(pb) = &discovery_pb {
+        pb.finish_with_message(format!("Discovered {} files in {} size groups", file_count, size_group_count));
     }
 
     log::info!(
@@ -490,6 +528,10 @@ pub fn find_duplicate_files_with_progress(
             "Scan complete. No potential duplicates found.".to_string(),
         );
         log::info!("[ScanThread] No potential duplicates found after size grouping.");
+
+        if let Some(pb) = &hashing_pb {
+            pb.finish_with_message("No potential duplicates found.");
+        }
 
         // No duplicates found, but if media mode is enabled, we should handle it separately
         if options.media_mode && options.media_dedup_options.enabled {
@@ -648,6 +690,7 @@ pub fn find_duplicate_files_with_progress(
     });
 
     let mut actual_duplicate_sets = 0;
+    let mut files_processed_total = 0;
 
     for i in 0..total_groups_to_hash {
         match local_rx.recv() {
@@ -661,6 +704,12 @@ pub fn find_duplicate_files_with_progress(
 
                     // Count files processed 
                     files_hashed_count += file_infos_vec.len();
+                    files_processed_total += file_infos_vec.len();
+                    
+                    // Update CLI progress bar
+                    if let Some(pb) = &hashing_pb {
+                        pb.set_position(files_processed_total as u64);
+                    }
 
                     if file_infos_vec.len() > 1 {
                         actual_duplicate_sets += 1;
@@ -766,6 +815,15 @@ pub fn find_duplicate_files_with_progress(
         }
     }
 
+    // Finish progress bars in CLI mode
+    if let Some(pb) = &hashing_pb {
+        pb.finish_with_message(format!("Found {} duplicate sets", actual_duplicate_sets));
+    }
+    
+    if let Some(mp) = &multi_progress {
+        mp.clear().unwrap();
+    }
+
     // Save file cache if it was used
     if let Some(cache) = &file_cache {
         if let Ok(mut cache_guard) = cache.lock() {
@@ -788,9 +846,9 @@ pub fn find_duplicate_files_with_progress(
             duplicate_sets.len(),
             potential_groups,
             cache_hits.load(std::sync::atomic::Ordering::Relaxed),
-            humansize::format_size(
+            format_size(
                 duplicate_sets.iter().map(|set| set.size * (set.files.len() as u64 - 1)).sum::<u64>(),
-                humansize::DECIMAL
+                DECIMAL
             )
         )
     } else {
@@ -798,9 +856,9 @@ pub fn find_duplicate_files_with_progress(
             "All stages complete. Found {} sets of duplicate files across {} file groups. Total duplicated storage: {}",
             duplicate_sets.len(),
             potential_groups,
-            humansize::format_size(
+            format_size(
                 duplicate_sets.iter().map(|set| set.size * (set.files.len() as u64 - 1)).sum::<u64>(),
-                humansize::DECIMAL
+                DECIMAL
             )
         )
     };

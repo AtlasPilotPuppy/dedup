@@ -2080,6 +2080,13 @@ fn format_file_size(size: u64, raw_sizes: bool) -> String {
 }
 
 fn ui(frame: &mut Frame, app: &mut App) {
+    // If in copy missing mode, use the specialized UI
+    if app.state.is_copy_missing_mode {
+        copy_missing::ui_copy_missing(frame, app);
+        return;
+    }
+
+    // Regular deduplication mode UI continues below
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -2742,7 +2749,7 @@ fn ui(frame: &mut Frame, app: &mut App) {
                     "Current job: {}/{} - {}",
                     done, total, app.state.job_processing_message
                 ))
-                .ratio((if done < total { ((done as f64 + 0.5) / total.max(1) as f64) } else { 1.0 }).clamp(0.0, 1.0));
+                .ratio((if done < total { (done as f64 + 0.5) / total.max(1) as f64 } else { 1.0 }).clamp(0.0, 1.0));
 
             frame.render_widget(top_gauge, progress_layout[0]);
             frame.render_widget(bottom_gauge, progress_layout[1]);

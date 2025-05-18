@@ -1,8 +1,8 @@
 use anyhow::Result;
 use crossterm::{
     event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event as CEvent, KeyCode, KeyEvent,
-        KeyEventKind, KeyModifiers,
+        self, DisableMouseCapture, EnableMouseCapture, Event as CEvent,
+        KeyEventKind,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -10,14 +10,11 @@ use crossterm::{
 use humansize::{format_size, DECIMAL};
 use ratatui::prelude::*;
 use ratatui::widgets::*;
-use std::collections::HashMap;
 use std::io::stdout;
-use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use crate::file_utils::{self, DuplicateSet, FileInfo, SelectionStrategy};
 use crate::options::Options;
-use crate::tui_app::{ActivePanel, ActionType, App, AppState, InputMode, Job, ScanMessage};
+use crate::tui_app::{ActivePanel, ActionType, App, InputMode};
 
 /// Entry point for the Copy Missing TUI
 pub fn run_copy_missing_tui(options: &Options) -> Result<()> {
@@ -89,7 +86,7 @@ pub fn create_copy_missing_app(options: &Options) -> App {
 }
 
 /// Special UI layout for Copy Missing mode
-fn ui_copy_missing(frame: &mut Frame, app: &mut App) {
+pub fn ui_copy_missing(frame: &mut Frame, app: &mut App) {
     // Main layout
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -193,7 +190,7 @@ fn ui_copy_missing(frame: &mut Frame, app: &mut App) {
                 )))
             }
             crate::tui_app::DisplayListItem::SetEntry {
-                set_hash_preview,
+                
                 set_total_size,
                 file_count_in_set,
                 indent,
@@ -575,22 +572,22 @@ mod tests {
             FileInfo {
                 path: PathBuf::from("/source/file1.txt"),
                 size: 1000,
-                modified_at: chrono::Utc::now().timestamp(),
-                created_at: chrono::Utc::now().timestamp(),
+                modified_at: Some(SystemTime::now()),
+                created_at: Some(SystemTime::now()),
                 hash: Some("file1hash".to_string()),
             },
             FileInfo {
                 path: PathBuf::from("/source/file2.txt"),
                 size: 2000,
-                modified_at: chrono::Utc::now().timestamp(),
-                created_at: chrono::Utc::now().timestamp(),
+                modified_at: Some(SystemTime::now()),
+                created_at: Some(SystemTime::now()),
                 hash: Some("file2hash".to_string()),
             },
             FileInfo {
                 path: PathBuf::from("/source/subfolder/file3.txt"),
                 size: 3000,
-                modified_at: chrono::Utc::now().timestamp(),
-                created_at: chrono::Utc::now().timestamp(),
+                modified_at: Some(SystemTime::now()),
+                created_at: Some(SystemTime::now()),
                 hash: Some("file3hash".to_string()),
             },
         ];
