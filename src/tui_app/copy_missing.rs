@@ -19,13 +19,18 @@ use crate::tui_app::{ActivePanel, ActionType, App, InputMode};
 /// Entry point for the Copy Missing TUI
 pub fn run_copy_missing_tui(options: &Options) -> Result<()> {
     // Terminal initialization
-    enable_raw_mode()?;
-    let mut stdout = stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    let mut terminal = if options.interactive {
+        enable_raw_mode()?;
+        let mut stdout = stdout();
+        execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
 
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
-    terminal.hide_cursor()?;
+        let backend = CrosstermBackend::new(stdout);
+        let mut terminal = Terminal::new(backend)?;
+        terminal.hide_cursor()?;
+        Some(terminal)
+    } else {
+        None
+    };
 
     // Create app state for copy missing mode
     let mut app = create_copy_missing_app(options);
@@ -41,7 +46,13 @@ pub fn run_copy_missing_tui(options: &Options) -> Result<()> {
         // Continue to handle messages
         app.handle_scan_messages();
 
-        terminal.draw(|f| ui_copy_missing(f, &mut app))?;
+        if options.interactive {
+            if let Some(terminal) = terminal.as_mut() {
+                terminal.draw(|f| ui_copy_missing(f, &mut app))?;
+            }
+        } else if options.progress {
+            show_cli_progress(&app);
+        }
 
         let timeout = tick_rate
             .checked_sub(last_tick.elapsed())
@@ -66,9 +77,13 @@ pub fn run_copy_missing_tui(options: &Options) -> Result<()> {
     }
 
     // Cleanup and restore terminal
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
-    terminal.show_cursor()?;
+    if options.interactive {
+        if let Some(mut terminal) = terminal {
+            disable_raw_mode()?;
+            terminal.show_cursor()?;
+            execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
+        }
+    }
 
     Ok(())
 }
@@ -143,7 +158,7 @@ pub fn ui_copy_missing(frame: &mut Frame, app: &mut App) {
 
     // Middle Panel: Destination Files
     let middle_title = "Destination Files (Browse)";
-    let middle_block = Block::default()
+    let _middle_block = Block::default()
         .borders(Borders::ALL)
         .title(middle_title)
         .border_style(Style::default().fg(
@@ -519,9 +534,26 @@ fn draw_log_area(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(log_paragraph, area);
 }
 
+/// Helper function to show progress in CLI mode
+fn show_cli_progress(app: &App) {
+    if app.state.is_processing_jobs {
+        let (done, total) = app.state.job_progress;
+        let percent = if total > 0 {
+            (done as f64 / total as f64).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        
+        println!("Progress: {}/{} jobs ({:.1}%)", done, total, percent * 100.0);
+    } else if app.state.is_loading {
+        println!("Loading: {}", app.state.loading_message);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::SystemTime;
     use crate::file_utils::{FileInfo, DuplicateSet};
     use std::path::PathBuf;
 
