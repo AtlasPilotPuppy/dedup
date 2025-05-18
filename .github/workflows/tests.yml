@@ -55,6 +55,12 @@ jobs:
         brew update
         brew install openssl@3 docker netcat coreutils sdl2 sdl2_image
         echo "OPENSSL_DIR=$(brew --prefix openssl@3)" >> $GITHUB_ENV
+        # Set up Docker BuildKit
+        mkdir -p ~/.docker
+        echo '{"experimental": "enabled", "builder": {"gc": {"enabled": true, "defaultKeepStorage": "20GB"}}}' > ~/.docker/config.json
+        # Install and set up buildx
+        docker buildx create --use
+        docker buildx inspect --bootstrap
 
     # Start Docker service on Linux
     - name: Start Docker service
