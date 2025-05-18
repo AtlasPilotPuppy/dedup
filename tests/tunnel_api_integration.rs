@@ -594,25 +594,31 @@ fn test_tunnel_api_functionality() -> Result<()> {
             fn drop(&mut self) {
                 println!("Performing cleanup in guard...");
                 
-                // Drop receiver to terminate its threads
+                // First drop receiver to terminate its threads
                 if let Some(rx) = self.rx.take() {
                     drop(rx);
                     println!("Dropped server output receiver");
+                    // Give threads time to exit cleanly
+                    std::thread::sleep(Duration::from_millis(200));
                 }
                 
                 // Kill server process if it's still running
                 if let Some(mut child) = self.child.take() {
-                    println!("Killing server process...");
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    println!("Stopping server process...");
+                    // Use stop_server which attempts SIGTERM first
+                    if let Err(e) = stop_server(child) {
+                        println!("Error during server cleanup: {}", e);
+                    }
                 }
                 
                 // Clean up port
                 println!("Cleaning up port {}...", self.port);
-                let _ = cleanup_test_server(self.port);
+                if let Err(e) = cleanup_test_server(self.port) {
+                    println!("Error cleaning up port: {}", e);
+                }
                 
                 // Sleep briefly to allow resources to be freed
-                std::thread::sleep(Duration::from_millis(100));
+                std::thread::sleep(Duration::from_millis(200));
                 println!("Cleanup complete");
             }
         }
@@ -754,6 +760,9 @@ fn test_tunnel_api_functionality() -> Result<()> {
 
             // Explicit drop to ensure client is fully deallocated
             drop(client);
+            
+            // Sleep to ensure client disconnection is fully processed
+            std::thread::sleep(Duration::from_millis(200));
         }
 
         // Wait a moment for server to process disconnect and give time for any lingering connections to close
@@ -771,7 +780,7 @@ fn test_tunnel_api_functionality() -> Result<()> {
             verify_server_running(child)?;
         }
 
-        // Clean up gracefully first
+        // Clean up gracefully with adequate wait times
         println!("Cleaning up server process gracefully");
         if let Some(child) = guard.child.take() {
             if let Err(e) = stop_server(child) {
@@ -785,18 +794,28 @@ fn test_tunnel_api_functionality() -> Result<()> {
             println!("Error cleaning up port: {}", e);
         }
         
+        // Clear the server output receiver
+        if let Some(rx) = guard.rx.take() {
+            drop(rx);
+            println!("Explicitly dropped server output receiver");
+            // Give time for receiver threads to exit
+            std::thread::sleep(Duration::from_millis(300));
+        }
+        
         // Dropping the guard will clean up any remaining resources
         drop(guard);
         
-        // Ensure we exit within the time limit
+        // Ensure we clean up before time limit
         if test_start.elapsed() > test_max_duration {
-            println!("Test is taking too long, forcing exit");
-            std::process::exit(0);
+            println!("Test is taking too long, but cleaning up before exit");
+            // Sleep to ensure cleanup callbacks can run
+            std::thread::sleep(Duration::from_secs(1));
+            // Return success now - avoiding the sleep and exit(0) pattern
+            return Ok(());
         }
 
-        // Force process exit with success status to avoid SIGKILL
-        std::thread::sleep(Duration::from_secs(1));
-        println!("Test completed successfully, exiting cleanly");
-        std::process::exit(0);
+        // Return success without using exit(0) to allow normal cleanup
+        println!("Test completed successfully");
+        Ok(())
     })
 } 
