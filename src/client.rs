@@ -132,78 +132,31 @@ impl DedupClient {
 
     /// Connect to the dedups server with timeout
     pub fn connect(&mut self) -> Result<()> {
-        // Clean up any existing connection
-        self.disconnect()?;
-
-        self.state = ConnectionState::Connecting;
+        if self.state == ConnectionState::Connected {
+            return Ok(());
+        }
 
         if self.verbose >= 2 {
             log::info!("Connecting to dedups server at {}:{}", self.host, self.port);
-        } else {
-            log::debug!("Connecting to dedups server at {}:{}", self.host, self.port);
         }
 
-        let addr = format!("{}:{}", self.host, self.port)
-            .parse::<SocketAddr>()
-            .with_context(|| format!("Invalid address: {}:{}", self.host, self.port))?;
+        self.state = ConnectionState::Connecting;
+        self.last_error = None;
 
-        // Try to connect with timeout
-        let stream = match TcpStream::connect_timeout(&addr, Duration::from_secs(5)) {
-            Ok(stream) => stream,
-            Err(e) => {
-                self.state = ConnectionState::Failed;
-                self.last_error = Some(format!("Connection failed: {}", e));
-                return Err(anyhow!("Failed to connect: {}", e));
-            }
-        };
+        let stream = TcpStream::connect((self.host.as_str(), self.port))
+            .with_context(|| format!("Failed to connect to {}:{}", self.host, self.port))?;
 
-        // Configure socket options
-        stream.set_read_timeout(Some(Duration::from_secs(5)))
-            .with_context(|| "Failed to set read timeout")?;
-        stream.set_write_timeout(Some(Duration::from_secs(5)))
-            .with_context(|| "Failed to set write timeout")?;
-        stream.set_nonblocking(true)
-            .with_context(|| "Failed to set non-blocking mode")?;
-
-        // Convert to socket2::Socket for platform-specific options
-        let socket = Socket::from(stream);
-        
-        // Set TCP keepalive
-        socket.set_keepalive(true)
-            .with_context(|| "Failed to set keepalive")?;
-        
-        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
-        {
-            socket.set_tcp_keepalive(
-                &socket2::TcpKeepalive::new()
-                    .with_time(Duration::from_secs(60))
-                    .with_interval(Duration::from_secs(10))
-            ).with_context(|| "Failed to set TCP keepalive options")?;
-        }
-
-        // Convert back to TcpStream
-        let stream = TcpStream::from(socket);
+        stream.set_nodelay(true)?;
+        stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+        stream.set_write_timeout(Some(Duration::from_secs(5)))?;
 
         let use_protobuf = {
             #[cfg(feature = "proto")]
             {
-                if self.options.use_protobuf {
-                    if self.verbose >= 2 {
-                        log::info!("Using Protobuf protocol for API communication");
-                    }
-                    true
-                } else {
-                    if self.verbose >= 2 {
-                        log::info!("Using JSON protocol for API communication");
-                    }
-                    false
-                }
+                self.options.use_protobuf
             }
             #[cfg(not(feature = "proto"))]
             {
-                if self.verbose >= 2 {
-                    log::info!("Using JSON protocol for API communication (protobuf not available)");
-                }
                 false
             }
         };
@@ -211,14 +164,7 @@ impl DedupClient {
         let use_compression = {
             #[cfg(feature = "proto")]
             {
-                if self.options.use_compression && use_protobuf {
-                    if self.verbose >= 3 {
-                        log::debug!("Compression enabled for Protobuf communication");
-                    }
-                    true
-                } else {
-                    false
-                }
+                self.options.use_compression
             }
             #[cfg(not(feature = "proto"))]
             {
@@ -226,7 +172,16 @@ impl DedupClient {
             }
         };
 
-        let compression_level = self.options.compression_level;
+        let compression_level = {
+            #[cfg(feature = "proto")]
+            {
+                self.options.compression_level
+            }
+            #[cfg(not(feature = "proto"))]
+            {
+                0
+            }
+        };
 
         let protocol = create_protocol_handler(
             stream.try_clone()?,
@@ -534,12 +489,21 @@ impl DedupClient {
             command_options.insert("USE_TUNNEL_API".to_string(), "true".to_string());
             
             // Add protocol details
-            command_options.insert("protocol_type".to_string(), 
-                if self.options.use_protobuf { "protobuf" } else { "json" }.to_string());
-            command_options.insert("compression".to_string(), 
-                self.options.use_compression.to_string());
-            command_options.insert("compression_level".to_string(), 
-                self.options.compression_level.to_string());
+            #[cfg(feature = "proto")]
+            {
+                command_options.insert("protocol_type".to_string(), 
+                    if self.options.use_protobuf { "protobuf" } else { "json" }.to_string());
+                command_options.insert("compression".to_string(), 
+                    self.options.use_compression.to_string());
+                command_options.insert("compression_level".to_string(), 
+                    self.options.compression_level.to_string());
+            }
+            #[cfg(not(feature = "proto"))]
+            {
+                command_options.insert("protocol_type".to_string(), "json".to_string());
+                command_options.insert("compression".to_string(), "false".to_string());
+                command_options.insert("compression_level".to_string(), "0".to_string());
+            }
             
             if self.verbose >= 3 {
                 log::debug!("Handshake options: {:?}", command_options);
@@ -602,26 +566,35 @@ impl DedupClient {
                                             .and_then(|v| v.as_str())
                                             .ok_or_else(|| anyhow!("Protocol type missing in handshake response"))?;
                                         
-                                        let client_proto_type = if self.options.use_protobuf { "protobuf" } else { "json" };
-                                        
-                                        if server_proto_type != client_proto_type {
-                                            return Err(anyhow!("Protocol mismatch: client using {}, server using {}", 
-                                                client_proto_type, server_proto_type));
+                                        #[cfg(feature = "proto")]
+                                        {
+                                            let client_proto_type = if self.options.use_protobuf { "protobuf" } else { "json" };
+                                            
+                                            if server_proto_type != client_proto_type {
+                                                return Err(anyhow!("Protocol mismatch: client using {}, server using {}", 
+                                                    client_proto_type, server_proto_type));
+                                            }
+                                            
+                                            // Verify compression settings match
+                                            let server_compression = protocol.get("compression")
+                                                .and_then(|v| v.as_bool())
+                                                .ok_or_else(|| anyhow!("Compression setting missing in handshake response"))?;
+                                            
+                                            if server_compression != self.options.use_compression {
+                                                return Err(anyhow!("Compression mismatch: client={}, server={}", 
+                                                    self.options.use_compression, server_compression));
+                                            }
                                         }
-                                        
-                                        // Verify compression settings match
-                                        let server_compression = protocol.get("compression")
-                                            .and_then(|v| v.as_bool())
-                                            .ok_or_else(|| anyhow!("Compression setting missing in handshake response"))?;
-                                        
-                                        if server_compression != self.options.use_compression {
-                                            return Err(anyhow!("Compression mismatch: client={}, server={}", 
-                                                self.options.use_compression, server_compression));
+                                        #[cfg(not(feature = "proto"))]
+                                        {
+                                            if server_proto_type != "json" {
+                                                return Err(anyhow!("Protocol mismatch: client using json, server using {}", 
+                                                    server_proto_type));
+                                            }
                                         }
                                         
                                         if self.verbose >= 2 {
-                                            log::info!("Protocol match confirmed: {} with compression={}", 
-                                                server_proto_type, server_compression);
+                                            log::info!("Protocol match confirmed: {}", server_proto_type);
                                         }
                                     }
                                     Err(e) => {
@@ -719,11 +692,11 @@ impl DedupClient {
                                 return Err(anyhow!("Server connection closed"));
                             }
                             _ => {
-                                return Err(e.context("Error reading from server"));
+                                return Err(anyhow!("Error reading from server: {}", io_err));
                             }
                         }
                     } else {
-                        return Err(e.context("Error reading from server"));
+                        return Err(e);
                     }
                 }
             }

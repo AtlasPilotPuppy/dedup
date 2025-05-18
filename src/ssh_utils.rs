@@ -3,6 +3,10 @@ use anyhow::{Context, Result};
 #[cfg(feature = "ssh")]
 use ssh2::Session;
 use std::path::{Path, PathBuf};
+use std::collections::HashMap;
+use crate::Cli;
+use crate::options::DedupOptions;
+use crate::client::DedupClient;
 
 /// Represents a remote location parsed from an SSH URI
 #[cfg(feature = "ssh")]
@@ -630,46 +634,30 @@ impl SshProtocol {
     /// Execute dedups command on remote system with support for streaming JSON output
     /// Uses a dedicated socket/tunnel approach for better streaming
     pub fn execute_dedups(&self, args: &[&str], cli: &crate::Cli) -> Result<String> {
-        // Check for protocol conflicts
-        if cli.json && cli.use_protobuf {
-            return Err(anyhow::anyhow!(
-                "Cannot use both JSON and Protobuf protocols. Protobuf is preferred for tunnel mode."
-            ));
-        }
-
-        // First check if we should use tunnel mode
-        let should_use_tunnel = cli.use_ssh_tunnel && cli.tunnel_api_mode;
-
-        if should_use_tunnel {
-            // Check verbosity level for additional logs
-            if cli.verbose >= 2 {
-                log::info!("Attempting tunnel-based API communication");
-            }
-
-            // First verify remote dedups is available (do this ONCE)
-            let remote_dedups = tokio::runtime::Runtime::new()
+        // Check if we should use tunnel mode
+        if cli.use_ssh_tunnel {
+            // Check if remote dedups is available
+            match tokio::runtime::Runtime::new()
                 .unwrap()
-                .block_on(self.remote.check_dedups_installed())?;
-
-            match remote_dedups {
-                Some(path) => {
-                    log::info!("Found remote dedups at {}, starting server mode", path);
-                    match self.execute_dedups_with_tunnel(args, cli, &path) {
-                        Ok(result) => Ok(result),
-                        Err(e) => {
-                            log::error!("Tunnel mode failed: {}", e);
-                            if cli.media_mode {
-                                // Media mode requires tunnel mode
-                                return Err(anyhow::anyhow!(
-                                    "Media mode requires working tunnel mode communication. Error: {}", e
-                                ));
-                            }
-                            log::warn!("Falling back to standard SSH mode with prefixed JSON");
-                            self.execute_dedups_standard(args, cli)
-                        }
+                .block_on(self.remote.check_dedups_installed())
+            {
+                Ok(Some(remote_dedups_path)) => {
+                    if cli.verbose >= 2 {
+                        log::info!("Found remote dedups at {}", remote_dedups_path);
                     }
+                    self.execute_dedups_with_tunnel(args, cli, &remote_dedups_path)
                 }
-                None => {
+                Ok(None) => {
+                    if cli.media_mode {
+                        return Err(anyhow::anyhow!(
+                            "Media mode requires dedups to be installed on the remote system"
+                        ));
+                    }
+                    log::warn!("Remote dedups not found, using standard SSH mode");
+                    self.execute_dedups_standard(args, cli)
+                }
+                Err(e) => {
+                    log::warn!("Failed to check for remote dedups: {}", e);
                     if cli.media_mode {
                         return Err(anyhow::anyhow!(
                             "Media mode requires dedups to be installed on the remote system"
@@ -755,8 +743,6 @@ impl SshProtocol {
         let mut server_flags = vec![
             "--server-mode".to_string(),
             "--port".to_string(), port_str,
-            "--use-protobuf".to_string(),  // Always use protobuf in tunnel mode
-            "--use-compression".to_string()
         ];
 
         // Add verbosity flags
@@ -804,17 +790,17 @@ impl SshProtocol {
         std::thread::sleep(std::time::Duration::from_secs(1));
 
         // Create the client
+        let client_options = DedupOptions {
+            use_ssh_tunnel: true,
+            tunnel_api_mode: true,
+            port: local_port,
+            ..Default::default()
+        };
+
         let mut client = DedupClient::with_options(
             "localhost".to_string(),
             local_port,
-            crate::options::DedupOptions {
-                use_ssh_tunnel: true,
-                tunnel_api_mode: true,
-                port: local_port,
-                use_protobuf: true,
-                use_compression: true,
-                ..Default::default()
-            }
+            client_options
         );
 
         // Try to connect with retries
@@ -1133,4 +1119,93 @@ impl RemoteLocation {
     pub fn is_ssh_path(_path: &str) -> bool {
         false
     }
+}
+
+pub fn execute_remote_command(cli: &Cli, host: &str, command: &str) -> Result<String> {
+    let mut command_options = HashMap::new();
+
+    // Add protocol information for handshake
+    if command.contains("internal_handshake") {
+        command_options.insert("protocol_type".to_string(), "json".to_string());
+        command_options.insert("compression".to_string(), "false".to_string());
+        command_options.insert("compression_level".to_string(), "0".to_string());
+    }
+
+    let remote = RemoteLocation::parse(host)?;
+    let mut protocol = SshProtocol::new(remote);
+    protocol.connect()?;
+
+    let result = protocol.execute_dedups(&[command], cli)?;
+    Ok(result)
+}
+
+pub fn create_remote_client(options: &DedupOptions) -> Result<DedupClient> {
+    let mut client_options = DedupOptions {
+        directories: options.directories.clone(),
+        target: options.target.clone(),
+        deduplicate: options.deduplicate,
+        delete: options.delete,
+        move_to: options.move_to.clone(),
+        log: options.log,
+        log_file: options.log_file.clone(),
+        output: options.output.clone(),
+        format: options.format.clone(),
+        json: options.json,
+        algorithm: options.algorithm.clone(),
+        parallel: options.parallel,
+        mode: options.mode.clone(),
+        interactive: options.interactive,
+        verbose: options.verbose,
+        include: options.include.clone(),
+        exclude: options.exclude.clone(),
+        filter_from: options.filter_from.clone(),
+        progress: options.progress,
+        progress_tui: options.progress_tui,
+        sort_by: options.sort_by.clone(),
+        sort_order: options.sort_order.clone(),
+        raw_sizes: options.raw_sizes,
+        config_file: options.config_file.clone(),
+        dry_run: options.dry_run,
+        cache_location: options.cache_location.clone(),
+        fast_mode: options.fast_mode,
+        media_mode: options.media_mode,
+        media_resolution: options.media_resolution.clone(),
+        media_formats: options.media_formats.clone(),
+        media_similarity: options.media_similarity,
+        media_dedup_options: options.media_dedup_options.clone(),
+
+        #[cfg(feature = "ssh")]
+        allow_remote_install: options.allow_remote_install,
+        #[cfg(feature = "ssh")]
+        ssh_options: options.ssh_options.clone(),
+        #[cfg(feature = "ssh")]
+        rsync_options: options.rsync_options.clone(),
+        #[cfg(feature = "ssh")]
+        use_remote_dedups: options.use_remote_dedups,
+        #[cfg(feature = "ssh")]
+        use_sudo: options.use_sudo,
+        #[cfg(feature = "ssh")]
+        use_ssh_tunnel: options.use_ssh_tunnel,
+        #[cfg(feature = "ssh")]
+        server_mode: options.server_mode,
+        #[cfg(feature = "ssh")]
+        port: options.port,
+        #[cfg(feature = "ssh")]
+        tunnel_api_mode: options.tunnel_api_mode,
+        #[cfg(feature = "ssh")]
+        keep_alive: options.keep_alive,
+
+        #[cfg(feature = "proto")]
+        use_protobuf: false,
+        #[cfg(feature = "proto")]
+        use_compression: false,
+        #[cfg(feature = "proto")]
+        compression_level: 0,
+    };
+
+    Ok(DedupClient::with_options(
+        "localhost".to_string(),
+        client_options.port,
+        client_options,
+    ))
 }

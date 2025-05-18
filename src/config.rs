@@ -411,40 +411,43 @@ impl DedupConfig {
         let formats = self.media_dedup.format_preference.formats.clone();
 
         DedupOptions {
-            // Basic options
+            // Basic options - map all fields from config
+            directories: Vec::new(), // This is typically set by CLI
+            target: None,           // This is typically set by CLI
+            deduplicate: false,     // This is typically set by CLI
+            delete: false,          // This is typically set by CLI
+            move_to: None,          // This is typically set by CLI
+            log: false,             // This is typically set by CLI
+            log_file: None,         // This is typically set by CLI
+            output: None,           // This is typically set by CLI
+            format: self.format.clone(),
+            json: self.json,
             algorithm: self.algorithm.clone(),
             parallel: self.parallel,
             mode: self.mode.clone(),
-            format: self.format.clone(),
-            json: self.json,
-            progress: self.progress,
-            sort_by: self.sort_by.clone(),
-            sort_order: self.sort_order.clone(),
+            interactive: false,      // This is typically set by CLI
+            verbose: 0,             // This is typically set by CLI
             include: self.include.clone(),
             exclude: self.exclude.clone(),
+            filter_from: None,      // This is typically set by CLI
+            progress: self.progress,
+            progress_tui: false,    // This is typically set by CLI
+            sort_by: self.sort_by.clone(),
+            sort_order: self.sort_order.clone(),
+            raw_sizes: false,       // This is typically set by CLI
+            config_file: None,      // This is typically set by CLI
+            dry_run: false,         // This is typically set by CLI
             cache_location: self.cache_location.clone(),
             fast_mode: self.fast_mode,
 
-            // Media options
+            // Media options - map all fields from config
             media_dedup_options: self.media_dedup.clone(),
             media_mode: self.media_dedup.enabled,
             media_resolution: resolution,
             media_formats: formats,
             media_similarity: self.media_dedup.similarity_threshold,
 
-            // Set defaults for the rest
-            log: false,
-            log_file: None,
-            output: None,
-            interactive: false,
-            verbose: 0,
-            filter_from: None,
-            progress_tui: false,
-            raw_sizes: false,
-            config_file: None,
-            dry_run: false,
-
-            // SSH options
+            // SSH options - map all fields from config
             #[cfg(feature = "ssh")]
             allow_remote_install: self.ssh.allow_remote_install,
             #[cfg(feature = "ssh")]
@@ -458,28 +461,21 @@ impl DedupConfig {
             #[cfg(feature = "ssh")]
             use_ssh_tunnel: self.ssh.use_ssh_tunnel,
             #[cfg(feature = "ssh")]
-            server_mode: false,
+            server_mode: false,     // This is typically set by CLI
             #[cfg(feature = "ssh")]
-            port: 0,
+            port: 0,               // This is typically set by CLI
             #[cfg(feature = "ssh")]
             tunnel_api_mode: self.ssh.tunnel_api_mode,
             #[cfg(feature = "ssh")]
             keep_alive: self.ssh.keep_alive,
 
-            // Protocol options
+            // Protocol options - map all fields from config
             #[cfg(feature = "proto")]
             use_protobuf: self.protocol.use_protobuf,
             #[cfg(feature = "proto")]
             use_compression: self.protocol.use_compression,
             #[cfg(feature = "proto")]
             compression_level: self.protocol.compression_level,
-
-            // Initialize the rest from defaults
-            directories: Vec::new(),
-            target: None,
-            deduplicate: false,
-            delete: false,
-            move_to: None,
         }
     }
 

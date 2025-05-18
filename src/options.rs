@@ -310,20 +310,44 @@ impl DedupOptions {
     
     #[cfg(feature = "ssh")]
     pub fn find_available_port(&self) -> u16 {
-        // Start with default port and find next available
+        use std::net::{SocketAddr, TcpListener};
+        use socket2::{Socket, Domain, Type, Protocol};
+
+        // Start with default port
         let port = self.port;
-        let socket = std::net::TcpListener::bind(("127.0.0.1", port));
-        
-        // If the port is unavailable, try the next port
-        if socket.is_err() {
-            for p in port+1..port+100 {
-                if std::net::TcpListener::bind(("127.0.0.1", p)).is_ok() {
-                    return p;
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+
+        // Try the initial port first
+        let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP));
+        if let Ok(socket) = socket {
+            // Set SO_REUSEADDR
+            if let Ok(_) = socket.set_reuse_address(true) {
+                if let Ok(_) = socket.bind(&addr.into()) {
+                    if let Ok(_) = socket.listen(1) {
+                        return port;
+                    }
                 }
             }
         }
+
+        // If initial port is unavailable, try subsequent ports
+        for p in port+1..port+100 {
+            let addr = SocketAddr::from(([127, 0, 0, 1], p));
+            let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP));
+            
+            if let Ok(socket) = socket {
+                if let Ok(_) = socket.set_reuse_address(true) {
+                    if let Ok(_) = socket.bind(&addr.into()) {
+                        if let Ok(_) = socket.listen(1) {
+                            return p;
+                        }
+                    }
+                }
+            }
+            // Socket is automatically closed here when it goes out of scope
+        }
         
-        // Return the original port if it's available or no other port was found
+        // Return the original port if no other port was found
         port
     }
 }
