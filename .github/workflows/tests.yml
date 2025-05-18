@@ -160,7 +160,7 @@ jobs:
     - name: Install dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y libssl-dev pkg-config netcat-openbsd
+        sudo apt-get install -y libssl-dev pkg-config netcat-openbsd protobuf-compiler
     
     - name: Run Tunnel API integration test
       run: |

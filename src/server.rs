@@ -166,7 +166,7 @@ impl DedupServer {
             }
         }
 
-        let listener = TcpListener::bind(format!("127.0.0.1:{}", self.port))
+        let listener = TcpListener::bind(format!("0.0.0.0:{}", self.port))
             .with_context(|| format!("Failed to bind to port {} for dedups server", self.port))?;
 
         listener

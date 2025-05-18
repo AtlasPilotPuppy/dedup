@@ -94,7 +94,21 @@ fn main() -> Result<()> {
     #[cfg(feature = "ssh")]
     if cli.server_mode {
         log::info!("Starting in server mode on port {}", cli.port);
-        return start_server_mode(&cli);
+        let port = if cli.port == 0 {
+            match dedups::protocol::find_available_port(10000, 20000) {
+                Ok(p) => {
+                    log::info!("Auto-selected port {}", p);
+                    p
+                }
+                Err(e) => {
+                    log::error!("Failed to find available port: {}", e);
+                    return Err(anyhow::anyhow!("Failed to find available port: {}", e));
+                }
+            }
+        } else {
+            cli.port
+        };
+        return start_server_mode(port);
     }
 
     // Log config file path for debugging
@@ -790,21 +804,13 @@ fn handle_duplicate_sets(
 
 // Start server mode to handle commands from remote clients
 #[cfg(feature = "ssh")]
-fn start_server_mode(cli: &Cli) -> Result<()> {
-    use dedups::protocol::find_available_port;
+fn start_server_mode(port: u16) -> Result<()> {
     use dedups::server::run_server;
-
-    // If port is 0, find an available port
-    let port = if cli.port == 0 {
-        find_available_port(10000, 20000)?
-    } else {
-        cli.port
-    };
 
     log::info!("Starting dedups server on port {}", port);
 
     // Print the port so the client can connect
-    if cli.verbose > 0 {
+    if std::env::var("RUST_LOG").is_ok() {
         println!("DEDUPS_SERVER_PORT={}", port);
     }
 
