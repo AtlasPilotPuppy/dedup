@@ -370,12 +370,6 @@ impl DedupServer {
             log::info!("Client connected and ready to receive commands");
         }
 
-        // Keep track of whether we've received a handshake
-        let mut handshake_received = false;
-
-        // Increase handshake timeout to 10 seconds (from 5) for better test reliability
-        let handshake_timeout = Duration::from_secs(10);
-
         // Set a flag to detect client disconnection
         let mut client_disconnected = false;
 
@@ -396,16 +390,19 @@ impl DedupServer {
                 if let Err(e) = protocol.send_message(ping_msg) {
                     log::error!("Failed to send keep-alive ping: {}", e);
                     client_disconnected = true;
-                    break;
+                    continue;
                 }
                 last_ping = Instant::now();
             }
 
             // Check keep-alive timeout
             if keep_alive && last_activity.elapsed() > keep_alive_timeout {
-                log::error!("Keep-alive timeout exceeded ({} seconds)", keep_alive_timeout.as_secs());
+                log::error!(
+                    "Keep-alive timeout exceeded ({} seconds)",
+                    keep_alive_timeout.as_secs()
+                );
                 client_disconnected = true;
-                break;
+                continue;
             }
 
             match protocol.receive_message() {
@@ -421,13 +418,8 @@ impl DedupServer {
                             if let Ok(cmd_msg) =
                                 serde_json::from_str::<CommandMessage>(&message.payload)
                             {
-                                if cmd_msg.command == "internal_handshake" {
-                                    if verbose >= 1 {
-                                        log::info!(
-                                            "Received handshake command - client identified"
-                                        );
-                                    }
-                                    handshake_received = true;
+                                if cmd_msg.command == "internal_handshake" && verbose >= 1 {
+                                    log::info!("Received handshake command - client identified");
                                 }
                             }
 
@@ -441,7 +433,7 @@ impl DedupServer {
                                     500,
                                 );
                                 client_disconnected = true;
-                                break;
+                                continue;
                             }
                         }
                         MessageType::Result => {
@@ -451,7 +443,7 @@ impl DedupServer {
                                     log::info!("Client sent disconnect message");
                                 }
                                 client_disconnected = true;
-                                break;
+                                continue;
                             } else if message.payload == "pong" {
                                 // Handle keep-alive pong response
                                 if verbose >= 3 {
@@ -477,7 +469,7 @@ impl DedupServer {
                             ) {
                                 log::error!("Failed to send error response: {}", e);
                                 client_disconnected = true;
-                                break;
+                                continue;
                             }
                         }
                     }
@@ -487,20 +479,9 @@ impl DedupServer {
                     if keep_alive && last_activity.elapsed() > keep_alive_timeout {
                         log::error!("Keep-alive timeout exceeded");
                         client_disconnected = true;
-                        break;
+                        continue;
                     }
-
-                    // Check handshake timeout only if we haven't received one yet
-                    if !handshake_received && session_start.elapsed() > handshake_timeout {
-                        if verbose >= 1 {
-                            log::error!("No handshake received within timeout of {} seconds, closing connection", 
-                                       handshake_timeout.as_secs());
-                        }
-                        client_disconnected = true;
-                        break;
-                    }
-
-                    thread::sleep(Duration::from_millis(10)); // Reduced from 100ms to 10ms
+                    thread::sleep(Duration::from_millis(100));
                 }
                 Err(e) => {
                     match e.downcast_ref::<std::io::Error>() {
@@ -509,34 +490,34 @@ impl DedupServer {
                             if keep_alive && last_activity.elapsed() > keep_alive_timeout {
                                 log::error!("Keep-alive timeout exceeded");
                                 client_disconnected = true;
-                                break;
+                                continue;
                             }
                             continue;
                         }
                         Some(io_err) if io_err.kind() == std::io::ErrorKind::WouldBlock => {
                             // Non-blocking read with no data
-                            thread::sleep(Duration::from_millis(10)); // Reduced from 100ms to 10ms
+                            thread::sleep(Duration::from_millis(100));
                             continue;
                         }
                         Some(io_err) if io_err.kind() == std::io::ErrorKind::BrokenPipe => {
                             log::warn!("Client connection closed (broken pipe)");
                             client_disconnected = true;
-                            break;
+                            continue;
                         }
                         Some(io_err) if io_err.kind() == std::io::ErrorKind::ConnectionReset => {
                             log::warn!("Client connection reset");
                             client_disconnected = true;
-                            break;
+                            continue;
                         }
                         Some(io_err) if io_err.kind() == std::io::ErrorKind::ConnectionAborted => {
                             log::warn!("Client connection aborted");
                             client_disconnected = true;
-                            break;
+                            continue;
                         }
                         _ => {
                             log::error!("Error reading from client: {}", e);
                             client_disconnected = true;
-                            break;
+                            continue;
                         }
                     }
                 }

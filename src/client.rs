@@ -28,8 +28,6 @@ use std::time::{Duration, Instant};
 const MAX_TIMEOUTS: u32 = 50;
 /// Default timeout duration for receiving messages
 const DEFAULT_RECEIVE_TIMEOUT: Duration = Duration::from_millis(100);
-/// Maximum time to wait for command response
-const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 /// Keep-alive interval
 const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(5);
 /// Keep-alive timeout
@@ -538,12 +536,8 @@ impl DedupClient {
         let mut last_activity = Instant::now();
         let start_time = Instant::now();
 
-        // For handshake, use a longer timeout to ensure it works reliably in tests
-        let command_timeout = if command == "internal_handshake" {
-            Duration::from_secs(10) // Increased from 5s to 10s for reliability
-        } else {
-            Duration::from_secs(10) // Reduced from 30s to 10s
-        };
+        // Use a fixed timeout of 10 seconds for all commands
+        let command_timeout = Duration::from_secs(10);
 
         loop {
             // Send keep-alive ping if needed

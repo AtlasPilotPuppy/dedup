@@ -317,12 +317,11 @@ impl DedupOptions {
         let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP));
         if let Ok(socket) = socket {
             // Set SO_REUSEADDR
-            if let Ok(_) = socket.set_reuse_address(true) {
-                if let Ok(_) = socket.bind(&addr.into()) {
-                    if let Ok(_) = socket.listen(1) {
-                        return port;
-                    }
-                }
+            if socket.set_reuse_address(true).is_ok()
+                && socket.bind(&addr.into()).is_ok()
+                && socket.listen(1).is_ok()
+            {
+                return port;
             }
         }
 
@@ -332,12 +331,11 @@ impl DedupOptions {
             let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP));
 
             if let Ok(socket) = socket {
-                if let Ok(_) = socket.set_reuse_address(true) {
-                    if let Ok(_) = socket.bind(&addr.into()) {
-                        if let Ok(_) = socket.listen(1) {
-                            return p;
-                        }
-                    }
+                if socket.set_reuse_address(true).is_ok()
+                    && socket.bind(&addr.into()).is_ok()
+                    && socket.listen(1).is_ok()
+                {
+                    return p;
                 }
             }
             // Socket is automatically closed here when it goes out of scope
