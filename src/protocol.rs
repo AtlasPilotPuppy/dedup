@@ -24,7 +24,6 @@ use prost::Message;
 #[cfg(all(feature = "ssh", feature = "proto"))]
 use zstd::{decode_all, encode_all};
 
-
 // Message types for client/server communication
 #[cfg(feature = "ssh")]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -115,7 +114,13 @@ pub struct JsonProtocolHandler {
 impl JsonProtocolHandler {
     pub fn new(stream: TcpStream) -> Result<Self> {
         let reader = BufReader::new(stream.try_clone()?);
-        Ok(Self { stream, reader, _use_protobuf: false, _use_compression: false, _compression_level: 0 })
+        Ok(Self {
+            stream,
+            reader,
+            _use_protobuf: false,
+            _use_compression: false,
+            _compression_level: 0,
+        })
     }
 }
 
@@ -413,7 +418,10 @@ pub fn find_available_port(start_range: u16, end_range: u16) -> Result<u16> {
 
     // Try the default dedups port first (29875) if within range
     let default_port = 29875;
-    if default_port >= start_range && default_port <= end_range && TcpListener::bind(("127.0.0.1", default_port)).is_ok() {
+    if default_port >= start_range
+        && default_port <= end_range
+        && TcpListener::bind(("127.0.0.1", default_port)).is_ok()
+    {
         return Ok(default_port);
     }
 
@@ -424,5 +432,9 @@ pub fn find_available_port(start_range: u16, end_range: u16) -> Result<u16> {
         }
     }
 
-    Err(anyhow!("No available ports found in range {}-{}", start_range, end_range))
+    Err(anyhow!(
+        "No available ports found in range {}-{}",
+        start_range,
+        end_range
+    ))
 }

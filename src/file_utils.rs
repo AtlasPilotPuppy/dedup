@@ -1498,16 +1498,20 @@ fn scan_directory(cli: &Cli, directory: &Path) -> Result<Vec<FileInfo>> {
         match entry_result {
             Ok(entry) => {
                 if is_hidden(&entry) || is_symlink(&entry) {
-                    continue; 
+                    continue;
                 }
 
                 if entry.file_type().is_file() {
                     if let Some(path_str) = entry.path().to_str() {
-                        if filter_rules.is_match(path_str) { // is_match uses matches_path
+                        if filter_rules.is_match(path_str) {
+                            // is_match uses matches_path
                             collected_file_paths.push(entry.path().to_path_buf());
                         }
                     } else {
-                        log::warn!("[ScanThread] Path {:?} is not valid UTF-8, excluding.", entry.path());
+                        log::warn!(
+                            "[ScanThread] Path {:?} is not valid UTF-8, excluding.",
+                            entry.path()
+                        );
                     }
                 }
             }
@@ -1550,7 +1554,11 @@ fn scan_directory(cli: &Cli, directory: &Path) -> Result<Vec<FileInfo>> {
         }
     }
 
-    log::info!("Found {} files in directory: {:?} matching filters", files.len(), directory);
+    log::info!(
+        "Found {} files in directory: {:?} matching filters",
+        files.len(),
+        directory
+    );
     Ok(files)
 }
 
@@ -2287,7 +2295,7 @@ fn handle_remote_directory(cli: &crate::Cli, dir_path: &Path) -> Result<Vec<File
             }
         }
 
-                // Check if we're in media mode and warn appropriately
+        // Check if we're in media mode and warn appropriately
         if cli.media_mode {
             if dedups_installed.is_none() {
                 return Err(anyhow::anyhow!(

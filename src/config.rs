@@ -108,7 +108,7 @@ pub struct SshConfig {
     /// Whether to use SSH tunneling for reliable JSON streaming
     #[serde(default = "default_use_ssh_tunnel")]
     pub use_ssh_tunnel: bool,
-    
+
     /// Whether to use tunnel API mode for dedups communication
     #[serde(default = "default_tunnel_api_mode")]
     pub tunnel_api_mode: bool,
@@ -413,30 +413,30 @@ impl DedupConfig {
         DedupOptions {
             // Basic options - map all fields from config
             directories: Vec::new(), // This is typically set by CLI
-            target: None,           // This is typically set by CLI
-            deduplicate: false,     // This is typically set by CLI
-            delete: false,          // This is typically set by CLI
-            move_to: None,          // This is typically set by CLI
-            log: false,             // This is typically set by CLI
-            log_file: None,         // This is typically set by CLI
-            output: None,           // This is typically set by CLI
+            target: None,            // This is typically set by CLI
+            deduplicate: false,      // This is typically set by CLI
+            delete: false,           // This is typically set by CLI
+            move_to: None,           // This is typically set by CLI
+            log: false,              // This is typically set by CLI
+            log_file: None,          // This is typically set by CLI
+            output: None,            // This is typically set by CLI
             format: self.format.clone(),
             json: self.json,
             algorithm: self.algorithm.clone(),
             parallel: self.parallel,
             mode: self.mode.clone(),
-            interactive: false,      // This is typically set by CLI
-            verbose: 0,             // This is typically set by CLI
+            interactive: false, // This is typically set by CLI
+            verbose: 0,         // This is typically set by CLI
             include: self.include.clone(),
             exclude: self.exclude.clone(),
-            filter_from: None,      // This is typically set by CLI
+            filter_from: None, // This is typically set by CLI
             progress: self.progress,
-            progress_tui: false,    // This is typically set by CLI
+            progress_tui: false, // This is typically set by CLI
             sort_by: self.sort_by.clone(),
             sort_order: self.sort_order.clone(),
-            raw_sizes: false,       // This is typically set by CLI
-            config_file: None,      // This is typically set by CLI
-            dry_run: false,         // This is typically set by CLI
+            raw_sizes: false,  // This is typically set by CLI
+            config_file: None, // This is typically set by CLI
+            dry_run: false,    // This is typically set by CLI
             cache_location: self.cache_location.clone(),
             fast_mode: self.fast_mode,
 
@@ -461,9 +461,9 @@ impl DedupConfig {
             #[cfg(feature = "ssh")]
             use_ssh_tunnel: self.ssh.use_ssh_tunnel,
             #[cfg(feature = "ssh")]
-            server_mode: false,     // This is typically set by CLI
+            server_mode: false, // This is typically set by CLI
             #[cfg(feature = "ssh")]
-            port: 0,               // This is typically set by CLI
+            port: 0, // This is typically set by CLI
             #[cfg(feature = "ssh")]
             tunnel_api_mode: self.ssh.tunnel_api_mode,
             #[cfg(feature = "ssh")]

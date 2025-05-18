@@ -1,5 +1,8 @@
 // tests/integration_tests.rs
 use anyhow::Result;
+use dedups::file_utils::{self, FileInfo, SelectionStrategy, SortCriterion, SortOrder};
+use dedups::media_dedup::MediaDedupOptions;
+use dedups::Cli;
 use rand::distributions::Alphanumeric;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
@@ -7,11 +10,8 @@ use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
 use std::str::FromStr;
-use dedups::file_utils::{self, FileInfo, SelectionStrategy, SortCriterion, SortOrder};
-use dedups::media_dedup::MediaDedupOptions;
-use dedups::Cli;
+use std::time::{Duration, SystemTime};
 
 // --- Test Constants ---
 // const TEST_BASE_DIR_NAME: &str = "dedup_integration_tests"; // Remove unused constant
@@ -1208,7 +1208,7 @@ mod integration {
         // Create a temporary directory for this test only
         let test_dir = tempfile::tempdir()?;
         println!("Created test directory: {:?}", test_dir.path());
-        
+
         // Create test files with known content
         let content = "test content";
         let paths = vec![
@@ -1216,7 +1216,7 @@ mod integration {
             test_dir.path().join("dir1/file2.txt"),
             test_dir.path().join("dir2/file3.txt"),
         ];
-        
+
         // Create directories and files
         for path in &paths {
             if let Some(parent) = path.parent() {
@@ -1225,21 +1225,25 @@ mod integration {
             }
             std::fs::write(path, content)?;
             println!("Created file: {:?}", path);
-            
+
             // Verify file was written correctly
             let mut file = std::fs::File::open(path)?;
             let mut actual_content = String::new();
             file.read_to_string(&mut actual_content)?;
-            assert_eq!(actual_content, content, "File content mismatch for {:?}", path);
+            assert_eq!(
+                actual_content, content,
+                "File content mismatch for {:?}",
+                path
+            );
             println!("Verified file content: {:?}", path);
-            
+
             // Ensure file is written and flushed
             std::fs::OpenOptions::new()
                 .write(true)
                 .open(path)?
                 .sync_all()?;
         }
-        
+
         // List all files in test directory
         println!("\nListing all files in test directory:");
         for entry in walkdir::WalkDir::new(test_dir.path()) {
@@ -1247,7 +1251,7 @@ mod integration {
                 println!("Found: {:?}", entry.path());
             }
         }
-        
+
         // Test each selection strategy
         let strategies = vec![
             "shortest_path",
@@ -1255,10 +1259,10 @@ mod integration {
             "newest_modified",
             "oldest_modified",
         ];
-        
+
         for strategy in strategies {
             println!("\nTesting strategy: {}", strategy);
-            
+
             // Create CLI args for this test
             let cli = Cli {
                 directories: vec![test_dir.path().to_path_buf()],
@@ -1320,17 +1324,17 @@ mod integration {
                 #[cfg(feature = "ssh")]
                 keep_alive: true,
             };
-            
+
             println!("CLI options:");
             println!("  Directories: {:?}", cli.directories);
             println!("  Algorithm: {}", cli.algorithm);
             println!("  Mode: {}", cli.mode);
             println!("  Include patterns: {:?}", cli.include);
-            
+
             // Find duplicates
             let (tx, _rx) = std::sync::mpsc::channel();
             let duplicate_sets = file_utils::find_duplicate_files_with_progress(&cli, tx)?;
-            
+
             // Print debug info
             println!("Found {} duplicate sets:", duplicate_sets.len());
             for (i, set) in duplicate_sets.iter().enumerate() {
@@ -1340,38 +1344,57 @@ mod integration {
                 for file in &set.files {
                     println!("  File: {:?}", file.path);
                     println!("  Size: {}", file.size);
-                    
+
                     // Verify file still exists and has correct content
                     let mut file_content = String::new();
                     std::fs::File::open(&file.path)?.read_to_string(&mut file_content)?;
-                    assert_eq!(file_content, content, "File content mismatch for {:?}", file.path);
+                    assert_eq!(
+                        file_content, content,
+                        "File content mismatch for {:?}",
+                        file.path
+                    );
                 }
             }
-            
+
             // There should be exactly one duplicate set since all files have the same content
-            assert_eq!(duplicate_sets.len(), 1, "Should find exactly one duplicate set");
-            assert_eq!(duplicate_sets[0].files.len(), 3, "Duplicate set should contain all three files");
-            
+            assert_eq!(
+                duplicate_sets.len(),
+                1,
+                "Should find exactly one duplicate set"
+            );
+            assert_eq!(
+                duplicate_sets[0].files.len(),
+                3,
+                "Duplicate set should contain all three files"
+            );
+
             // Process the duplicate set
             let set = &duplicate_sets[0];
-            let (kept_file, files_to_delete) = file_utils::determine_action_targets(
-                set,
-                SelectionStrategy::from_str(strategy)?
-            )?;
-            
+            let (kept_file, files_to_delete) =
+                file_utils::determine_action_targets(set, SelectionStrategy::from_str(strategy)?)?;
+
             println!("\nAction targets:");
             println!("  Keeping: {:?}", kept_file.path);
-            println!("  Deleting: {:?}", files_to_delete.iter().map(|f| &f.path).collect::<Vec<_>>());
-            
+            println!(
+                "  Deleting: {:?}",
+                files_to_delete.iter().map(|f| &f.path).collect::<Vec<_>>()
+            );
+
             // Verify one file is kept and others are marked for deletion
-            assert_eq!(files_to_delete.len(), 2, "Should mark exactly two files for deletion");
-            assert!(!files_to_delete.iter().any(|f| f.path == kept_file.path), 
-                    "Kept file should not be in the delete list");
-            
+            assert_eq!(
+                files_to_delete.len(),
+                2,
+                "Should mark exactly two files for deletion"
+            );
+            assert!(
+                !files_to_delete.iter().any(|f| f.path == kept_file.path),
+                "Kept file should not be in the delete list"
+            );
+
             // Actually delete the files
             let (delete_count, _) = file_utils::delete_files(&files_to_delete, false)?;
             assert_eq!(delete_count, 2, "Should delete exactly two files");
-            
+
             // Verify only one file remains and it's the kept file
             assert!(kept_file.path.exists(), "Kept file should still exist");
             let remaining_files: Vec<_> = walkdir::WalkDir::new(test_dir.path())
@@ -1379,13 +1402,24 @@ mod integration {
                 .filter_map(|e| e.ok())
                 .filter(|e| e.file_type().is_file())
                 .collect();
-            assert_eq!(remaining_files.len(), 1, "Should have exactly one file remaining");
-            assert_eq!(remaining_files[0].path(), kept_file.path, "Remaining file should be the kept file");
-            
+            assert_eq!(
+                remaining_files.len(),
+                1,
+                "Should have exactly one file remaining"
+            );
+            assert_eq!(
+                remaining_files[0].path(),
+                kept_file.path,
+                "Remaining file should be the kept file"
+            );
+
             println!("\nVerification after deletion:");
             println!("  Kept file exists: {}", kept_file.path.exists());
-            println!("  Remaining files: {:?}", remaining_files.iter().map(|e| e.path()).collect::<Vec<_>>());
-            
+            println!(
+                "  Remaining files: {:?}",
+                remaining_files.iter().map(|e| e.path()).collect::<Vec<_>>()
+            );
+
             // Clean up for next strategy test
             for path in &paths {
                 if path.exists() {
@@ -1399,14 +1433,18 @@ mod integration {
                     .write(true)
                     .open(path)?
                     .sync_all()?;
-                
+
                 // Verify file was recreated correctly
                 let mut file_content = String::new();
                 std::fs::File::open(path)?.read_to_string(&mut file_content)?;
-                assert_eq!(file_content, content, "File content mismatch after recreation for {:?}", path);
+                assert_eq!(
+                    file_content, content,
+                    "File content mismatch after recreation for {:?}",
+                    path
+                );
             }
         }
-        
+
         Ok(())
     }
 }

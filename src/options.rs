@@ -136,11 +136,11 @@ impl Default for DedupOptions {
             #[cfg(feature = "ssh")]
             server_mode: false,
             #[cfg(feature = "ssh")]
-            port: 29875,  // Default port for API communication
+            port: 29875, // Default port for API communication
             #[cfg(feature = "ssh")]
-            tunnel_api_mode: true,  // Enabled by default to use API-style communication
+            tunnel_api_mode: true, // Enabled by default to use API-style communication
             #[cfg(feature = "ssh")]
-            keep_alive: true,  // Enable keep-alive by default
+            keep_alive: true, // Enable keep-alive by default
 
             // Protocol options
             #[cfg(feature = "proto")]
@@ -237,11 +237,7 @@ impl DedupOptions {
     #[cfg(feature = "proto")]
     pub fn from_proto(proto_opts: &self::proto::DedupOptions) -> Self {
         Self {
-            directories: proto_opts
-                .directories
-                .iter()
-                .map(PathBuf::from)
-                .collect(),
+            directories: proto_opts.directories.iter().map(PathBuf::from).collect(),
             target: proto_opts.target.as_ref().map(PathBuf::from),
             deduplicate: proto_opts.deduplicate,
             delete: proto_opts.delete,
@@ -307,11 +303,11 @@ impl DedupOptions {
             compression_level: proto_opts.compression_level,
         }
     }
-    
+
     #[cfg(feature = "ssh")]
     pub fn find_available_port(&self) -> u16 {
-        use std::net::{SocketAddr, TcpListener};
-        use socket2::{Socket, Domain, Type, Protocol};
+        use socket2::{Domain, Protocol, Socket, Type};
+        use std::net::SocketAddr;
 
         // Start with default port
         let port = self.port;
@@ -331,10 +327,10 @@ impl DedupOptions {
         }
 
         // If initial port is unavailable, try subsequent ports
-        for p in port+1..port+100 {
+        for p in port + 1..port + 100 {
             let addr = SocketAddr::from(([127, 0, 0, 1], p));
             let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP));
-            
+
             if let Ok(socket) = socket {
                 if let Ok(_) = socket.set_reuse_address(true) {
                     if let Ok(_) = socket.bind(&addr.into()) {
@@ -346,7 +342,7 @@ impl DedupOptions {
             }
             // Socket is automatically closed here when it goes out of scope
         }
-        
+
         // Return the original port if no other port was found
         port
     }

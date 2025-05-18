@@ -1,12 +1,12 @@
+use crate::client::DedupClient;
+use crate::options::DedupOptions;
+use crate::Cli;
 #[cfg(feature = "ssh")]
 use anyhow::{Context, Result};
 #[cfg(feature = "ssh")]
 use ssh2::Session;
-use std::path::{Path, PathBuf};
 use std::collections::HashMap;
-use crate::Cli;
-use crate::options::DedupOptions;
-use crate::client::DedupClient;
+use std::path::{Path, PathBuf};
 
 /// Represents a remote location parsed from an SSH URI
 #[cfg(feature = "ssh")]
@@ -675,7 +675,12 @@ impl SshProtocol {
     }
 
     /// Execute dedups via an SSH tunnel for API communication
-    pub fn execute_dedups_with_tunnel(&self, args: &[&str], cli: &crate::Cli, remote_dedups_path: &str) -> Result<String> {
+    pub fn execute_dedups_with_tunnel(
+        &self,
+        args: &[&str],
+        cli: &crate::Cli,
+        remote_dedups_path: &str,
+    ) -> Result<String> {
         use crate::client::DedupClient;
         use crate::protocol::find_available_port;
         use std::collections::HashMap;
@@ -700,9 +705,11 @@ impl SshProtocol {
         let port_forwarding = format!("{}:localhost:{}", local_port, local_port);
         let ssh_options = self.get_ssh_options(cli);
         let mut ssh_opts = vec![
-            "-N".to_string(),  // No command execution, just forwarding
-            "-L".to_string(), port_forwarding,
-            "-o".to_string(), "ExitOnForwardFailure=yes".to_string()  // Fail if port forwarding fails
+            "-N".to_string(), // No command execution, just forwarding
+            "-L".to_string(),
+            port_forwarding,
+            "-o".to_string(),
+            "ExitOnForwardFailure=yes".to_string(), // Fail if port forwarding fails
         ];
         ssh_opts.extend(ssh_options);
 
@@ -718,7 +725,7 @@ impl SshProtocol {
 
         // Start the tunnel in the background
         let tunnel_cmd = format!(
-            "ssh {} {} -f",  // -f backgrounds the tunnel
+            "ssh {} {} -f", // -f backgrounds the tunnel
             ssh_opts.join(" "),
             remote_addr
         );
@@ -740,10 +747,7 @@ impl SshProtocol {
 
         // Now start the remote server
         let port_str = local_port.to_string();
-        let mut server_flags = vec![
-            "--server-mode".to_string(),
-            "--port".to_string(), port_str,
-        ];
+        let mut server_flags = vec!["--server-mode".to_string(), "--port".to_string(), port_str];
 
         // Add verbosity flags
         if cli.verbose > 0 {
@@ -763,7 +767,10 @@ impl SshProtocol {
             r#"ssh {} {} "export PATH={}:$PATH; {} {} {}""#,
             self.get_ssh_options(cli).join(" "),
             remote_addr,
-            std::path::Path::new(remote_dedups_path).parent().unwrap_or(std::path::Path::new("/usr/local/bin")).display(),
+            std::path::Path::new(remote_dedups_path)
+                .parent()
+                .unwrap_or(std::path::Path::new("/usr/local/bin"))
+                .display(),
             if let Ok(val) = std::env::var("RUST_LOG") {
                 format!("export RUST_LOG={};", val)
             } else {
@@ -797,11 +804,8 @@ impl SshProtocol {
             ..Default::default()
         };
 
-        let mut client = DedupClient::with_options(
-            "localhost".to_string(),
-            local_port,
-            client_options
-        );
+        let mut client =
+            DedupClient::with_options("localhost".to_string(), local_port, client_options);
 
         // Try to connect with retries
         let mut connected = false;
@@ -829,7 +833,7 @@ impl SshProtocol {
         let result = client.execute_command(
             "dedups".to_string(),
             args.iter().map(|s| s.to_string()).collect(),
-            HashMap::new()
+            HashMap::new(),
         )?;
 
         Ok(result)
@@ -839,7 +843,7 @@ impl SshProtocol {
     fn execute_dedups_standard(&self, args: &[&str], _cli: &crate::Cli) -> Result<String> {
         // Add JSON prefix to help with parsing
         let mut modified_args = args.to_vec();
-        modified_args.push("--json-prefix");  // This needs to be added to the CLI options
+        modified_args.push("--json-prefix"); // This needs to be added to the CLI options
 
         // Build SSH command
         let mut ssh_cmd = vec!["ssh".to_string()];
@@ -910,7 +914,12 @@ impl SshProtocol {
                 dedups_bin = remote_dedups_bin
             )
         } else {
-            format!("{}\n{dedups_bin} {}", setup_env, args.join(" "), dedups_bin = remote_dedups_bin)
+            format!(
+                "{}\n{dedups_bin} {}",
+                setup_env,
+                args.join(" "),
+                dedups_bin = remote_dedups_bin
+            )
         };
 
         ssh_cmd.push(command);
@@ -1140,7 +1149,7 @@ pub fn execute_remote_command(cli: &Cli, host: &str, command: &str) -> Result<St
 }
 
 pub fn create_remote_client(options: &DedupOptions) -> Result<DedupClient> {
-    let mut client_options = DedupOptions {
+    let client_options = DedupOptions {
         directories: options.directories.clone(),
         target: options.target.clone(),
         deduplicate: options.deduplicate,

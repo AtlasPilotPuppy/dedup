@@ -65,10 +65,7 @@ pub struct Cli {
         feature = "ssh",
         clap(required_unless_present_any = ["interactive", "server_mode"])
     )]
-    #[cfg_attr(
-        not(feature = "ssh"),
-        clap(required_unless_present = "interactive")
-    )]
+    #[cfg_attr(not(feature = "ssh"), clap(required_unless_present = "interactive"))]
     pub directories: Vec<PathBuf>,
 
     /// Specifies the target directory for copying missing files or deduplication.
@@ -615,13 +612,33 @@ impl Cli {
         cli.progress = options.progress;
         cli.progress_tui = options.progress_tui;
 
-        // Convert string values to enums
-        if let Ok(sort_by) = SortCriterion::from_str(&options.sort_by) {
-            cli.sort_by = sort_by;
+        // Convert string values to enums with proper error handling
+        match SortCriterion::from_str(&options.sort_by) {
+            Ok(sort_by) => {
+                cli.sort_by = sort_by;
+            }
+            Err(e) => {
+                log::warn!(
+                    "Invalid sort criterion '{}': {}. Using default: {:?}",
+                    options.sort_by,
+                    e,
+                    cli.sort_by
+                );
+            }
         }
 
-        if let Ok(sort_order) = SortOrder::from_str(&options.sort_order) {
-            cli.sort_order = sort_order;
+        match SortOrder::from_str(&options.sort_order) {
+            Ok(sort_order) => {
+                cli.sort_order = sort_order;
+            }
+            Err(e) => {
+                log::warn!(
+                    "Invalid sort order '{}': {}. Using default: {:?}",
+                    options.sort_order,
+                    e,
+                    cli.sort_order
+                );
+            }
         }
 
         cli.raw_sizes = options.raw_sizes;

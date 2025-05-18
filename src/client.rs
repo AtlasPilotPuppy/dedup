@@ -14,17 +14,15 @@ use serde_json;
 #[cfg(feature = "ssh")]
 use std::collections::HashMap;
 #[cfg(feature = "ssh")]
-use std::net::{TcpStream, SocketAddr};
+use std::io::ErrorKind;
+#[cfg(feature = "ssh")]
+use std::net::TcpStream;
 #[cfg(feature = "ssh")]
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 #[cfg(feature = "ssh")]
 use std::thread::{self, JoinHandle};
 #[cfg(feature = "ssh")]
 use std::time::{Duration, Instant};
-#[cfg(feature = "ssh")]
-use socket2::Socket;
-#[cfg(feature = "ssh")]
-use std::io::ErrorKind;
 
 /// Maximum number of consecutive timeouts before considering connection dead
 const MAX_TIMEOUTS: u32 = 50;
@@ -87,10 +85,10 @@ impl DedupClient {
         } else {
             0
         };
-        
+
         #[cfg(feature = "proto")]
         let mut options_with_defaults = options;
-        
+
         #[cfg(feature = "proto")]
         {
             if !options_with_defaults.use_protobuf {
@@ -103,10 +101,10 @@ impl DedupClient {
                 options_with_defaults.compression_level = 3;
             }
         }
-        
+
         #[cfg(not(feature = "proto"))]
         let options_with_defaults = options;
-        
+
         Self {
             host,
             port,
@@ -188,17 +186,15 @@ impl DedupClient {
             use_protobuf,
             use_compression,
             compression_level,
-        ).with_context(|| "Failed to create protocol handler")?;
+        )
+        .with_context(|| "Failed to create protocol handler")?;
 
         let (tx, rx) = mpsc::channel();
         self.message_receiver = Some(rx);
 
-        let mut reader_protocol = create_protocol_handler(
-            stream,
-            use_protobuf,
-            use_compression,
-            compression_level,
-        ).with_context(|| "Failed to create reader protocol handler")?;
+        let mut reader_protocol =
+            create_protocol_handler(stream, use_protobuf, use_compression, compression_level)
+                .with_context(|| "Failed to create reader protocol handler")?;
 
         let verbose = self.verbose;
         let keep_alive = self.options.keep_alive;
@@ -206,9 +202,9 @@ impl DedupClient {
             if verbose >= 3 {
                 log::debug!("Starting server reader thread");
             }
-            
+
             let mut last_activity = Instant::now();
-            
+
             loop {
                 match reader_protocol.receive_message() {
                     Ok(Some(msg)) => {
@@ -216,9 +212,12 @@ impl DedupClient {
                         if verbose >= 3 {
                             log::debug!("Received message type: {:?}", msg.message_type);
                         }
-                        
+
                         // Handle keep-alive pings
-                        if keep_alive && msg.message_type == MessageType::Result && msg.payload == "ping" {
+                        if keep_alive
+                            && msg.message_type == MessageType::Result
+                            && msg.payload == "ping"
+                        {
                             if verbose >= 3 {
                                 log::debug!("Received keep-alive ping");
                             }
@@ -233,7 +232,7 @@ impl DedupClient {
                             }
                             continue;
                         }
-                        
+
                         if tx.send(msg).is_err() {
                             log::error!("Failed to send message to channel, receiver dropped");
                             break;
@@ -270,7 +269,7 @@ impl DedupClient {
                     }
                 }
             }
-            
+
             if verbose >= 3 {
                 log::debug!("Server reader thread exiting");
             }
@@ -286,7 +285,7 @@ impl DedupClient {
         } else {
             log::debug!("Connected to dedups server");
         }
-        
+
         Ok(())
     }
 
@@ -298,10 +297,15 @@ impl DedupClient {
         options: HashMap<String, String>,
     ) -> Result<()> {
         if self.state != ConnectionState::Connected {
-            return Err(anyhow!("Not connected to server. Current state: {:?}", self.state));
+            return Err(anyhow!(
+                "Not connected to server. Current state: {:?}",
+                self.state
+            ));
         }
 
-        let protocol = self.protocol.as_mut()
+        let protocol = self
+            .protocol
+            .as_mut()
             .ok_or_else(|| anyhow!("Protocol handler not initialized"))?;
 
         let cmd_msg = CommandMessage {
@@ -316,13 +320,14 @@ impl DedupClient {
 
         let cmd_json = serde_json::to_string(&cmd_msg)
             .with_context(|| format!("Failed to serialize command: {}", command))?;
-        
+
         let message = DedupMessage {
             message_type: MessageType::Command,
             payload: cmd_json,
         };
 
-        protocol.send_message(message)
+        protocol
+            .send_message(message)
             .with_context(|| format!("Failed to send command: {} {}", command, args.join(" ")))?;
 
         if self.verbose >= 3 {
@@ -343,13 +348,14 @@ impl DedupClient {
 
             let cmd_json = serde_json::to_string(&cmd_msg)
                 .with_context(|| "Failed to serialize ping command")?;
-            
+
             let message = DedupMessage {
                 message_type: MessageType::Command,
                 payload: cmd_json,
             };
 
-            protocol.send_message(message)
+            protocol
+                .send_message(message)
                 .with_context(|| "Failed to send keep-alive ping")?;
 
             if self.verbose >= 3 {
@@ -362,10 +368,15 @@ impl DedupClient {
     /// Receive the next message from the server with improved timeout handling
     pub fn receive_message(&self) -> Result<Option<DedupMessage>> {
         if self.state != ConnectionState::Connected {
-            return Err(anyhow!("Not connected to server. Current state: {:?}", self.state));
+            return Err(anyhow!(
+                "Not connected to server. Current state: {:?}",
+                self.state
+            ));
         }
 
-        let receiver = self.message_receiver.as_ref()
+        let receiver = self
+            .message_receiver
+            .as_ref()
             .ok_or_else(|| anyhow!("Message receiver not initialized"))?;
 
         match receiver.recv_timeout(DEFAULT_RECEIVE_TIMEOUT) {
@@ -383,14 +394,14 @@ impl DedupClient {
                 }
 
                 Ok(Some(msg))
-            },
+            }
             Err(RecvTimeoutError::Timeout) => Ok(None),
             Err(RecvTimeoutError::Disconnected) => {
                 if self.verbose >= 1 {
                     log::error!("Server connection closed unexpectedly");
                 }
                 Err(anyhow!("Server connection closed"))
-            },
+            }
         }
     }
 
@@ -403,7 +414,7 @@ impl DedupClient {
         if self.verbose >= 3 {
             log::debug!("Disconnecting from server");
         }
-        
+
         // Send a clean shutdown message
         if let Some(mut protocol) = self.protocol.take() {
             // Try to send a clean shutdown message and ensure it's delivered
@@ -414,9 +425,9 @@ impl DedupClient {
                 message_type: MessageType::Result,
                 payload: "client_disconnect".to_string(),
             };
-            
+
             let _ = protocol.send_message(disconnect_msg);
-            
+
             // Small sleep to ensure the message gets delivered
             std::thread::sleep(Duration::from_millis(50));
         }
@@ -426,12 +437,12 @@ impl DedupClient {
             if self.verbose >= 3 {
                 log::debug!("Waiting for reader thread to terminate");
             }
-            
+
             let timeout = Duration::from_millis(500);
             let thread_handle = std::thread::spawn(move || {
                 let _ = thread.join();
             });
-            
+
             let start = std::time::Instant::now();
             while start.elapsed() < timeout {
                 if thread_handle.is_finished() {
@@ -439,7 +450,7 @@ impl DedupClient {
                 }
                 std::thread::sleep(Duration::from_millis(10));
             }
-            
+
             if !thread_handle.is_finished() {
                 if self.verbose >= 1 {
                     log::warn!("Reader thread did not terminate within timeout");
@@ -459,7 +470,7 @@ impl DedupClient {
         } else {
             log::debug!("Disconnected from dedups server");
         }
-        
+
         Ok(())
     }
 
@@ -471,7 +482,10 @@ impl DedupClient {
         options: HashMap<String, String>,
     ) -> Result<String> {
         if self.state != ConnectionState::Connected {
-            return Err(anyhow!("Not connected to server. Current state: {:?}", self.state));
+            return Err(anyhow!(
+                "Not connected to server. Current state: {:?}",
+                self.state
+            ));
         }
 
         if self.verbose >= 2 {
@@ -484,19 +498,30 @@ impl DedupClient {
             if self.verbose >= 2 {
                 log::info!("Preparing internal handshake with protocol information");
             }
-            
+
             // Add USE_TUNNEL_API flag for handshake (this is important)
             command_options.insert("USE_TUNNEL_API".to_string(), "true".to_string());
-            
+
             // Add protocol details
             #[cfg(feature = "proto")]
             {
-                command_options.insert("protocol_type".to_string(), 
-                    if self.options.use_protobuf { "protobuf" } else { "json" }.to_string());
-                command_options.insert("compression".to_string(), 
-                    self.options.use_compression.to_string());
-                command_options.insert("compression_level".to_string(), 
-                    self.options.compression_level.to_string());
+                command_options.insert(
+                    "protocol_type".to_string(),
+                    if self.options.use_protobuf {
+                        "protobuf"
+                    } else {
+                        "json"
+                    }
+                    .to_string(),
+                );
+                command_options.insert(
+                    "compression".to_string(),
+                    self.options.use_compression.to_string(),
+                );
+                command_options.insert(
+                    "compression_level".to_string(),
+                    self.options.compression_level.to_string(),
+                );
             }
             #[cfg(not(feature = "proto"))]
             {
@@ -504,12 +529,12 @@ impl DedupClient {
                 command_options.insert("compression".to_string(), "false".to_string());
                 command_options.insert("compression_level".to_string(), "0".to_string());
             }
-            
+
             if self.verbose >= 3 {
                 log::debug!("Handshake options: {:?}", command_options);
             }
         }
-        
+
         self.send_command(command.clone(), args.clone(), command_options)
             .with_context(|| format!("Failed to send command: {} {}", command, args.join(" ")))?;
 
@@ -520,9 +545,9 @@ impl DedupClient {
 
         // For handshake, use a longer timeout to ensure it works reliably in tests
         let command_timeout = if command == "internal_handshake" {
-            Duration::from_secs(10)  // Increased from 5s to 10s for reliability
+            Duration::from_secs(10) // Increased from 5s to 10s for reliability
         } else {
-            Duration::from_secs(10)  // Reduced from 30s to 10s
+            Duration::from_secs(10) // Reduced from 30s to 10s
         };
 
         loop {
@@ -544,45 +569,67 @@ impl DedupClient {
                             if self.verbose >= 3 {
                                 log::debug!("Received final result from server");
                             }
-                            
+
                             // For handshake, verify protocol match
                             if command == "internal_handshake" {
                                 match serde_json::from_str::<serde_json::Value>(&msg.payload) {
                                     Ok(handshake_resp) => {
                                         // Verify status first
-                                        let status = handshake_resp.get("status")
+                                        let status = handshake_resp
+                                            .get("status")
                                             .and_then(|v| v.as_str())
-                                            .ok_or_else(|| anyhow!("Handshake response missing status"))?;
-                                        
+                                            .ok_or_else(|| {
+                                                anyhow!("Handshake response missing status")
+                                            })?;
+
                                         if status != "handshake_ack" {
-                                            return Err(anyhow!("Unexpected handshake status: {}", status));
+                                            return Err(anyhow!(
+                                                "Unexpected handshake status: {}",
+                                                status
+                                            ));
                                         }
-                                        
+
                                         // Verify protocol details
-                                        let protocol = handshake_resp.get("protocol")
-                                            .ok_or_else(|| anyhow!("Handshake response missing protocol details"))?;
-                                        
-                                        let server_proto_type = protocol.get("type")
+                                        let protocol =
+                                            handshake_resp.get("protocol").ok_or_else(|| {
+                                                anyhow!(
+                                                    "Handshake response missing protocol details"
+                                                )
+                                            })?;
+
+                                        let server_proto_type = protocol
+                                            .get("type")
                                             .and_then(|v| v.as_str())
-                                            .ok_or_else(|| anyhow!("Protocol type missing in handshake response"))?;
-                                        
+                                            .ok_or_else(|| {
+                                                anyhow!(
+                                                    "Protocol type missing in handshake response"
+                                                )
+                                            })?;
+
                                         #[cfg(feature = "proto")]
                                         {
-                                            let client_proto_type = if self.options.use_protobuf { "protobuf" } else { "json" };
-                                            
+                                            let client_proto_type = if self.options.use_protobuf {
+                                                "protobuf"
+                                            } else {
+                                                "json"
+                                            };
+
                                             if server_proto_type != client_proto_type {
                                                 return Err(anyhow!("Protocol mismatch: client using {}, server using {}", 
                                                     client_proto_type, server_proto_type));
                                             }
-                                            
+
                                             // Verify compression settings match
                                             let server_compression = protocol.get("compression")
                                                 .and_then(|v| v.as_bool())
                                                 .ok_or_else(|| anyhow!("Compression setting missing in handshake response"))?;
-                                            
+
                                             if server_compression != self.options.use_compression {
-                                                return Err(anyhow!("Compression mismatch: client={}, server={}", 
-                                                    self.options.use_compression, server_compression));
+                                                return Err(anyhow!(
+                                                    "Compression mismatch: client={}, server={}",
+                                                    self.options.use_compression,
+                                                    server_compression
+                                                ));
                                             }
                                         }
                                         #[cfg(not(feature = "proto"))]
@@ -592,21 +639,29 @@ impl DedupClient {
                                                     server_proto_type));
                                             }
                                         }
-                                        
+
                                         if self.verbose >= 2 {
-                                            log::info!("Protocol match confirmed: {}", server_proto_type);
+                                            log::info!(
+                                                "Protocol match confirmed: {}",
+                                                server_proto_type
+                                            );
                                         }
                                     }
                                     Err(e) => {
-                                        return Err(anyhow!("Failed to parse handshake response: {} (payload: {})", 
-                                            e, msg.payload));
+                                        return Err(anyhow!(
+                                            "Failed to parse handshake response: {} (payload: {})",
+                                            e,
+                                            msg.payload
+                                        ));
                                     }
                                 }
                             }
-                            
+
                             // For help command, parse and format the response
                             if command == "dedups" && args.contains(&"--help".to_string()) {
-                                if let Ok(help_json) = serde_json::from_str::<serde_json::Value>(&msg.payload) {
+                                if let Ok(help_json) =
+                                    serde_json::from_str::<serde_json::Value>(&msg.payload)
+                                {
                                     if let Some(message) = help_json.get("message") {
                                         output.push_str(message.as_str().unwrap_or(&msg.payload));
                                     } else {
@@ -618,28 +673,39 @@ impl DedupClient {
                             } else {
                                 output.push_str(&msg.payload);
                             }
-                            
+
                             return Ok(output);
                         }
                         MessageType::Error => {
                             let error: ErrorMessage = serde_json::from_str(&msg.payload)
-                                .with_context(|| format!("Failed to parse error message: {}", msg.payload))?;
-                            
+                                .with_context(|| {
+                                    format!("Failed to parse error message: {}", msg.payload)
+                                })?;
+
                             if self.verbose >= 1 {
-                                log::error!("Received error from server: {} (code {})", error.message, error.code);
+                                log::error!(
+                                    "Received error from server: {} (code {})",
+                                    error.message,
+                                    error.code
+                                );
                             }
-                            
-                            return Err(anyhow!("Server error (code {}): {}", error.code, error.message));
+
+                            return Err(anyhow!(
+                                "Server error (code {}): {}",
+                                error.code,
+                                error.message
+                            ));
                         }
                         MessageType::Progress => {
-                            let progress: ProgressMessage = match serde_json::from_str(&msg.payload) {
+                            let progress: ProgressMessage = match serde_json::from_str(&msg.payload)
+                            {
                                 Ok(p) => p,
                                 Err(e) => {
                                     log::warn!("Failed to parse progress message: {}", e);
                                     continue;
                                 }
                             };
-                            
+
                             if self.verbose >= 2 {
                                 log::info!(
                                     "Progress: {}% - {}",
@@ -647,12 +713,12 @@ impl DedupClient {
                                     progress.status_message
                                 );
                             }
-                            
+
                             output.push_str(&format!(
                                 "Progress: {}% - {}\n",
                                 progress.percent_complete, progress.status_message
                             ));
-                            
+
                             timeout_count = 0;
                         }
                         _ => {
@@ -666,26 +732,31 @@ impl DedupClient {
                 }
                 Ok(None) => {
                     timeout_count += 1;
-                    
+
                     if timeout_count >= MAX_TIMEOUTS {
                         return Err(anyhow!("Command timed out after {} attempts", MAX_TIMEOUTS));
                     }
-                    
+
                     if start_time.elapsed() >= command_timeout {
-                        return Err(anyhow!("Command execution exceeded timeout of {} seconds", command_timeout.as_secs()));
+                        return Err(anyhow!(
+                            "Command execution exceeded timeout of {} seconds",
+                            command_timeout.as_secs()
+                        ));
                     }
-                    
-                    thread::sleep(Duration::from_millis(10));  // Reduced from 100ms to 10ms
+
+                    thread::sleep(Duration::from_millis(10)); // Reduced from 100ms to 10ms
                 }
                 Err(e) => {
                     // Check if it's a temporary error
                     if let Some(io_err) = e.downcast_ref::<std::io::Error>() {
                         match io_err.kind() {
-                            ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::ResourceBusy => {
+                            ErrorKind::WouldBlock
+                            | ErrorKind::TimedOut
+                            | ErrorKind::ResourceBusy => {
                                 if self.verbose >= 3 {
                                     log::debug!("Temporary error reading from server: {}", io_err);
                                 }
-                                thread::sleep(Duration::from_millis(10));  // Reduced from 100ms to 10ms
+                                thread::sleep(Duration::from_millis(10)); // Reduced from 100ms to 10ms
                                 continue;
                             }
                             ErrorKind::ConnectionReset | ErrorKind::BrokenPipe => {
