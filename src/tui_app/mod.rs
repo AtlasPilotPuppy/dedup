@@ -95,6 +95,8 @@ pub struct AppState {
     pub selected_display_list_index: usize,
     pub selected_file_index_in_set: usize,
     pub selected_job_index: usize,
+    pub selected_destination_index: usize,  // New field for destination browser
+    pub destination_path: Option<PathBuf>,  // Current path for destination browsing
     pub jobs: Vec<Job>,
     pub active_panel: ActivePanel,
     pub default_selection_strategy: SelectionStrategy, // Store parsed strategy
@@ -173,6 +175,8 @@ impl App {
             selected_display_list_index: 0,
             selected_file_index_in_set: 0,
             selected_job_index: 0,
+            selected_destination_index: 0,  // New field for destination browser
+            destination_path: None,  // Current path for destination browsing
             jobs: Vec::new(),
             active_panel: ActivePanel::Sets,
             default_selection_strategy: strategy,
@@ -308,6 +312,14 @@ impl App {
         app.state.is_copy_missing_mode = true;
         app.state.status_message =
             Some("Copy Missing Mode - Preparing to scan for files to copy...".to_string());
+            
+        // Initialize destination to the target directory if specified
+        if let Some(target) = &options.target {
+            app.state.destination_path = Some(target.clone());
+        } else if !options.directories.is_empty() && options.directories.len() > 1 {
+            // Use the second directory as destination by default in copy missing mode
+            app.state.destination_path = Some(options.directories[1].clone());
+        }
 
         app
     }
@@ -863,8 +875,14 @@ impl App {
                 self.set_action_for_selected_file(ActionType::Ignore);
             }
             KeyCode::Char('c') => {
-                self.initiate_copy_action();
-            }
+                if self.state.is_copy_missing_mode {
+                    // In copy missing mode, 'C' means copy the selected file to destination
+                    self.initiate_copy_missing_action();
+                } else {
+                    // Regular mode - initiate copy action (existing implementation)
+                    self.initiate_copy_action();
+                }
+            },
             KeyCode::Up => match self.state.active_panel {
                 ActivePanel::Sets => self.select_previous_set(),
                 ActivePanel::Files => self.select_previous_file_in_set(),
@@ -1901,6 +1919,61 @@ impl App {
         self.rebuild_display_list(); // This will also validate selections
         self.state.sort_settings_changed = false; // Reset flag
         self.state.status_message = Some("Sort settings applied to current view.".to_string());
+    }
+
+    // New method for processing selected files in copy missing mode
+    fn initiate_copy_missing_action(&mut self) {
+        if self.state.active_panel == ActivePanel::Sets {
+            // Get the selected item from display list
+            if let Some(item) = self.state
+                .display_list
+                .get(self.state.selected_display_list_index)
+            {
+                match item {
+                    DisplayListItem::SetEntry { 
+                        original_group_index, 
+                        original_set_index_in_group,
+                        .. 
+                    } => {
+                        // Get the actual file from the grouped data
+                        if let Some(group) = self.state.grouped_data.get(*original_group_index) {
+                            if let Some(set) = group.sets.get(*original_set_index_in_group) {
+                                if let Some(file) = set.files.first() {  // The first file is the one missing
+                                    if let Some(dest_path) = &self.state.destination_path {
+                                        // Create a job to copy the file to the destination
+                                        self.state.jobs.push(Job {
+                                            action: ActionType::Copy(dest_path.clone()),
+                                            file_info: file.clone(),
+                                        });
+                                        
+                                        self.state.status_message = Some(format!(
+                                            "Added job: Copy {} to {}",
+                                            file.path.display(),
+                                            dest_path.display()
+                                        ));
+                                        
+                                        // Switch to jobs panel to show the new job
+                                        self.state.active_panel = ActivePanel::Jobs;
+                                        self.state.selected_job_index = self.state.jobs.len() - 1;
+                                    } else {
+                                        // No destination selected yet
+                                        self.state.status_message = Some(
+                                            "Please select a destination directory first".to_string()
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    DisplayListItem::Folder { .. } => {
+                        // Folders cannot be copied directly, must select a file
+                        self.state.status_message = Some(
+                            "Please select a specific file to copy".to_string()
+                        );
+                    }
+                }
+            }
+        }
     }
 }
 

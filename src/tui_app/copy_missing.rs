@@ -244,7 +244,7 @@ pub fn ui_copy_missing(frame: &mut Frame, app: &mut App) {
 
     // Right Panel: Jobs
     let right_title = format!(
-        "Jobs ({}) (Ctrl+E: Execute, x: Remove)",
+        "Jobs ({}) (Ctrl+E: Execute, C: Copy)",
         app.state.jobs.len()
     );
     let right_block = Block::default()
@@ -337,15 +337,64 @@ pub fn ui_copy_missing(frame: &mut Frame, app: &mut App) {
     }
     frame.render_stateful_widget(missing_files_list, main_chunks[0], &mut sets_list_state);
 
-    // Middle Panel - Destination Browser (just a placeholder for now)
-    let destination_list = List::new(vec![
-        ListItem::new("(Not implemented yet)"),
-        ListItem::new("Browse destination directory here"),
-    ])
-    .block(middle_block)
-    .highlight_style(Style::default().bg(Color::DarkGray));
+    // Middle Panel - Destination Browser
+    // Create the destination items list
+    let destination_items: Vec<ListItem> = if let Some(dest_path) = &app.state.destination_path {
+        // Get directory entries from the destination directory
+        let entries = match std::fs::read_dir(dest_path) {
+            Ok(entries) => entries
+                .filter_map(Result::ok)
+                .map(|entry| {
+                    let path = entry.path();
+                    let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                    let is_dir = path.is_dir();
+                    let prefix = if is_dir { "[Dir] " } else { "[File] " };
+                    
+                    // Format file size if it's a file
+                    let size_str = if !is_dir {
+                        if let Ok(metadata) = std::fs::metadata(&path) {
+                            format!(" ({})", format_size(metadata.len(), DECIMAL))
+                        } else {
+                            String::new()
+                        }
+                    } else {
+                        String::new()
+                    };
+                    
+                    ListItem::new(format!("{}{}{}", prefix, name, size_str))
+                })
+                .collect::<Vec<_>>(),
+            Err(_) => vec![ListItem::new("Error reading destination directory")],
+        };
+        
+        if entries.is_empty() {
+            vec![ListItem::new("(Empty directory)")]
+        } else {
+            entries
+        }
+    } else {
+        vec![
+            ListItem::new("No destination directory selected."),
+            ListItem::new("Press 'C' to select a destination for copy.")
+        ]
+    };
 
-    frame.render_widget(destination_list, main_chunks[1]);
+    // Save whether the list is empty for later use
+    let is_dest_list_empty = destination_items.is_empty();
+
+    // Create the list widget with the items
+    let destination_list = List::new(destination_items)
+        .block(middle_block)
+        .highlight_style(Style::default().bg(Color::DarkGray))
+        .highlight_symbol(">> ");
+    
+    // Create state for the list
+    let mut dest_list_state = ListState::default();
+    if !is_dest_list_empty {
+        dest_list_state.select(Some(app.state.selected_destination_index));
+    }
+    
+    frame.render_stateful_widget(destination_list, main_chunks[1], &mut dest_list_state);
 
     // Right Panel: Jobs
     let job_items: Vec<ListItem> = app
@@ -452,7 +501,7 @@ pub fn ui_copy_missing(frame: &mut Frame, app: &mut App) {
     }
 
     // Draw help bar at the very bottom
-    let help = "Tab: Switch Panel | Space: Toggle Expand | s: Select Files | Ctrl+E: Execute Copy | Ctrl+D: Dry Run Toggle";
+    let help = "Tab: Switch Panel | Space: Toggle Expand | C: Copy Selected File | Ctrl+E: Execute Copy | Ctrl+D: Dry Run Toggle";
     let help_bar = ratatui::widgets::Paragraph::new(help)
         .style(Style::default().fg(Color::DarkGray))
         .alignment(Alignment::Center);
