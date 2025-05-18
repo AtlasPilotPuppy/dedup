@@ -23,6 +23,13 @@ pub mod audio_fingerprint;
 // Add video fingerprinting module
 pub mod video_fingerprint;
 
+// Add SSH utilities module (feature-gated)
+#[cfg(feature = "ssh")]
+pub mod ssh_utils;
+
+// Add unified options module
+pub mod options;
+
 // To make Cli accessible, you'll need to move its definition from main.rs to lib.rs
 // or re-export it from main.rs if main.rs uses this lib.rs as a library.
 // For a typical binary project that also wants to expose a library for testing/other uses:
@@ -45,6 +52,7 @@ use std::str::FromStr;
 use crate::config::DedupConfig;
 use crate::file_utils::{SortCriterion, SortOrder};
 use crate::media_dedup::MediaDedupOptions;
+use crate::options::DedupOptions;
 
 #[derive(Parser, Debug, Clone)]
 #[clap(author, version, about, long_about = None)]
@@ -52,7 +60,12 @@ pub struct Cli {
     /// The directories to scan for duplicate or missing files.
     /// When multiple directories are specified, the last one is treated as the target
     /// for copying missing files, unless --target is specified.
-    #[clap(required_unless_present = "interactive")]
+    /// Supports SSH paths in the format ssh:host:/path, ssh:user@host:/path, or ssh:user@host:port:/path.
+    #[cfg_attr(
+        feature = "ssh",
+        clap(required_unless_present_any = ["interactive", "server_mode"])
+    )]
+    #[cfg_attr(not(feature = "ssh"), clap(required_unless_present = "interactive"))]
     pub directories: Vec<PathBuf>,
 
     /// Specifies the target directory for copying missing files or deduplication.
@@ -100,6 +113,10 @@ pub struct Cli {
     /// Output format for the duplicates file.
     #[clap(short, long, value_parser = clap::builder::PossibleValuesParser::new(["json", "toml"]), default_value = "json", help = "Format for the output file [json|toml]")]
     pub format: String,
+
+    /// Output results in JSON format to stdout
+    #[clap(long, help = "Output results in JSON format to stdout")]
+    pub json: bool,
 
     /// Hashing algorithm to use for comparing files.
     #[clap(short, long, value_parser = clap::builder::PossibleValuesParser::new(["md5", "sha1", "sha256", "blake3", "xxhash", "gxhash", "fnv1a", "crc32"]), default_value = "xxhash", help = "Hashing algorithm [md5|sha1|sha256|blake3|xxhash|gxhash|fnv1a|crc32]")]
@@ -222,6 +239,113 @@ pub struct Cli {
     /// Media deduplication options (will be populated from above arguments)
     #[clap(skip)]
     pub media_dedup_options: MediaDedupOptions,
+
+    /// Allow installation of dedups on remote systems if not found
+    #[cfg(feature = "ssh")]
+    #[clap(
+        long,
+        default_value_t = true,
+        help = "Allow installation of dedups on remote systems"
+    )]
+    pub allow_remote_install: bool,
+
+    /// SSH specific options for remote connections (comma-separated)
+    #[cfg(feature = "ssh")]
+    #[clap(
+        long,
+        help = "SSH options to pass to the ssh command (comma-separated)"
+    )]
+    pub ssh_options: Vec<String>,
+
+    /// Rsync specific options for file transfers (comma-separated)
+    #[cfg(feature = "ssh")]
+    #[clap(
+        long,
+        help = "Rsync options to pass to the rsync command (comma-separated)"
+    )]
+    pub rsync_options: Vec<String>,
+
+    /// Whether to attempt to use the remote dedups (if available) for operations
+    #[cfg(feature = "ssh")]
+    #[clap(
+        long,
+        default_value_t = true,
+        help = "Use remote dedups instance if available"
+    )]
+    pub use_remote_dedups: bool,
+
+    /// Whether to use sudo for remote installation (if available)
+    #[cfg(feature = "ssh")]
+    #[clap(
+        long,
+        help = "Use sudo for remote installation (will prompt for password)"
+    )]
+    pub use_sudo: bool,
+
+    /// Whether to use SSH tunneling for JSON streaming (more reliable than plain SSH)
+    #[cfg(feature = "ssh")]
+    #[clap(
+        long,
+        default_value_t = true,
+        help = "Use SSH tunneling for JSON streaming (more reliable)"
+    )]
+    pub use_ssh_tunnel: bool,
+
+    /// Use tunnel API mode for communication (recommended for better parsing)
+    #[cfg(feature = "ssh")]
+    #[clap(
+        long,
+        default_value_t = true,
+        help = "Use dedicated API tunnel for communication (avoids stdout parsing issues)"
+    )]
+    pub tunnel_api_mode: bool,
+
+    /// Whether to use keep-alive for connections
+    #[cfg(feature = "ssh")]
+    #[clap(
+        long,
+        default_value_t = true,
+        help = "Use keep-alive for connections to maintain server state"
+    )]
+    pub keep_alive: bool,
+
+    /// Run in server mode to listen for commands over a socket/stdin
+    #[cfg(feature = "ssh")]
+    #[clap(long, help = "Run in server mode on the specified port")]
+    pub server_mode: bool,
+
+    /// Port to use for server mode
+    #[cfg(feature = "ssh")]
+    #[clap(
+        long,
+        default_value = "0",
+        help = "Port to use for server mode (0 = auto)"
+    )]
+    pub port: u16,
+
+    /// Use Protobuf for protocol communication (instead of JSON)
+    #[cfg(feature = "proto")]
+    #[clap(
+        long,
+        help = "Use Protobuf for network communication (default in tunnel mode)",
+        default_value_t = true,
+        conflicts_with = "json"
+    )]
+    pub use_protobuf: bool,
+
+    /// Use ZSTD compression for network communication
+    #[cfg(feature = "proto")]
+    #[clap(
+        long,
+        help = "Use ZSTD compression for network communication (default in tunnel mode)",
+        default_value_t = true
+    )]
+    pub use_compression: bool,
+
+    /// ZSTD compression level (1-22, higher = more compression but slower)
+    #[cfg(feature = "proto")]
+    #[clap(long, default_value = "3", help = "ZSTD compression level (1-22)")]
+    pub compression_level: u32,
 }
 
 impl Cli {
@@ -284,6 +408,13 @@ impl Cli {
             self.format = config.format;
         }
 
+        // Apply JSON setting from config if not explicitly set on command line
+        // Note: Since json is a bool, we need to check if the config value is true
+        // and the CLI value is false (default)
+        if !self.json && config.json {
+            self.json = config.json;
+        }
+
         if !self.progress && config.progress {
             self.progress = config.progress;
         }
@@ -337,6 +468,41 @@ impl Cli {
             self.media_dedup_options = config.media_dedup;
         }
 
+        // Apply SSH options from config
+        #[cfg(feature = "ssh")]
+        {
+            // Only apply if not explicitly set on CLI
+            if self.ssh_options.is_empty() && !config.ssh.ssh_options.is_empty() {
+                self.ssh_options = config.ssh.ssh_options.clone();
+            }
+
+            if self.rsync_options.is_empty() && !config.ssh.rsync_options.is_empty() {
+                self.rsync_options = config.ssh.rsync_options.clone();
+            }
+
+            // Boolean options should use config value if not explicitly changed
+            if self.allow_remote_install && !config.ssh.allow_remote_install {
+                // If config is false but CLI default is true, use config value
+                self.allow_remote_install = config.ssh.allow_remote_install;
+            }
+
+            if self.use_remote_dedups && !config.ssh.use_remote_dedups {
+                // If config is false but CLI default is true, use config value
+                self.use_remote_dedups = config.ssh.use_remote_dedups;
+            }
+
+            if self.use_ssh_tunnel && !config.ssh.use_ssh_tunnel {
+                // If config is false but CLI default is true, use config value
+                self.use_ssh_tunnel = config.ssh.use_ssh_tunnel;
+            }
+        }
+
+        // Apply protocol options from config
+        #[cfg(feature = "proto")]
+        {
+            // TODO: Add protocol options to config file
+        }
+
         // Ensure we always have defaults for required fields that might be empty
         if self.algorithm.is_empty() {
             self.algorithm = "xxhash".to_string();
@@ -350,7 +516,181 @@ impl Cli {
             self.mode = "newest_modified".to_string();
         }
     }
+
+    /// Convert Cli to DedupOptions
+    pub fn to_options(&self) -> DedupOptions {
+        DedupOptions {
+            directories: self.directories.clone(),
+            target: self.target.clone(),
+            deduplicate: self.deduplicate,
+            delete: self.delete,
+            move_to: self.move_to.clone(),
+            log: self.log,
+            log_file: self.log_file.clone(),
+            output: self.output.clone(),
+            format: self.format.clone(),
+            json: self.json,
+            algorithm: self.algorithm.clone(),
+            parallel: self.parallel,
+            mode: self.mode.clone(),
+            interactive: self.interactive,
+            verbose: self.verbose,
+            include: self.include.clone(),
+            exclude: self.exclude.clone(),
+            filter_from: self.filter_from.clone(),
+            progress: self.progress,
+            progress_tui: self.progress_tui,
+            sort_by: self.sort_by.to_string(),
+            sort_order: self.sort_order.to_string(),
+            raw_sizes: self.raw_sizes,
+            config_file: self.config_file.clone(),
+            dry_run: self.dry_run,
+            cache_location: self.cache_location.clone(),
+            fast_mode: self.fast_mode,
+
+            // Media options
+            media_mode: self.media_mode,
+            media_resolution: self.media_resolution.clone(),
+            media_formats: self.media_formats.clone(),
+            media_similarity: self.media_similarity,
+            media_dedup_options: self.media_dedup_options.clone(),
+
+            // SSH options
+            #[cfg(feature = "ssh")]
+            allow_remote_install: self.allow_remote_install,
+            #[cfg(feature = "ssh")]
+            ssh_options: self.ssh_options.clone(),
+            #[cfg(feature = "ssh")]
+            rsync_options: self.rsync_options.clone(),
+            #[cfg(feature = "ssh")]
+            use_remote_dedups: self.use_remote_dedups,
+            #[cfg(feature = "ssh")]
+            use_sudo: self.use_sudo,
+            #[cfg(feature = "ssh")]
+            use_ssh_tunnel: self.use_ssh_tunnel,
+            #[cfg(feature = "ssh")]
+            server_mode: self.server_mode,
+            #[cfg(feature = "ssh")]
+            port: self.port,
+            #[cfg(feature = "ssh")]
+            tunnel_api_mode: self.tunnel_api_mode,
+            #[cfg(feature = "ssh")]
+            keep_alive: self.keep_alive,
+
+            // Protocol options
+            #[cfg(feature = "proto")]
+            use_protobuf: self.use_protobuf,
+            #[cfg(feature = "proto")]
+            use_compression: self.use_compression,
+            #[cfg(feature = "proto")]
+            compression_level: self.compression_level,
+        }
+    }
+
+    /// Create a new Cli instance from DedupOptions
+    pub fn from_options(options: &DedupOptions) -> Self {
+        let mut cli = Self::parse();
+
+        cli.directories = options.directories.clone();
+        cli.target = options.target.clone();
+        cli.deduplicate = options.deduplicate;
+        cli.delete = options.delete;
+        cli.move_to = options.move_to.clone();
+        cli.log = options.log;
+        cli.log_file = options.log_file.clone();
+        cli.output = options.output.clone();
+        cli.format = options.format.clone();
+        cli.json = options.json;
+        cli.algorithm = options.algorithm.clone();
+        cli.parallel = options.parallel;
+        cli.mode = options.mode.clone();
+        cli.interactive = options.interactive;
+        cli.verbose = options.verbose;
+        cli.include = options.include.clone();
+        cli.exclude = options.exclude.clone();
+        cli.filter_from = options.filter_from.clone();
+        cli.progress = options.progress;
+        cli.progress_tui = options.progress_tui;
+
+        // Convert string values to enums with proper error handling
+        match SortCriterion::from_str(&options.sort_by) {
+            Ok(sort_by) => {
+                cli.sort_by = sort_by;
+            }
+            Err(e) => {
+                log::warn!(
+                    "Invalid sort criterion '{}': {}. Using default: {:?}",
+                    options.sort_by,
+                    e,
+                    cli.sort_by
+                );
+            }
+        }
+
+        match SortOrder::from_str(&options.sort_order) {
+            Ok(sort_order) => {
+                cli.sort_order = sort_order;
+            }
+            Err(e) => {
+                log::warn!(
+                    "Invalid sort order '{}': {}. Using default: {:?}",
+                    options.sort_order,
+                    e,
+                    cli.sort_order
+                );
+            }
+        }
+
+        cli.raw_sizes = options.raw_sizes;
+        cli.config_file = options.config_file.clone();
+        cli.dry_run = options.dry_run;
+        cli.cache_location = options.cache_location.clone();
+        cli.fast_mode = options.fast_mode;
+
+        // Media options
+        cli.media_mode = options.media_mode;
+        cli.media_resolution = options.media_resolution.clone();
+        cli.media_formats = options.media_formats.clone();
+        cli.media_similarity = options.media_similarity;
+        cli.media_dedup_options = options.media_dedup_options.clone();
+
+        // SSH options
+        #[cfg(feature = "ssh")]
+        {
+            cli.allow_remote_install = options.allow_remote_install;
+            cli.ssh_options = options.ssh_options.clone();
+            cli.rsync_options = options.rsync_options.clone();
+            cli.use_remote_dedups = options.use_remote_dedups;
+            cli.use_sudo = options.use_sudo;
+            cli.use_ssh_tunnel = options.use_ssh_tunnel;
+            cli.server_mode = options.server_mode;
+            cli.port = options.port;
+            cli.tunnel_api_mode = options.tunnel_api_mode;
+            cli.keep_alive = options.keep_alive;
+        }
+
+        // Protocol options
+        #[cfg(feature = "proto")]
+        {
+            cli.use_protobuf = options.use_protobuf;
+            cli.use_compression = options.use_compression;
+            cli.compression_level = options.compression_level;
+        }
+
+        cli
+    }
 }
+
+// Add the new protocol-related modules conditionally when SSH feature is enabled
+#[cfg(feature = "ssh")]
+pub mod client;
+#[cfg(feature = "ssh")]
+pub mod protocol;
+#[cfg(feature = "ssh")]
+pub mod server;
+
+// Export the primary types
+pub use config::DedupConfig as Config;
 
 // If your Cli struct is already in main.rs and you want to keep it there for now (less ideal for testing library parts),
 // you might need to adjust your integration tests to not depend on Cli directly if it's not easily importable.
@@ -370,3 +710,11 @@ impl Cli {
 // then main.rs would use `use dedup::Cli;` (if Cli is made public in lib.rs).
 
 // Simplest path for now: Define Cli in a new module within the library, e.g. `
+
+#[cfg(test)]
+mod tests {
+    #[cfg(feature = "ssh")]
+    mod ssh_tests;
+}
+// No need to re-export DedupOptions since it's already imported
+// pub use options::DedupOptions;

@@ -1,0 +1,101 @@
+#!/bin/bash
+
+# Mock dedups implementation for testing
+# This script simulates the basic behavior of dedups for SSH integration tests
+
+VERSION="0.1.0-test"
+
+# Function to output progress updates
+send_progress() {
+    local msg="$1"
+    echo "PROGRESS: $msg" >&2
+}
+
+# Function to output JSON for file info
+output_file_info() {
+    cat << EOF
+{
+    "files": [
+        {
+            "path": "/test/file1.jpg",
+            "size": 1024,
+            "hash": "abc123",
+            "modified_at": "2024-02-20T12:00:00Z",
+            "created_at": "2024-02-20T11:00:00Z"
+        },
+        {
+            "path": "/test/file2.jpg",
+            "size": 1024,
+            "hash": "abc123",
+            "modified_at": "2024-02-20T13:00:00Z",
+            "created_at": "2024-02-20T11:00:00Z"
+        }
+    ]
+}
+EOF
+}
+
+# Parse command line arguments
+MEDIA_MODE=false
+SCAN_ONLY=false
+JSON_OUTPUT=false
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --version)
+            echo "dedups v${VERSION}"
+            exit 0
+            ;;
+        --media-mode)
+            MEDIA_MODE=true
+            shift
+            ;;
+        --dry-run)
+            SCAN_ONLY=true
+            shift
+            ;;
+        --json)
+            JSON_OUTPUT=true
+            shift
+            ;;
+        *)
+            # If it starts with -- it's an option, otherwise it's a directory
+            if [[ $1 == --* ]]; then
+                shift
+            else
+                DIRECTORY=$1
+                shift
+            fi
+            ;;
+    esac
+done
+
+# Simulate scanning process
+if [ -n "$DIRECTORY" ]; then
+    send_progress "Starting scan of directory: $DIRECTORY"
+    send_progress "Found 10 files to process"
+    
+    # Simulate work with progress updates
+    for i in {1..10}; do
+        sleep 1
+        send_progress "Processing file $i of 10"
+    done
+    
+    if [ "$JSON_OUTPUT" = true ]; then
+        output_file_info
+    else
+        echo "Scan complete. Found 2 duplicate files."
+    fi
+    
+    if [ "$MEDIA_MODE" = true ]; then
+        send_progress "Processing media files..."
+        sleep 2
+        send_progress "Media processing complete"
+    fi
+    
+    exit 0
+fi
+
+# If no valid command was found
+echo "Usage: dedups [OPTIONS] <DIRECTORY>"
+exit 1 

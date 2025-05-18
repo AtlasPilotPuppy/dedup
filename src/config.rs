@@ -7,6 +7,7 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use crate::media_dedup::MediaDedupOptions;
+use crate::options::DedupOptions;
 
 // For tests only - enable with test_mode feature
 #[cfg(feature = "test_mode")]
@@ -41,6 +42,10 @@ pub struct DedupConfig {
     #[serde(default = "default_format")]
     pub format: String,
 
+    /// Whether to output results in JSON format to stdout
+    #[serde(default)]
+    pub json: bool,
+
     /// Whether to show progress information during scanning/hashing
     #[serde(default)]
     pub progress: bool,
@@ -72,6 +77,70 @@ pub struct DedupConfig {
     /// Media deduplication options
     #[serde(default)]
     pub media_dedup: MediaDedupOptions,
+
+    /// SSH remote options
+    #[cfg(feature = "ssh")]
+    #[serde(default)]
+    pub ssh: SshConfig,
+
+    /// Protocol options
+    #[cfg(feature = "proto")]
+    #[serde(default)]
+    pub protocol: ProtocolConfig,
+}
+
+/// Configuration for SSH remote operations
+#[cfg(feature = "ssh")]
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SshConfig {
+    /// Allow installation of dedups on remote systems
+    #[serde(default = "default_allow_remote_install")]
+    pub allow_remote_install: bool,
+
+    /// Whether to use remote dedups if available
+    #[serde(default = "default_use_remote_dedups")]
+    pub use_remote_dedups: bool,
+
+    /// Whether to use sudo for installation (if available)
+    #[serde(default = "default_use_sudo")]
+    pub use_sudo: bool,
+
+    /// Whether to use SSH tunneling for reliable JSON streaming
+    #[serde(default = "default_use_ssh_tunnel")]
+    pub use_ssh_tunnel: bool,
+
+    /// Whether to use tunnel API mode for dedups communication
+    #[serde(default = "default_tunnel_api_mode")]
+    pub tunnel_api_mode: bool,
+
+    /// Whether to use keep-alive for connections
+    #[serde(default = "default_keep_alive")]
+    pub keep_alive: bool,
+
+    /// Default SSH options
+    #[serde(default)]
+    pub ssh_options: Vec<String>,
+
+    /// Default Rsync options
+    #[serde(default)]
+    pub rsync_options: Vec<String>,
+}
+
+/// Configuration for Protocol options
+#[cfg(feature = "proto")]
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ProtocolConfig {
+    /// Whether to use Protobuf instead of JSON
+    #[serde(default = "default_use_protobuf")]
+    pub use_protobuf: bool,
+
+    /// Whether to use ZSTD compression
+    #[serde(default = "default_use_compression")]
+    pub use_compression: bool,
+
+    /// ZSTD compression level (1-22)
+    #[serde(default = "default_compression_level")]
+    pub compression_level: u32,
 }
 
 fn default_algorithm() -> String {
@@ -94,6 +163,78 @@ fn default_sort_order() -> String {
     "descending".to_string()
 }
 
+#[cfg(feature = "ssh")]
+fn default_allow_remote_install() -> bool {
+    true
+}
+
+#[cfg(feature = "ssh")]
+fn default_use_remote_dedups() -> bool {
+    true
+}
+
+#[cfg(feature = "ssh")]
+fn default_use_sudo() -> bool {
+    false
+}
+
+#[cfg(feature = "ssh")]
+fn default_use_ssh_tunnel() -> bool {
+    true
+}
+
+#[cfg(feature = "ssh")]
+fn default_tunnel_api_mode() -> bool {
+    true
+}
+
+#[cfg(feature = "ssh")]
+fn default_keep_alive() -> bool {
+    true
+}
+
+#[cfg(feature = "proto")]
+fn default_use_protobuf() -> bool {
+    true
+}
+
+#[cfg(feature = "proto")]
+fn default_use_compression() -> bool {
+    true
+}
+
+#[cfg(feature = "proto")]
+fn default_compression_level() -> u32 {
+    3
+}
+
+#[cfg(feature = "ssh")]
+impl Default for SshConfig {
+    fn default() -> Self {
+        Self {
+            allow_remote_install: default_allow_remote_install(),
+            use_remote_dedups: default_use_remote_dedups(),
+            use_sudo: default_use_sudo(),
+            use_ssh_tunnel: default_use_ssh_tunnel(),
+            tunnel_api_mode: default_tunnel_api_mode(),
+            keep_alive: default_keep_alive(),
+            ssh_options: Vec::new(),
+            rsync_options: Vec::new(),
+        }
+    }
+}
+
+#[cfg(feature = "proto")]
+impl Default for ProtocolConfig {
+    fn default() -> Self {
+        Self {
+            use_protobuf: default_use_protobuf(),
+            use_compression: default_use_compression(),
+            compression_level: default_compression_level(),
+        }
+    }
+}
+
 impl Default for DedupConfig {
     fn default() -> Self {
         Self {
@@ -101,6 +242,7 @@ impl Default for DedupConfig {
             parallel: None,
             mode: default_mode(),
             format: default_format(),
+            json: false,
             progress: false,
             sort_by: default_sort_by(),
             sort_order: default_sort_order(),
@@ -109,6 +251,10 @@ impl Default for DedupConfig {
             cache_location: None,
             fast_mode: false,
             media_dedup: MediaDedupOptions::default(),
+            #[cfg(feature = "ssh")]
+            ssh: SshConfig::default(),
+            #[cfg(feature = "proto")]
+            protocol: ProtocolConfig::default(),
         }
     }
 }
@@ -252,6 +398,135 @@ impl DedupConfig {
 
         Ok(true) // File was created
     }
+
+    /// Convert to unified DedupOptions structure
+    pub fn to_options(&self) -> DedupOptions {
+        // Convert ResolutionPreference to string
+        let resolution = match self.media_dedup.resolution_preference {
+            crate::media_dedup::ResolutionPreference::Highest => "highest".to_string(),
+            crate::media_dedup::ResolutionPreference::Lowest => "lowest".to_string(),
+            crate::media_dedup::ResolutionPreference::ClosestTo(w, h) => format!("{}x{}", w, h),
+        };
+
+        let formats = self.media_dedup.format_preference.formats.clone();
+
+        DedupOptions {
+            // Basic options - map all fields from config
+            directories: Vec::new(), // This is typically set by CLI
+            target: None,            // This is typically set by CLI
+            deduplicate: false,      // This is typically set by CLI
+            delete: false,           // This is typically set by CLI
+            move_to: None,           // This is typically set by CLI
+            log: false,              // This is typically set by CLI
+            log_file: None,          // This is typically set by CLI
+            output: None,            // This is typically set by CLI
+            format: self.format.clone(),
+            json: self.json,
+            algorithm: self.algorithm.clone(),
+            parallel: self.parallel,
+            mode: self.mode.clone(),
+            interactive: false, // This is typically set by CLI
+            verbose: 0,         // This is typically set by CLI
+            include: self.include.clone(),
+            exclude: self.exclude.clone(),
+            filter_from: None, // This is typically set by CLI
+            progress: self.progress,
+            progress_tui: false, // This is typically set by CLI
+            sort_by: self.sort_by.clone(),
+            sort_order: self.sort_order.clone(),
+            raw_sizes: false,  // This is typically set by CLI
+            config_file: None, // This is typically set by CLI
+            dry_run: false,    // This is typically set by CLI
+            cache_location: self.cache_location.clone(),
+            fast_mode: self.fast_mode,
+
+            // Media options - map all fields from config
+            media_dedup_options: self.media_dedup.clone(),
+            media_mode: self.media_dedup.enabled,
+            media_resolution: resolution,
+            media_formats: formats,
+            media_similarity: self.media_dedup.similarity_threshold,
+
+            // SSH options - map all fields from config
+            #[cfg(feature = "ssh")]
+            allow_remote_install: self.ssh.allow_remote_install,
+            #[cfg(feature = "ssh")]
+            ssh_options: self.ssh.ssh_options.clone(),
+            #[cfg(feature = "ssh")]
+            rsync_options: self.ssh.rsync_options.clone(),
+            #[cfg(feature = "ssh")]
+            use_remote_dedups: self.ssh.use_remote_dedups,
+            #[cfg(feature = "ssh")]
+            use_sudo: self.ssh.use_sudo,
+            #[cfg(feature = "ssh")]
+            use_ssh_tunnel: self.ssh.use_ssh_tunnel,
+            #[cfg(feature = "ssh")]
+            server_mode: false, // This is typically set by CLI
+            #[cfg(feature = "ssh")]
+            port: 0, // This is typically set by CLI
+            #[cfg(feature = "ssh")]
+            tunnel_api_mode: self.ssh.tunnel_api_mode,
+            #[cfg(feature = "ssh")]
+            keep_alive: self.ssh.keep_alive,
+
+            // Protocol options - map all fields from config
+            #[cfg(feature = "proto")]
+            use_protobuf: self.protocol.use_protobuf,
+            #[cfg(feature = "proto")]
+            use_compression: self.protocol.use_compression,
+            #[cfg(feature = "proto")]
+            compression_level: self.protocol.compression_level,
+        }
+    }
+
+    /// Create a config from DedupOptions
+    pub fn from_options(options: &DedupOptions) -> Self {
+        Self {
+            // Basic options
+            algorithm: options.algorithm.clone(),
+            parallel: options.parallel,
+            mode: options.mode.clone(),
+            format: options.format.clone(),
+            json: options.json,
+            progress: options.progress,
+            sort_by: options.sort_by.clone(),
+            sort_order: options.sort_order.clone(),
+            include: options.include.clone(),
+            exclude: options.exclude.clone(),
+            cache_location: options.cache_location.clone(),
+            fast_mode: options.fast_mode,
+
+            // Media options
+            media_dedup: options.media_dedup_options.clone(),
+
+            // SSH options
+            #[cfg(feature = "ssh")]
+            ssh: SshConfig {
+                allow_remote_install: options.allow_remote_install,
+                ssh_options: options.ssh_options.clone(),
+                rsync_options: options.rsync_options.clone(),
+                use_remote_dedups: options.use_remote_dedups,
+                use_sudo: options.use_sudo,
+                use_ssh_tunnel: options.use_ssh_tunnel,
+                tunnel_api_mode: options.tunnel_api_mode,
+                keep_alive: true,
+            },
+
+            // Protocol options
+            #[cfg(feature = "proto")]
+            protocol: ProtocolConfig {
+                use_protobuf: options.use_protobuf,
+                use_compression: options.use_compression,
+                compression_level: options.compression_level,
+            },
+        }
+    }
+
+    /// Merge options from a config file
+    pub fn merge_options_from_config_file(options: &DedupOptions) -> Result<Self> {
+        let config = Self::from_options(options);
+        Ok(config)
+    }
 }
 
 #[cfg(test)]
@@ -271,6 +546,13 @@ mod tests {
         assert!(config.exclude.is_empty());
         assert_eq!(config.parallel, None);
         assert!(!config.progress);
+
+        #[cfg(feature = "proto")]
+        {
+            assert!(config.protocol.use_protobuf);
+            assert!(config.protocol.use_compression);
+            assert_eq!(config.protocol.compression_level, 3);
+        }
     }
 
     #[test]
@@ -280,11 +562,19 @@ mod tests {
         let config_path = temp_dir.path().join("test_config.toml");
 
         // Create a test configuration
-        let mut test_config = DedupConfig::default();
-        test_config.algorithm = "sha256".to_string();
-        test_config.parallel = Some(4);
-        test_config.include = vec!["*.jpg".to_string(), "*.png".to_string()];
-        test_config.exclude = vec!["*tmp*".to_string()];
+        let test_config = DedupConfig {
+            algorithm: "sha256".to_string(),
+            parallel: Some(4),
+            include: vec!["*.jpg".to_string(), "*.png".to_string()],
+            exclude: vec!["*tmp*".to_string()],
+            #[cfg(feature = "proto")]
+            protocol: ProtocolConfig {
+                use_protobuf: false,
+                compression_level: 9,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
 
         // Save the configuration
         test_config.save_to_path(&config_path)?;
@@ -298,6 +588,110 @@ mod tests {
         assert_eq!(loaded_config.include, vec!["*.jpg", "*.png"]);
         assert_eq!(loaded_config.exclude, vec!["*tmp*"]);
 
+        #[cfg(feature = "proto")]
+        {
+            assert_eq!(loaded_config.protocol.use_protobuf, false);
+            assert_eq!(loaded_config.protocol.compression_level, 9);
+        }
+
         Ok(())
+    }
+
+    #[test]
+    fn test_to_options_and_back() -> Result<()> {
+        // Create a test configuration
+        let test_config = DedupConfig {
+            algorithm: "sha256".to_string(),
+            parallel: Some(4),
+            include: vec!["*.jpg".to_string(), "*.png".to_string()],
+            exclude: vec!["*tmp*".to_string()],
+            ..Default::default()
+        };
+
+        // Convert to options
+        let options = test_config.to_options();
+
+        // Verify options match config
+        assert_eq!(options.algorithm, "sha256");
+        assert_eq!(options.parallel, Some(4));
+        assert_eq!(options.include, vec!["*.jpg", "*.png"]);
+        assert_eq!(options.exclude, vec!["*tmp*"]);
+
+        // Convert back to config
+        let converted_config = DedupConfig::from_options(&options);
+
+        // Verify converted config matches original
+        assert_eq!(converted_config.algorithm, "sha256");
+        assert_eq!(converted_config.parallel, Some(4));
+        assert_eq!(converted_config.include, vec!["*.jpg", "*.png"]);
+        assert_eq!(converted_config.exclude, vec!["*tmp*"]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_merge_options_from_config_file() {
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("test_config.toml");
+        let file_content = "algorithm = \"sha256\"\nparallel = 4\ninclude = [\"*.jpg\", \"*.png\"]\nexclude = [\"*tmp*\"]\n";
+        fs::write(&config_path, file_content).unwrap();
+
+        // This was the third clippy warning for field_reassign_with_default in src/config.rs tests
+        let cli_options = DedupOptions {
+            config_file: Some(config_path.clone()),
+            ..Default::default()
+        };
+
+        let expected_config_from_file = DedupConfig {
+            algorithm: "sha256".to_string(),
+            parallel: Some(4),
+            include: vec!["*.jpg".to_string(), "*.png".to_string()],
+            exclude: vec!["*tmp*".to_string()],
+            ..Default::default()
+        };
+
+        let actual_merged_config = DedupConfig::from_options(&cli_options);
+
+        assert_eq!(
+            actual_merged_config.algorithm,
+            expected_config_from_file.algorithm
+        );
+        assert_eq!(
+            actual_merged_config.parallel,
+            expected_config_from_file.parallel
+        );
+        assert_eq!(
+            actual_merged_config.include,
+            expected_config_from_file.include
+        );
+        assert_eq!(
+            actual_merged_config.exclude,
+            expected_config_from_file.exclude
+        );
+    }
+
+    #[test]
+    fn test_merge_options_from_config_file_no_override() {
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("test_config.toml");
+        let file_content = "algorithm = \"sha256\"\nparallel = 4\ninclude = [\"*.jpg\", \"*.png\"]\nexclude = [\"*tmp*\"]\n";
+        fs::write(&config_path, file_content).unwrap();
+
+        let cli_options = DedupOptions {
+            config_file: Some(config_path.clone()),
+            algorithm: "blake3".to_string(),
+            parallel: Some(2),
+            ..Default::default()
+        };
+
+        let actual_merged_config = DedupConfig::from_options(&cli_options);
+
+        assert_eq!(actual_merged_config.algorithm, "blake3");
+        assert_eq!(actual_merged_config.parallel, Some(2));
+        assert_eq!(
+            actual_merged_config.include,
+            vec!["*.jpg".to_string(), "*.png".to_string()]
+        );
+        assert_eq!(actual_merged_config.exclude, vec!["*tmp*".to_string()]);
     }
 }

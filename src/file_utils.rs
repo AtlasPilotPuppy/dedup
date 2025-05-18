@@ -1,4 +1,5 @@
-use anyhow::Result;
+#[allow(unused_imports)]
+use anyhow::{Context, Result};
 use glob::{Pattern, PatternError};
 use num_cpus;
 use rayon::prelude::*;
@@ -9,12 +10,12 @@ use std::hash::Hasher;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::mpsc::Sender as StdMpscSender;
 use std::time::SystemTime;
 use walkdir::WalkDir;
 
 use crate::tui_app::ScanMessage;
 use crate::Cli;
-use std::sync::mpsc::Sender as StdMpscSender;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortCriterion {
@@ -210,8 +211,9 @@ impl FilterRules {
     }
 
     pub fn is_match(&self, path_str: &str) -> bool {
+        let path = Path::new(path_str);
         // 1. Check excludes: if any exclude pattern matches, path is excluded.
-        if self.excludes.iter().any(|p| p.matches(path_str)) {
+        if self.excludes.iter().any(|p| p.matches_path(path)) {
             return false;
         }
 
@@ -219,7 +221,7 @@ impl FilterRules {
         //    - If include patterns exist, path must match at least one.
         //    - If no include patterns exist, path is included by default (if not excluded).
         if !self.includes.is_empty() {
-            return self.includes.iter().any(|p| p.matches(path_str));
+            return self.includes.iter().any(|p| p.matches_path(path));
         }
 
         true // Not excluded, and no include rules to restrict further OR matches an include rule.
@@ -278,19 +280,19 @@ pub fn calculate_hash(path: &Path, algorithm: &str) -> Result<String> {
     }
 }
 
-/// Find duplicate files with progress reporting (TUI mode)
+/// Finds duplicate files with progress updates
 pub fn find_duplicate_files_with_progress(
-    cli: &Cli,
+    cli: &crate::Cli,
     tx_progress: StdMpscSender<ScanMessage>,
 ) -> Result<Vec<DuplicateSet>> {
-    // Clone tx_progress before moving it into any closure
+    // Clone tx before moving it into any closure
     let tx_progress_for_media = tx_progress.clone();
 
     log::info!(
         "[ScanThread] Starting scan with progress updates for directory: {:?}",
         cli.directories[0]
     );
-    let filter_rules = FilterRules::new(cli)?;
+    let _filter_rules = FilterRules::new(cli)?;
 
     // Initialize file cache if using fast mode
     let file_cache = if cli.fast_mode && cli.cache_location.is_some() {
@@ -325,153 +327,52 @@ pub fn find_duplicate_files_with_progress(
         }
     };
 
-    // ========== STAGE 0: PRE-SCAN FOR TOTAL COUNT ==========
-    send_status(
-        0,
-        format!(
-            "Pre-scan: Counting files in {}",
-            cli.directories[0].display()
-        ),
-    );
-
-    // Pre-scan to count total files
-    let total_files = match count_files_in_directory(&cli.directories[0], &filter_rules) {
-        Ok(count) => {
-            send_status(0, format!("Pre-scan complete: Found {} total files", count));
-            count
-        }
-        Err(e) => {
-            log::warn!("[ScanThread] Failed to count files: {}", e);
-            send_status(0, format!("Pre-scan failed: {}", e));
-            0 // Continue without total count
-        }
-    };
-
     // ========== STAGE 1: FILE DISCOVERY ==========
-    send_status(
-        1,
-        format!(
-            "Stage 1/3: 📁 Starting file discovery in {} (0/{} files)",
-            cli.directories[0].display(),
-            if total_files > 0 {
-                total_files.to_string()
-            } else {
-                "?".to_string()
-            }
-        ),
-    );
+    send_status(1, format!("Scanning {} directories", cli.directories.len()));
 
-    let mut files_by_size: HashMap<u64, Vec<PathBuf>> = HashMap::new();
-    let walker = WalkDir::new(&cli.directories[0]).into_iter();
-    let mut files_scanned_count = 0;
-    let mut last_update_time = std::time::Instant::now();
-    let update_interval = std::time::Duration::from_millis(400); // Less frequent updates (400ms)
+    // Collect files from all directories
+    let mut all_files = Vec::new();
+    let mut current_directory_index = 0;
 
-    for entry in walker
-        .filter_entry(|e| {
-            if is_hidden(e) || is_symlink(e) {
-                return false;
-            }
-            if let Some(path_str) = e.path().to_str() {
-                filter_rules.is_match(path_str)
-            } else {
-                log::warn!(
-                    "[ScanThread] Path {:?} is not valid UTF-8, excluding.",
-                    e.path()
-                );
-                false
-            }
-        })
-        .flatten()
-    {
-        if entry.file_type().is_file() {
-            let path = entry.path().to_path_buf();
-            files_scanned_count += 1;
+    for directory in &cli.directories {
+        current_directory_index += 1;
+        let dir_str = directory.to_string_lossy().to_string();
 
-            // Determine update frequency based on file count
-            let should_update = if files_scanned_count < 100 {
-                files_scanned_count % 10 == 0
-            } else if files_scanned_count < 500 {
-                files_scanned_count % 20 == 0
-            } else if files_scanned_count < 1000 {
-                files_scanned_count % 50 == 0
-            } else if files_scanned_count < 5000 {
-                files_scanned_count % 100 == 0
-            } else if files_scanned_count < 10000 {
-                files_scanned_count % 200 == 0
-            } else if files_scanned_count < 50000 {
-                files_scanned_count % 500 == 0
-            } else {
-                files_scanned_count % 1000 == 0
-            };
-
-            if should_update || last_update_time.elapsed() >= update_interval {
-                last_update_time = std::time::Instant::now();
-                // Show progress percentage if total is known
-                if total_files > 0 {
-                    let percent = (files_scanned_count as f64 / total_files as f64) * 100.0;
-                    send_status(
-                        1,
-                        format!(
-                            "Stage 1/3: 📁 Scanning files: {}/{} ({:.1}%)",
-                            files_scanned_count, total_files, percent
-                        ),
-                    );
-                } else {
-                    // Remove file name from status update to reduce repaints
-                    send_status(
-                        1,
-                        format!("Stage 1/3: 📁 Found {} files...", files_scanned_count),
-                    );
-                }
-            }
-
-            match fs::metadata(&path) {
-                Ok(metadata) => {
-                    if metadata.len() > 0 {
-                        files_by_size.entry(metadata.len()).or_default().push(path);
-                    }
-                }
-                Err(e) => {
-                    log::warn!("[ScanThread] Failed to get metadata for {:?}: {}", path, e)
-                }
-            }
-        }
-    }
-
-    let file_count = files_by_size.values().map(|v| v.len()).sum::<usize>();
-    let size_group_count = files_by_size.len();
-
-    if total_files > 0 {
-        let percent_found = (files_scanned_count as f64 / total_files as f64) * 100.0;
         send_status(
             1,
             format!(
-                "Stage 1/3: 📁 File discovery complete. Found {} files ({:.1}%) in {} size groups.",
-                file_count, percent_found, size_group_count
+                "Scanning directory {} of {}: {}",
+                current_directory_index,
+                cli.directories.len(),
+                dir_str
             ),
         );
-    } else {
-        send_status(
-            1,
-            format!(
-                "Stage 1/3: 📁 File discovery complete. Found {} files in {} size groups.",
-                file_count, size_group_count
-            ),
-        );
+
+        // Check if this is a remote directory
+        let mut files = handle_directory(cli, directory)?;
+
+        // Add files to the main list
+        all_files.append(&mut files);
+
+        // Update progress
+        send_status(1, format!("Found {} files in {}", files.len(), dir_str));
     }
 
-    log::info!(
-        "[ScanThread] Found {} files matching criteria, grouped into {} unique file sizes.",
-        file_count,
-        size_group_count
-    );
+    let _total_files = all_files.len();
 
     // ========== STAGE 2: SIZE COMPARISON ==========
     let mut duplicate_sets: Vec<DuplicateSet> = Vec::new();
-    let potential_duplicates: Vec<_> = files_by_size
+
+    // Group files by size
+    let mut size_groups: HashMap<u64, Vec<FileInfo>> = HashMap::new();
+    for file in all_files {
+        size_groups.entry(file.size).or_default().push(file);
+    }
+
+    // Keep only groups with more than one file (potential duplicates)
+    let potential_duplicates: Vec<(u64, Vec<FileInfo>)> = size_groups
         .into_iter()
-        .filter(|(_, paths)| paths.len() > 1)
+        .filter(|(_, files)| files.len() > 1)
         .collect();
 
     let _potential_duplicate_count = potential_duplicates.len();
@@ -496,7 +397,7 @@ pub fn find_duplicate_files_with_progress(
     let potential_groups = potential_duplicates.len();
     let potential_files: usize = potential_duplicates
         .iter()
-        .map(|(_, paths)| paths.len())
+        .map(|(_, group)| group.len())
         .sum();
 
     send_status(
@@ -525,7 +426,7 @@ pub fn find_duplicate_files_with_progress(
     let mut groups_hashed_count = 0;
     let total_files_to_hash = potential_duplicates
         .iter()
-        .map(|(_, paths)| paths.len())
+        .map(|(_, group)| group.len())
         .sum::<usize>();
 
     send_status(
@@ -536,24 +437,28 @@ pub fn find_duplicate_files_with_progress(
         ),
     );
 
-    // Keep track of all collected FileInfos for possible media processing later
+    // Shared storage for all file_infos
     let mut all_file_infos = Vec::new();
+
+    // Some variables needed for updating UI
+    let update_interval = std::time::Duration::from_millis(400);
+    let mut last_update_time = std::time::Instant::now();
 
     pool.install(|| {
         potential_duplicates
-            .into_par_iter()
-            .for_each_with(local_tx, |thread_local_tx, (size, paths)| {
+            .par_iter()
+            .for_each_with(local_tx, |thread_local_tx, (size, files)| {
                 let mut hashes_in_group: HashMap<String, Vec<FileInfo>> = HashMap::new();
 
                 // Thread-local cache hits counter
                 let mut thread_cache_hits = 0;
 
-                for path in paths {
+                for file_info in files {
                     // Try to get hash from cache first if fast mode is enabled
                     let mut hash_from_cache = None;
                     if let Some(cache) = file_cache.as_ref() {
                         if let Ok(cache_guard) = cache.lock() {
-                            hash_from_cache = cache_guard.get_file_info(&path);
+                            hash_from_cache = cache_guard.get_file_info(&file_info.path);
                             if hash_from_cache.is_some() {
                                 thread_cache_hits += 1;
                             }
@@ -562,27 +467,36 @@ pub fn find_duplicate_files_with_progress(
 
                     match hash_from_cache {
                         // Use cached hash if available
-                        Some(file_info) => {
-                            if let Some(hash_str) = &file_info.hash {
-                                hashes_in_group.entry(hash_str.clone()).or_default().push(file_info);
+                        Some(cached_info) => {
+                            if let Some(hash_str) = &cached_info.hash {
+                                hashes_in_group
+                                    .entry(hash_str.clone())
+                                    .or_default()
+                                    .push(FileInfo {
+                                        path: file_info.path.clone(),
+                                        size: *size,
+                                        hash: Some(hash_str.clone()),
+                                        modified_at: cached_info.modified_at,
+                                        created_at: cached_info.created_at,
+                                    });
                             }
                         },
                         // Calculate hash if not cached or cache miss
-                        None => match calculate_hash(&path, &cli.algorithm) {
+                        None => match calculate_hash(&file_info.path, &cli.algorithm) {
                             Ok(hash_str) => {
-                                let metadata = match fs::metadata(&path) {
+                                let metadata = match fs::metadata(&file_info.path) {
                                     Ok(m) => m,
                                     Err(e) => {
-                                        log::warn!("Failed to get metadata for {:?}: {}", path, e);
+                                        log::warn!("Failed to get metadata for {:?}: {}", file_info.path, e);
                                         continue;
                                     }
                                 };
                                 let file_info = FileInfo {
-                                    path: path.clone(),
-                                    size,
+                                    path: file_info.path.clone(),
+                                    size: *size,
                                     hash: Some(hash_str.clone()),
-                                    modified_at: metadata.modified().ok(),
-                                    created_at: metadata.created().ok(),
+                                    modified_at: file_time_to_system_time(metadata.modified()),
+                                    created_at: file_time_to_system_time(metadata.created()),
                                 };
 
                                 // Update cache if available
@@ -592,10 +506,10 @@ pub fn find_duplicate_files_with_progress(
                                     }
                                 }
 
-                                hashes_in_group.entry(hash_str).or_default().push(file_info);
+                                hashes_in_group.entry(hash_str).or_default().push(file_info.clone());
                             }
                             Err(e) => {
-                                log::warn!("[ScanThread] Failed to hash {:?}: {}", path, e);
+                                log::warn!("[ScanThread] Failed to hash {:?}: {}", file_info.path, e);
                                 if thread_local_tx.send(Err(e)).is_err() {
                                     log::error!("[ScanThread] Hashing thread failed to send error (channel closed).");
                                 }
@@ -1042,152 +956,337 @@ pub fn determine_action_targets(
     Ok((kept_file_info, files_to_process))
 }
 
-pub fn delete_files(files_to_delete: &[FileInfo], dry_run: bool) -> Result<(usize, Vec<String>)> {
+/// Delete files, handling remote paths
+pub fn delete_files(files: &[FileInfo], dry_run: bool) -> Result<(usize, Vec<String>)> {
     let mut count = 0;
     let mut logs = Vec::new();
-    if dry_run {
-        logs.push("[DRY RUN] Would delete the following files:".to_string());
-        for file_info in files_to_delete {
-            logs.push(format!("[DRY RUN]    - {}", file_info.path.display()));
-            count += 1;
+
+    for file in files {
+        let path = &file.path;
+
+        // Handle remote paths
+        if is_remote_path(path) {
+            #[cfg(feature = "ssh")]
+            {
+                if let Err(e) = delete_file_remote(path, dry_run, &mut logs, &mut count) {
+                    logs.push(format!("Error deleting remote file: {}", e));
+                    log::error!("Error deleting remote file: {}", e);
+                }
+                continue;
+            }
+
+            #[cfg(not(feature = "ssh"))]
+            {
+                logs.push(format!(
+                    "Error: SSH support not enabled for path: {}",
+                    path.display()
+                ));
+                log::error!("SSH support not enabled for path: {}", path.display());
+                continue;
+            }
         }
-    } else {
-        logs.push("Deleting the following files:".to_string());
-        for file_info in files_to_delete {
-            match fs::remove_file(&file_info.path) {
+
+        // Handle local paths
+        let file_display = path.display().to_string();
+
+        if dry_run {
+            let msg = format!("[DRY RUN] Would delete: {}", file_display);
+            logs.push(msg.clone());
+            log::info!("{}", msg);
+            count += 1;
+        } else {
+            match fs::remove_file(path) {
                 Ok(_) => {
-                    logs.push(format!("Deleted: {}", file_info.path.display()));
+                    let msg = format!("Deleted: {}", file_display);
+                    logs.push(msg.clone());
+                    log::info!("{}", msg);
                     count += 1;
                 }
                 Err(e) => {
-                    logs.push(format!(
-                        "Error deleting {}: {}",
-                        file_info.path.display(),
-                        e
-                    ));
+                    let error_msg = format!("Failed to delete {}: {}", file_display, e);
+                    logs.push(error_msg.clone());
+                    log::error!("{}", error_msg);
                 }
             }
         }
     }
+
     Ok((count, logs))
 }
 
+/// Delete a file on a remote system using SSH
+#[cfg(feature = "ssh")]
+fn delete_file_remote(
+    path: &Path,
+    dry_run: bool,
+    logs: &mut Vec<String>,
+    count: &mut usize,
+) -> Result<()> {
+    let path_str = path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("Invalid UTF-8 in path"))?;
+
+    let remote = crate::ssh_utils::RemoteLocation::parse(path_str)?;
+    let file_path = &remote.path;
+
+    if dry_run {
+        let msg = format!(
+            "[DRY RUN] Would delete remote file: {}",
+            file_path.display()
+        );
+        logs.push(msg.clone());
+        log::info!("{}", msg);
+        *count += 1;
+        return Ok(());
+    }
+
+    // Use SSH to delete the file
+    let command = format!("rm -f '{}'", file_path.display());
+    match remote.run_command(&command) {
+        Ok(_) => {
+            let msg = format!("Deleted remote file: {}", file_path.display());
+            logs.push(msg.clone());
+            log::info!("{}", msg);
+            *count += 1;
+            Ok(())
+        }
+        Err(e) => Err(anyhow::anyhow!("Failed to delete remote file: {}", e)),
+    }
+}
+
+/// Move files to a destination directory, handling remote paths
 pub fn move_files(
-    files_to_move: &[FileInfo],
-    target_dir: &Path,
+    files: &[FileInfo],
+    dest_dir: &Path,
     dry_run: bool,
 ) -> Result<(usize, Vec<String>)> {
     let mut count = 0;
     let mut logs = Vec::new();
 
-    if !target_dir.exists() {
+    // Handle destination being remote
+    let dest_is_remote = is_remote_path(dest_dir);
+
+    if dest_is_remote {
+        #[cfg(not(feature = "ssh"))]
+        {
+            return Err(anyhow::anyhow!("SSH support is not enabled in this build"));
+        }
+    } else if !dest_dir.exists() {
         if dry_run {
-            logs.push(format!(
-                "[DRY RUN] Target directory {} does not exist. Would create it.",
-                target_dir.display()
-            ));
-            log::info!(
-                "[DRY RUN] Target directory {:?} does not exist. Would attempt to create it.",
-                target_dir
+            let msg = format!(
+                "[DRY RUN] Would create destination directory: {}",
+                dest_dir.display()
             );
+            logs.push(msg.clone());
+            log::info!("{}", msg);
         } else {
-            log::info!(
-                "Target directory {:?} does not exist. Creating it.",
-                target_dir
-            );
-            fs::create_dir_all(target_dir)?;
-            logs.push(format!(
-                "Created target directory: {}",
-                target_dir.display()
-            ));
+            fs::create_dir_all(dest_dir)?;
+            let msg = format!("Created destination directory: {}", dest_dir.display());
+            logs.push(msg.clone());
+            log::info!("{}", msg);
         }
-    } else if !target_dir.is_dir() {
-        return Err(anyhow::anyhow!(
-            "Target move path {:?} exists but is not a directory.",
-            target_dir
-        ));
     }
 
-    if dry_run {
-        logs.push(format!(
-            "[DRY RUN] Would move the following files to {}:",
-            target_dir.display()
-        ));
-        for file_info in files_to_move {
-            let target_path = target_dir.join(
-                file_info
-                    .path
-                    .file_name()
-                    .unwrap_or_else(|| file_info.path.as_os_str()),
-            );
-            logs.push(format!(
-                "[DRY RUN]    - {} -> {}",
-                file_info.path.display(),
-                target_path.display()
-            ));
-            log::info!("[DRY RUN]    - {:?} -> {:?}", file_info.path, target_path);
-            count += 1;
-        }
-    } else {
-        logs.push(format!(
-            "Moving the following files to {}:",
-            target_dir.display()
-        ));
-        for file_info in files_to_move {
-            let file_name = file_info
-                .path
-                .file_name()
-                .unwrap_or_else(|| file_info.path.as_os_str());
-            let mut target_path = target_dir.join(file_name);
+    // Process each file
+    for file in files {
+        let path = &file.path;
+        let file_name = path
+            .file_name()
+            .ok_or_else(|| anyhow::anyhow!("Failed to get file name from {}", path.display()))?;
 
-            // Handle potential name collisions in the target directory
-            let mut counter = 1;
-            while target_path.exists() {
-                let stem = target_path
-                    .file_stem()
-                    .unwrap_or_default()
-                    .to_string_lossy();
-                let ext = target_path
-                    .extension()
-                    .unwrap_or_default()
-                    .to_string_lossy();
-                let new_name = format!(
-                    "{}_copy({}){}{}",
-                    stem.trim_end_matches(&format!("_copy({})", counter - 1))
-                        .trim_end_matches("_copy"),
-                    counter,
-                    if ext.is_empty() { "" } else { "." },
-                    ext
+        // Keep original paths relative to differentiate files with the same name
+        let relative_path = if let Ok(rel_path) = path.strip_prefix("/") {
+            rel_path.to_path_buf()
+        } else {
+            path.to_path_buf()
+        };
+
+        let dest_path = dest_dir.join(file_name);
+
+        // Ensure we have a unique destination path
+        let final_dest_path = ensure_unique_path(dest_path, &relative_path)?;
+
+        // Handle source path being remote
+        if is_remote_path(path) {
+            #[cfg(feature = "ssh")]
+            {
+                if let Err(e) =
+                    move_remote_file(path, &final_dest_path, dry_run, &mut logs, &mut count)
+                {
+                    logs.push(format!("Error moving remote file: {}", e));
+                    log::error!("Error moving remote file: {}", e);
+                }
+                continue;
+            }
+
+            #[cfg(not(feature = "ssh"))]
+            {
+                logs.push(format!(
+                    "Error: SSH support not enabled for path: {}",
+                    path.display()
+                ));
+                log::error!("SSH support not enabled for path: {}", path.display());
+                continue;
+            }
+        }
+
+        // Handle local to local or local to remote move
+        if dest_is_remote {
+            #[cfg(feature = "ssh")]
+            {
+                // Local to remote move (copy then delete)
+                if let Err(e) = copy_file(path, &final_dest_path, dry_run) {
+                    logs.push(format!("Failed to copy file for move: {}", e));
+                    log::error!("Failed to copy file for move: {}", e);
+                    continue;
+                }
+
+                // Delete the source file after successful copy
+                if !dry_run {
+                    if let Err(e) = fs::remove_file(path) {
+                        logs.push(format!("Failed to delete source file after copy: {}", e));
+                        log::error!("Failed to delete source file after copy: {}", e);
+                        continue;
+                    }
+                }
+
+                let msg = if dry_run {
+                    format!(
+                        "[DRY RUN] Would move {} to {}",
+                        path.display(),
+                        final_dest_path.display()
+                    )
+                } else {
+                    format!("Moved {} to {}", path.display(), final_dest_path.display())
+                };
+                logs.push(msg.clone());
+                log::info!("{}", msg);
+                count += 1;
+            }
+        } else {
+            // Local to local move
+            if dry_run {
+                let msg = format!(
+                    "[DRY RUN] Would move {} to {}",
+                    path.display(),
+                    final_dest_path.display()
                 );
-                target_path = target_dir.join(new_name);
-                counter += 1;
-            }
-
-            match fs::rename(&file_info.path, &target_path) {
-                // Using rename for move
-                Ok(_) => {
-                    logs.push(format!(
-                        "Moved: {} -> {}",
-                        file_info.path.display(),
-                        target_path.display()
-                    ));
-                    log::info!("    Moved: {:?} -> {:?}", file_info.path, target_path);
-                    count += 1;
+                logs.push(msg.clone());
+                log::info!("{}", msg);
+                count += 1;
+            } else {
+                // Create parent directories if needed
+                if let Some(parent) = final_dest_path.parent() {
+                    if !parent.exists() {
+                        fs::create_dir_all(parent)?;
+                    }
                 }
-                Err(e) => {
-                    let error_msg = format!("Error moving {}: {}", file_info.path.display(), e);
-                    logs.push(error_msg);
-                    log::error!(
-                        "Failed to move {:?} to {:?}: {}",
-                        file_info.path,
-                        target_path,
-                        e
-                    );
+
+                match fs::rename(path, &final_dest_path) {
+                    Ok(_) => {
+                        let msg =
+                            format!("Moved {} to {}", path.display(), final_dest_path.display());
+                        logs.push(msg.clone());
+                        log::info!("{}", msg);
+                        count += 1;
+                    }
+                    Err(e) => {
+                        let error_msg = format!(
+                            "Failed to move {} to {}: {}",
+                            path.display(),
+                            final_dest_path.display(),
+                            e
+                        );
+                        logs.push(error_msg.clone());
+                        log::error!("{}", error_msg);
+                    }
                 }
             }
         }
     }
+
     Ok((count, logs))
+}
+
+/// Move a file from a remote source
+#[cfg(feature = "ssh")]
+fn move_remote_file(
+    src_path: &Path,
+    dest_path: &Path,
+    dry_run: bool,
+    logs: &mut Vec<String>,
+    count: &mut usize,
+) -> Result<()> {
+    // Move is implemented as copy + delete for remote files
+    if let Err(e) = copy_file(src_path, dest_path, dry_run) {
+        return Err(anyhow::anyhow!("Failed to copy file during move: {}", e));
+    }
+
+    // Delete the source file after successful copy
+    if !dry_run {
+        let src_str = src_path
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("Invalid UTF-8 in path"))?;
+
+        let remote = crate::ssh_utils::RemoteLocation::parse(src_str)?;
+        let file_path = &remote.path;
+
+        // Use SSH to delete the file
+        let command = format!("rm -f '{}'", file_path.display());
+        if let Err(e) = remote.run_command(&command) {
+            return Err(anyhow::anyhow!(
+                "Failed to delete source file after copy: {}",
+                e
+            ));
+        }
+    }
+
+    let msg = if dry_run {
+        format!(
+            "[DRY RUN] Would move {} to {}",
+            src_path.display(),
+            dest_path.display()
+        )
+    } else {
+        format!("Moved {} to {}", src_path.display(), dest_path.display())
+    };
+    logs.push(msg.clone());
+    log::info!("{}", msg);
+    *count += 1;
+
+    Ok(())
+}
+
+/// Helper to ensure a unique path for moved files
+fn ensure_unique_path(base_path: PathBuf, relative_path: &Path) -> Result<PathBuf> {
+    // If the path doesn't exist, we can use it directly
+    if !base_path.exists() {
+        return Ok(base_path);
+    }
+
+    // Get file extension if any
+    let ext = base_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+
+    // Get file stem (name without extension)
+    let stem = base_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+
+    // Create a hash of the relative path for uniqueness
+    let path_hash = format!(
+        "{:x}",
+        md5::compute(relative_path.to_string_lossy().as_bytes())
+    );
+    let short_hash = &path_hash[0..8]; // Use first 8 chars of hash
+
+    // Create a new unique path
+    let parent = base_path.parent().unwrap_or(Path::new(""));
+
+    let new_name = if ext.is_empty() {
+        format!("{}_{}", stem, short_hash)
+    } else {
+        format!("{}_{}.{}", stem, short_hash, ext)
+    };
+
+    Ok(parent.join(new_name))
 }
 
 // Helper function to sort a Vec<FileInfo>
@@ -1389,181 +1488,283 @@ pub fn compare_directories(cli: &Cli) -> Result<DirectoryComparisonResult> {
 // Scans a single directory and returns FileInfo objects with hashes
 fn scan_directory(cli: &Cli, directory: &Path) -> Result<Vec<FileInfo>> {
     let filter_rules = FilterRules::new(cli)?;
-
     let mut files = Vec::new();
     let walker = WalkDir::new(directory).into_iter();
 
-    for entry in walker
-        .filter_entry(|e| {
-            if is_hidden(e) || is_symlink(e) {
-                return false;
-            }
-            if let Some(path_str) = e.path().to_str() {
-                filter_rules.is_match(path_str)
-            } else {
-                false
-            }
-        })
-        .flatten()
-    {
-        if entry.file_type().is_file() {
-            let path = entry.path().to_path_buf();
-            match fs::metadata(&path) {
-                Ok(metadata) => {
-                    if metadata.len() > 0 {
-                        let size = metadata.len();
+    // First, collect all relevant file entries
+    let mut collected_file_paths = Vec::new();
 
-                        // Calculate hash
-                        let hash = match calculate_hash(&path, &cli.algorithm) {
-                            Ok(h) => Some(h),
-                            Err(e) => {
-                                log::warn!("Failed to hash file {:?}: {}", path, e);
-                                None
-                            }
-                        };
+    for entry_result in walker {
+        match entry_result {
+            Ok(entry) => {
+                if is_hidden(&entry) || is_symlink(&entry) {
+                    continue;
+                }
 
-                        let file_info = FileInfo {
-                            path,
-                            size,
-                            hash,
-                            modified_at: metadata.modified().ok(),
-                            created_at: metadata.created().ok(),
-                        };
-
-                        files.push(file_info);
+                if entry.file_type().is_file() {
+                    if let Some(path_str) = entry.path().to_str() {
+                        if filter_rules.is_match(path_str) {
+                            // is_match uses matches_path
+                            collected_file_paths.push(entry.path().to_path_buf());
+                        }
+                    } else {
+                        log::warn!(
+                            "[ScanThread] Path {:?} is not valid UTF-8, excluding.",
+                            entry.path()
+                        );
                     }
                 }
-                Err(e) => log::warn!("Failed to get metadata for {:?}: {}", path, e),
+            }
+            Err(err) => {
+                log::warn!(
+                    "Skipping entry due to error: {}. Path: {:?}",
+                    err,
+                    err.path().unwrap_or_else(|| Path::new("unknown"))
+                );
             }
         }
     }
 
-    log::info!("Found {} files in directory: {:?}", files.len(), directory);
+    // Now process the collected file paths to create FileInfo
+    for path in collected_file_paths {
+        match fs::metadata(&path) {
+            Ok(metadata) => {
+                if metadata.len() > 0 {
+                    let size = metadata.len();
+                    let hash = match calculate_hash(&path, &cli.algorithm) {
+                        Ok(h) => Some(h),
+                        Err(e) => {
+                            log::warn!("Failed to hash file {:?}: {}", path, e);
+                            None
+                        }
+                    };
+                    let file_info = FileInfo {
+                        path,
+                        size,
+                        hash,
+                        modified_at: file_time_to_system_time(metadata.modified()),
+                        created_at: file_time_to_system_time(metadata.created()),
+                    };
+                    files.push(file_info);
+                }
+            }
+            Err(e) => {
+                log::warn!("Failed to get metadata for {:?}: {}", path, e);
+            }
+        }
+    }
+
+    log::info!(
+        "Found {} files in directory: {:?} matching filters",
+        files.len(),
+        directory
+    );
     Ok(files)
 }
 
-// Copy missing files to target directory
+/// Copy files from source to destination, handling remote paths
+pub fn copy_file(source: &Path, dest: &Path, dry_run: bool) -> Result<()> {
+    if is_remote_path(source) || is_remote_path(dest) {
+        // At least one path is remote, handle with SSH/rsync
+        #[cfg(feature = "ssh")]
+        {
+            copy_file_remote(source, dest, dry_run)
+        }
+
+        #[cfg(not(feature = "ssh"))]
+        {
+            Err(anyhow::anyhow!("SSH support is not enabled in this build"))
+        }
+    } else {
+        // Both paths are local, use standard copy
+        if dry_run {
+            log::info!(
+                "[DRY RUN] Would copy {} to {}",
+                source.display(),
+                dest.display()
+            );
+            return Ok(());
+        }
+
+        // Create parent directories if they don't exist
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        // Copy the file
+        std::fs::copy(source, dest)?;
+        Ok(())
+    }
+}
+
+/// Copy a file using SSH/rsync when at least one path is remote
+#[cfg(feature = "ssh")]
+fn copy_file_remote(source: &Path, dest: &Path, dry_run: bool) -> Result<()> {
+    use std::process::Command;
+
+    // Determine which path is remote and parse it
+    let (remote_path, local_path, is_remote_source) = if is_remote_path(source) {
+        let source_str = source
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("Invalid UTF-8 in path"))?;
+        let remote = crate::ssh_utils::RemoteLocation::parse(source_str)?;
+        (remote, dest.to_path_buf(), true)
+    } else {
+        let dest_str = dest
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("Invalid UTF-8 in path"))?;
+        let remote = crate::ssh_utils::RemoteLocation::parse(dest_str)?;
+        (remote, source.to_path_buf(), false)
+    };
+
+    // Generate rsync command
+    let rsync_cmd = remote_path.rsync_command(
+        if is_remote_source {
+            &remote_path.path
+        } else {
+            &local_path
+        },
+        if is_remote_source {
+            &local_path
+        } else {
+            &remote_path.path
+        },
+        is_remote_source,
+    );
+
+    // Add --dry-run if needed
+    let mut cmd_args = rsync_cmd.clone();
+    if dry_run {
+        cmd_args.push("--dry-run".to_string());
+    }
+
+    // Log the command
+    log::info!("Executing: {}", cmd_args.join(" "));
+
+    if dry_run {
+        log::info!("[DRY RUN] Would execute: {}", cmd_args.join(" "));
+        return Ok(());
+    }
+
+    // Execute the command
+    let output = Command::new(&cmd_args[0]).args(&cmd_args[1..]).output()?;
+
+    // Check for errors
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow::anyhow!("rsync failed: {}", stderr));
+    }
+
+    Ok(())
+}
+
+/// Copy missing files between directories, handling remote paths
 pub fn copy_missing_files(
     missing_files: &[FileInfo],
     target_dir: &Path,
     dry_run: bool,
 ) -> Result<(usize, Vec<String>)> {
-    let mut count = 0;
+    let mut copy_count = 0;
     let mut logs = Vec::new();
 
-    if !target_dir.exists() {
+    // Handle destination being remote
+    let dest_is_remote = is_remote_path(target_dir);
+
+    if dest_is_remote {
+        #[cfg(not(feature = "ssh"))]
+        {
+            return Err(anyhow::anyhow!("SSH support is not enabled in this build"));
+        }
+    } else if !target_dir.exists() {
         if dry_run {
             let msg = format!(
-                "[DRY RUN] Target directory {} does not exist. Would create it.",
+                "[DRY RUN] Would create destination directory: {}",
                 target_dir.display()
             );
+            logs.push(msg.clone());
             log::info!("{}", msg);
-            logs.push(msg);
         } else {
-            log::info!(
-                "Target directory {:?} does not exist. Creating it.",
-                target_dir
-            );
             fs::create_dir_all(target_dir)?;
-            logs.push(format!(
-                "Created target directory: {}",
-                target_dir.display()
-            ));
+            let msg = format!("Created destination directory: {}", target_dir.display());
+            logs.push(msg.clone());
+            log::info!("{}", msg);
         }
-    } else if !target_dir.is_dir() {
-        return Err(anyhow::anyhow!(
-            "Target path {:?} exists but is not a directory.",
-            target_dir
-        ));
     }
 
-    if dry_run {
-        logs.push(format!(
-            "[DRY RUN] Would copy {} missing files to {}",
-            missing_files.len(),
-            target_dir.display()
-        ));
+    // Process each file
+    for file in missing_files {
+        let source_path = &file.path;
 
-        for file in missing_files {
-            let relative_path = match file
-                .path
-                .strip_prefix(file.path.parent().unwrap().parent().unwrap())
-            {
-                Ok(rel) => rel.to_path_buf(),
-                Err(_) => {
-                    // If we can't determine a good relative path, just use the filename
-                    PathBuf::from(file.path.file_name().unwrap_or_default())
-                }
-            };
+        // Get the source directory name from the path
+        let source_dir_name = source_path
+            .parent()
+            .and_then(|p| p.file_name())
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_default();
 
-            let target_path = target_dir.join(relative_path);
+        // Create the target path that preserves the source directory structure
+        let final_dest_path = if source_dir_name.is_empty() {
+            // If no parent directory, just use the file name
+            target_dir.join(source_path.file_name().unwrap_or_default())
+        } else {
+            // Create a subdirectory in target with the source directory name
+            let source_subdir = target_dir.join(&source_dir_name);
+            source_subdir.join(source_path.file_name().unwrap_or_default())
+        };
 
-            logs.push(format!(
-                "[DRY RUN] Would copy {} to {}",
-                file.path.display(),
-                target_path.display()
-            ));
-            log::info!("[DRY RUN] Would copy {:?} to {:?}", file.path, target_path);
-            count += 1;
-        }
-    } else {
-        logs.push(format!(
-            "Copying {} missing files to {}",
-            missing_files.len(),
-            target_dir.display()
-        ));
-
-        for file in missing_files {
-            let relative_path = match file
-                .path
-                .strip_prefix(file.path.parent().unwrap().parent().unwrap())
-            {
-                Ok(rel) => rel.to_path_buf(),
-                Err(_) => {
-                    // If we can't determine a good relative path, just use the filename
-                    PathBuf::from(file.path.file_name().unwrap_or_default())
-                }
-            };
-
-            let target_path = target_dir.join(relative_path);
-
-            // Ensure parent directory exists
-            if let Some(parent) = target_path.parent() {
-                if !parent.exists() {
-                    fs::create_dir_all(parent)?;
-                    let msg = format!("Created parent directory: {}", parent.display());
+        // Create parent directories if needed
+        if let Some(parent) = final_dest_path.parent() {
+            if !parent.exists() {
+                if dry_run {
+                    let msg = format!("[DRY RUN] Would create directory: {}", parent.display());
                     logs.push(msg.clone());
-                    log::debug!("{}", msg);
+                    log::info!("{}", msg);
+                } else {
+                    fs::create_dir_all(parent)?;
+                    let msg = format!("Created directory: {}", parent.display());
+                    logs.push(msg.clone());
+                    log::info!("{}", msg);
                 }
             }
+        }
 
-            match fs::copy(&file.path, &target_path) {
+        // Copy the file
+        if dry_run {
+            let msg = format!(
+                "[DRY RUN] Would copy {} to {}",
+                source_path.display(),
+                final_dest_path.display()
+            );
+            logs.push(msg.clone());
+            log::info!("{}", msg);
+            copy_count += 1;
+        } else {
+            match copy_file(source_path, &final_dest_path, dry_run) {
                 Ok(_) => {
                     let msg = format!(
-                        "Copied: {} -> {}",
-                        file.path.display(),
-                        target_path.display()
+                        "Copied {} to {}",
+                        source_path.display(),
+                        final_dest_path.display()
                     );
                     logs.push(msg.clone());
                     log::info!("{}", msg);
-                    count += 1;
+                    copy_count += 1;
                 }
                 Err(e) => {
                     let error_msg = format!(
                         "Failed to copy {} to {}: {}",
-                        file.path.display(),
-                        target_path.display(),
+                        source_path.display(),
+                        final_dest_path.display(),
                         e
                     );
                     logs.push(error_msg.clone());
                     log::error!("{}", error_msg);
-                    // Continue with other files
                 }
             }
         }
     }
 
-    Ok((count, logs))
+    Ok((copy_count, logs))
 }
 
 // Add this new function for counting files in a directory
@@ -1723,4 +1924,1046 @@ mod tests {
         let expected_empty_blake3 = hash.clone();
         assert_eq!(hash, expected_empty_blake3);
     }
+}
+
+/// Determines if a path is a remote SSH path
+pub fn is_remote_path(_path: &Path) -> bool {
+    #[cfg(feature = "ssh")]
+    {
+        if let Some(path_str) = _path.to_str() {
+            return crate::ssh_utils::RemoteLocation::is_ssh_path(path_str);
+        }
+    }
+
+    false
+}
+
+/// Handles a directory that could be either local or remote
+pub fn handle_directory(cli: &crate::Cli, dir_path: &Path) -> Result<Vec<FileInfo>> {
+    #[cfg(feature = "ssh")]
+    if is_remote_path(dir_path) {
+        log::info!(
+            "Attempting to access remote directory: {}",
+            dir_path.display()
+        );
+
+        // First verify the path format is correct
+        let path_str = dir_path.to_str().ok_or_else(|| {
+            anyhow::anyhow!(
+                "Invalid characters in remote path: {}. Path must be UTF-8 encoded.",
+                dir_path.display()
+            )
+        })?;
+
+        if !path_str.starts_with("ssh:") {
+            return Err(anyhow::anyhow!(
+                "Invalid remote path format: {}. Remote paths must start with 'ssh:' (example: ssh:hostname:/path)",
+                path_str
+            ));
+        }
+
+        // Parse the remote location
+        let remote_location =
+            crate::ssh_utils::RemoteLocation::parse(path_str).with_context(|| {
+                format!(
+                    "Failed to parse remote path: {}. Format should be ssh:host:/path",
+                    path_str
+                )
+            })?;
+
+        // Check if the directory exists
+        match remote_location.check_directory_exists() {
+            Ok(true) => {
+                // Directory exists, proceed with scanning
+                handle_remote_directory(cli, dir_path)
+            }
+            Ok(false) => Err(anyhow::anyhow!(
+                "Remote directory does not exist: {}. Please verify the path on host '{}'.",
+                remote_location.path.display(),
+                remote_location.host
+            )),
+            Err(e) => Err(anyhow::anyhow!(
+                "Failed to check remote directory: {}. Error: {}",
+                dir_path.display(),
+                e
+            )),
+        }
+    } else {
+        // Local directory
+        if !dir_path.exists() {
+            return Err(anyhow::anyhow!(
+                "Local directory does not exist: {}. Please verify the path is correct.",
+                dir_path.display()
+            ));
+        }
+        scan_directory(cli, dir_path)
+    }
+
+    #[cfg(not(feature = "ssh"))]
+    {
+        // Local directory only
+        if !dir_path.exists() {
+            return Err(anyhow::anyhow!(
+                "Local directory does not exist: {}. Please verify the path is correct.",
+                dir_path.display()
+            ));
+        }
+        scan_directory(cli, dir_path)
+    }
+}
+
+/// Handles a remote directory for scanning
+#[cfg(feature = "ssh")]
+fn handle_remote_directory(cli: &crate::Cli, dir_path: &Path) -> Result<Vec<FileInfo>> {
+    use anyhow::Context;
+
+    // Convert Path to string for parsing
+    let path_str = dir_path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("Invalid UTF-8 in remote path: {}", dir_path.display()))?;
+
+    // Parse the remote location
+    let remote_location = crate::ssh_utils::RemoteLocation::parse(path_str).with_context(|| {
+        format!(
+            "Failed to parse remote path: {}. Format should be ssh:host:/path",
+            path_str
+        )
+    })?;
+
+    // Apply any CLI SSH/Rsync options to the remote location
+    let mut remote = remote_location.clone();
+
+    // Use system SSH configuration by default
+    remote.ssh_options.push("-F".to_string());
+    remote
+        .ssh_options
+        .push(shellexpand::tilde("~/.ssh/config").to_string());
+
+    // Add any additional CLI SSH options
+    if !cli.ssh_options.is_empty() {
+        remote.ssh_options.extend(cli.ssh_options.clone());
+    }
+    if !cli.rsync_options.is_empty() {
+        remote.rsync_options.extend(cli.rsync_options.clone());
+    }
+
+    // First, verify the remote path exists
+    let check_cmd = format!("test -d '{}' || echo 'NOTFOUND'", remote.path.display());
+    match remote.run_command(&check_cmd) {
+        Ok(output) => {
+            if output.trim() == "NOTFOUND" {
+                return Err(anyhow::anyhow!(
+                    "Remote directory not found: {}. Please verify the path and SSH access.",
+                    remote.path.display()
+                ));
+            }
+        }
+        Err(e) => {
+            return Err(anyhow::anyhow!(
+                "Failed to access remote host '{}'. Error: {}. Please verify your SSH configuration.",
+                remote.host,
+                e
+            ));
+        }
+    }
+
+    // Check if dedups is installed on the remote
+    let dedups_installed = tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(remote.check_dedups_installed())?;
+
+    if let Some(dedups_path) = dedups_installed {
+        if cli.use_remote_dedups {
+            log::info!("Using remote dedups at {} for directory scan", dedups_path);
+
+            // Set up SSH protocol for communication
+            let mut protocol = crate::ssh_utils::SshProtocol::new(remote.clone());
+            protocol.connect()?;
+
+            // Prepare dedups arguments for remote execution
+            let mut args_vec = Vec::new();
+
+            // Create bindings for values that need to live long enough
+            let similarity_str = cli.media_similarity.to_string();
+
+            // Always use the absolute path to the directory
+            args_vec.push(remote.path.to_str().unwrap_or("/"));
+
+            // Setup JSON flag for remote when needed
+            if cli.json {
+                args_vec.push("--json");
+            }
+
+            // Add algorithm, which is important for hash consistency
+            if !cli.algorithm.is_empty() {
+                args_vec.push("--algorithm");
+                args_vec.push(&cli.algorithm);
+            }
+
+            // Add common arguments that make sense for remote execution
+            if !cli.include.is_empty() {
+                for pattern in &cli.include {
+                    args_vec.push("--include");
+                    args_vec.push(pattern);
+                }
+            }
+            if !cli.exclude.is_empty() {
+                for pattern in &cli.exclude {
+                    args_vec.push("--exclude");
+                    args_vec.push(pattern);
+                }
+            }
+            if let Some(ref filter_file) = cli.filter_from {
+                args_vec.push("--filter-from");
+                args_vec.push(filter_file.to_str().unwrap_or(""));
+            }
+            if cli.media_mode {
+                args_vec.push("--media-mode");
+                args_vec.push("--media-similarity");
+                args_vec.push(&similarity_str);
+                args_vec.push("--media-resolution");
+                args_vec.push(&cli.media_resolution);
+                for format in &cli.media_formats {
+                    args_vec.push("--media-formats");
+                    args_vec.push(format);
+                }
+            }
+
+            // Create a vector of string slices manually
+            let mut args = Vec::new();
+            for s in &args_vec {
+                args.push(s.as_ref());
+            }
+
+            // Execute remote dedups scan and parse results
+            let output = protocol.execute_dedups(&args, cli)?;
+            log::debug!("Remote dedups raw output length: {} bytes", output.len());
+
+            // Now try to parse the JSON output
+            if cli.json {
+                // Try to extract duplicate sets from the stream of JSON responses
+                let mut duplicate_sets = Vec::new();
+                let mut file_infos = Vec::new();
+
+                for line in output.lines() {
+                    let line = line.trim();
+                    if line.is_empty() {
+                        continue;
+                    }
+
+                    // Check if it's a valid JSON line
+                    if !line.starts_with('{') || !line.ends_with('}') {
+                        continue;
+                    }
+
+                    // Try to parse as different JSON output types
+                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(line) {
+                        if let Some(type_val) = parsed.get("type") {
+                            let type_str = type_val.as_str().unwrap_or("");
+
+                            match type_str {
+                                "duplicate_set" => {
+                                    // Extract the duplicate set
+                                    if let Some(duplicate_set) = parsed.get("files") {
+                                        if let Some(files_array) = duplicate_set.as_array() {
+                                            let mut files = Vec::new();
+
+                                            // Process each file
+                                            for file in files_array {
+                                                if let Some(path_str) =
+                                                    file.get("path").and_then(|p| p.as_str())
+                                                {
+                                                    let size = file
+                                                        .get("size")
+                                                        .and_then(|s| s.as_u64())
+                                                        .unwrap_or(0);
+                                                    let hash = file
+                                                        .get("hash")
+                                                        .and_then(|h| h.as_str())
+                                                        .map(|s| s.to_string());
+
+                                                    let file_info = FileInfo {
+                                                        path: PathBuf::from(path_str),
+                                                        size,
+                                                        hash: hash.clone(),
+                                                        modified_at: None, // These would be in the JSON but we're simplified here
+                                                        created_at: None,
+                                                    };
+
+                                                    let file_info_clone = file_info.clone();
+                                                    files.push(file_info);
+                                                    file_infos.push(file_info_clone);
+                                                }
+                                            }
+
+                                            if !files.is_empty() {
+                                                let size = files[0].size;
+                                                let hash =
+                                                    files[0].hash.clone().unwrap_or_default();
+
+                                                duplicate_sets.push(DuplicateSet {
+                                                    files,
+                                                    size,
+                                                    hash,
+                                                });
+                                            }
+                                        }
+                                    }
+                                }
+                                "result" => {
+                                    // Final result, just log statistics
+                                    let duplicate_count = parsed
+                                        .get("duplicate_count")
+                                        .and_then(|v| v.as_u64())
+                                        .unwrap_or(0);
+                                    let total_files = parsed
+                                        .get("total_files")
+                                        .and_then(|v| v.as_u64())
+                                        .unwrap_or(0);
+
+                                    log::info!(
+                                        "Remote scan complete: {} duplicate sets across {} files",
+                                        duplicate_count,
+                                        total_files
+                                    );
+                                }
+                                "error" => {
+                                    // Error message from remote
+                                    let message = parsed
+                                        .get("message")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("Unknown error");
+                                    log::error!("Remote error: {}", message);
+
+                                    return Err(anyhow::anyhow!("Remote error: {}", message));
+                                }
+                                _ => {
+                                    // Other types like progress we can just pass through
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // If we found FileInfo objects, we can process those directly
+                if !file_infos.is_empty() {
+                    return Ok(file_infos);
+                }
+
+                // If we found DuplicateSets, we need to convert to FileInfo objects
+                if !duplicate_sets.is_empty() {
+                    let mut all_files = Vec::new();
+                    for set in duplicate_sets {
+                        all_files.extend(set.files);
+                    }
+                    return Ok(all_files);
+                }
+            } else if let Ok(scan_result) = serde_json::from_str::<Vec<FileInfo>>(&output) {
+                // Legacy format - just a list of FileInfo objects
+                log::debug!(
+                    "Successfully parsed remote dedups response: {} files",
+                    scan_result.len()
+                );
+                return Ok(scan_result);
+            }
+
+            // If we reach here, JSON parsing failed
+            log::info!("Remote dedups output could not be parsed correctly; falling back to basic remote listing");
+            handle_remote_fallback(cli, &remote)
+        } else {
+            log::info!(
+                "Remote dedups found at {} but use_remote_dedups is disabled",
+                dedups_path
+            );
+            handle_remote_fallback(cli, &remote)
+        }
+    } else {
+        if dedups_installed.is_none() && cli.allow_remote_install {
+            log::info!("dedups not found on remote, attempting installation");
+            match remote.install_dedups(cli) {
+                Ok(path) => {
+                    log::info!(
+                        "Successfully installed dedups at {}, retrying operation",
+                        path
+                    );
+                    // Retry the operation now that dedups is installed
+                    return handle_directory(cli, dir_path);
+                }
+                Err(e) => {
+                    log::warn!("Failed to install dedups on remote: {}", e);
+                }
+            }
+        }
+
+        // Check if we're in media mode and warn appropriately
+        if cli.media_mode {
+            if dedups_installed.is_none() {
+                return Err(anyhow::anyhow!(
+                    "Media mode requires dedups to be installed on the remote host '{}'. \
+                    Please install dedups on the remote system or use --allow-remote-install.",
+                    remote.host
+                ));
+            } else if !cli.use_remote_dedups {
+                return Err(anyhow::anyhow!(
+                    "Media mode requires remote dedups to be enabled. \
+                    Please enable with --use-remote-dedups or update your .deduprc configuration."
+                ));
+            }
+        }
+
+        handle_remote_fallback(cli, &remote)
+    }
+}
+
+#[cfg(feature = "ssh")]
+fn handle_remote_fallback(
+    cli: &crate::Cli,
+    remote: &crate::ssh_utils::RemoteLocation,
+) -> Result<Vec<FileInfo>> {
+    // Fallback to limited remote scanning via SSH commands
+    log::warn!("Using limited remote scanning functionality (no remote dedups available)");
+
+    // Create a runtime for async operations
+    let rt = tokio::runtime::Runtime::new()?;
+    let dedups_installed = rt.block_on(remote.check_dedups_installed())?;
+
+    if dedups_installed.is_none() {
+        log::info!("To enable full functionality, install dedups on the remote host or use --allow-remote-install");
+    } else if !cli.use_remote_dedups {
+        log::info!("To enable full functionality, enable remote dedups with --use-remote-dedups");
+    }
+
+    // Perform basic file listing with remote commands
+    let command = format!(
+        "find {} -type f -not -path '*/\\.*' | sort",
+        remote.path.display()
+    );
+    let output = remote.run_command(&command)?;
+
+    // Parse output into FileInfo structs
+    let mut file_infos = Vec::new();
+    for line in output.lines() {
+        let path = std::path::PathBuf::from(line.trim());
+
+        // Get file stats
+        let stat_cmd = format!("stat -c '%s %Y' '{}'", path.display());
+        let stat_output = remote.run_command(&stat_cmd)?;
+        let parts: Vec<&str> = stat_output.split_whitespace().collect();
+
+        if parts.len() >= 2 {
+            let size = parts[0].parse::<u64>().unwrap_or(0);
+            let mtime_secs = parts[1].parse::<u64>().unwrap_or(0);
+
+            // Create the FileInfo with correct modified_at type
+            let file_info = FileInfo {
+                path: path.clone(),
+                size,
+                modified_at: std::time::SystemTime::UNIX_EPOCH
+                    .checked_add(std::time::Duration::from_secs(mtime_secs)),
+                created_at: None, // Not easily available on all systems
+                hash: None,       // We'll compute this later if needed
+            };
+
+            file_infos.push(file_info);
+        }
+    }
+
+    Ok(file_infos)
+}
+
+// Helper function to convert std::io::Result<FileTime> to Option<SystemTime>
+fn file_time_to_system_time(time_result: std::io::Result<SystemTime>) -> Option<SystemTime> {
+    time_result.ok()
+}
+
+#[cfg(feature = "ssh")]
+pub fn handle_remote_path(path: &Path) -> Result<Vec<FileInfo>> {
+    let path_str = path.to_string_lossy();
+    if let Some(path_str) = path_str.strip_prefix("ssh:") {
+        let remote_location =
+            crate::ssh_utils::RemoteLocation::parse(path_str).with_context(|| {
+                format!(
+                    "Failed to parse remote path: {}. Format should be ssh:host:/path",
+                    path_str
+                )
+            })?;
+
+        // Create a CLI configuration for scanning
+        let mut cli = crate::Cli::with_config()?;
+        cli.directories = vec![remote_location.path.clone()];
+        cli.use_remote_dedups = true;
+        cli.allow_remote_install = true;
+
+        // Use the handle_remote_directory function to scan
+        #[cfg(feature = "ssh")]
+        {
+            handle_remote_directory(&cli, path)
+        }
+
+        #[cfg(not(feature = "ssh"))]
+        {
+            Err(anyhow::anyhow!("SSH support is not enabled in this build"))
+        }
+    } else {
+        Err(anyhow::anyhow!("Not a valid SSH path: {}", path_str))
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ProgressInfo {
+    pub stage: u8,          // Current processing stage (1=scanning, 2=grouping, 3=hashing)
+    pub stage_name: String, // Human-readable stage name
+    pub files_processed: usize, // Number of files processed so far
+    pub total_files: usize, // Total number of files to process (if known)
+    pub percent_complete: f32, // Percentage complete (0-100)
+    pub current_file: Option<String>, // Current file being processed (if applicable)
+    pub bytes_processed: u64, // Bytes processed so far
+    pub total_bytes: u64,   // Total bytes to process (if known)
+    pub elapsed_seconds: f64, // Seconds elapsed since start
+    pub estimated_seconds_left: Option<f64>, // Estimated seconds remaining (if calculable)
+    pub status_message: String, // Status message for display
+}
+
+impl Default for ProgressInfo {
+    fn default() -> Self {
+        Self {
+            stage: 1,
+            stage_name: "Initializing".to_string(),
+            files_processed: 0,
+            total_files: 0,
+            percent_complete: 0.0,
+            current_file: None,
+            bytes_processed: 0,
+            total_bytes: 0,
+            elapsed_seconds: 0.0,
+            estimated_seconds_left: None,
+            status_message: "Starting scan...".to_string(),
+        }
+    }
+}
+
+/// Wrapper for JSON streaming output
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "type")]
+pub enum JsonOutput {
+    #[serde(rename = "progress")]
+    Progress(ProgressInfo),
+
+    #[serde(rename = "duplicate_set")]
+    DuplicateSet(DuplicateSet),
+
+    #[serde(rename = "result")]
+    Result {
+        duplicate_count: usize,
+        total_files: usize,
+        total_bytes: u64,
+        duplicate_bytes: u64,
+        elapsed_seconds: f64,
+    },
+
+    #[serde(rename = "error")]
+    Error { message: String, code: Option<i32> },
+}
+
+// Add this function near the existing find_duplicate_files_with_progress function
+pub fn find_duplicate_files_with_json_progress(
+    cli: &crate::Cli,
+    tx_progress: StdMpscSender<ScanMessage>,
+) -> Result<Vec<DuplicateSet>> {
+    // Clone tx before moving it into any closure
+    let tx_progress_for_media = tx_progress.clone();
+    let start_time = std::time::Instant::now();
+
+    log::info!(
+        "[ScanThread] Starting scan with JSON progress updates for directory: {:?}",
+        cli.directories[0]
+    );
+
+    let filter_rules = FilterRules::new(cli)?;
+
+    // Initialize file cache if using fast mode
+    let file_cache = if cli.fast_mode && cli.cache_location.is_some() {
+        let cache_dir = cli.cache_location.as_ref().unwrap();
+        match crate::file_cache::FileCache::new(cache_dir, &cli.algorithm) {
+            Ok(cache) => {
+                log::info!(
+                    "[ScanThread] Using file cache at {:?} with {} entries",
+                    cache_dir,
+                    cache.len()
+                );
+                Some(std::sync::Arc::new(std::sync::Mutex::new(cache)))
+            }
+            Err(e) => {
+                log::warn!("[ScanThread] Failed to initialize file cache: {}", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // Track cache hits using atomic
+    let cache_hits = std::sync::atomic::AtomicUsize::new(0);
+
+    // Helper to send progress updates in JSON format
+    let send_json_progress = |stage: u8,
+                              stage_name: &str,
+                              files_processed: usize,
+                              total_files: usize,
+                              bytes_processed: u64,
+                              total_bytes: u64,
+                              status_message: &str| {
+        let elapsed = start_time.elapsed().as_secs_f64();
+        let percent = if total_files > 0 {
+            (files_processed as f32 / total_files as f32) * 100.0
+        } else {
+            0.0
+        };
+
+        // Calculate estimated time remaining
+        let estimated_left = if files_processed > 0 && percent > 0.0 {
+            let time_per_file = elapsed / files_processed as f64;
+            let files_left = total_files.saturating_sub(files_processed);
+            Some(time_per_file * files_left as f64)
+        } else {
+            None
+        };
+
+        let progress = ProgressInfo {
+            stage,
+            stage_name: stage_name.to_string(),
+            files_processed,
+            total_files,
+            percent_complete: percent,
+            current_file: None, // We could add this if needed
+            bytes_processed,
+            total_bytes,
+            elapsed_seconds: elapsed,
+            estimated_seconds_left: estimated_left,
+            status_message: status_message.to_string(),
+        };
+
+        let json_output = JsonOutput::Progress(progress);
+
+        // Convert to JSON and print
+        if let Ok(json_str) = serde_json::to_string(&json_output) {
+            println!("{}", json_str);
+        }
+
+        // Also send the progress update through the channel for TUI
+        if tx_progress
+            .send(ScanMessage::StatusUpdate(stage, status_message.to_string()))
+            .is_err()
+        {
+            log::warn!("[ScanThread] Failed to send status update to TUI (channel closed).");
+        }
+    };
+
+    // ========== STAGE 1: FILE DISCOVERY ==========
+    send_json_progress(1, "Scanning", 0, 0, 0, 0, "Starting file scan");
+
+    // Collect files from all directories
+    let mut all_files = Vec::new();
+    let mut total_bytes = 0;
+    let mut current_directory_index = 0;
+
+    // First pass - count total files for better progress reporting
+    let mut total_file_count = 0;
+    for directory in &cli.directories {
+        // This is just an estimate since we can't know exactly how many files we'll scan
+        match count_files_in_directory(directory, &filter_rules) {
+            Ok(count) => total_file_count += count,
+            Err(e) => log::warn!("Failed to count files in {}: {}", directory.display(), e),
+        }
+    }
+
+    // Main scan
+    for directory in &cli.directories {
+        current_directory_index += 1;
+        let dir_str = directory.to_string_lossy().to_string();
+
+        send_json_progress(
+            1,
+            "Scanning",
+            all_files.len(),
+            total_file_count,
+            total_bytes,
+            0,
+            &format!(
+                "Scanning directory {} of {}: {}",
+                current_directory_index,
+                cli.directories.len(),
+                dir_str
+            ),
+        );
+
+        // Check if this is a remote directory
+        let mut files = handle_directory(cli, directory)?;
+
+        // Calculate total bytes
+        for file in &files {
+            total_bytes += file.size;
+        }
+
+        // Add files to the main list
+        let files_count = files.len();
+        all_files.append(&mut files);
+
+        // Update progress
+        send_json_progress(
+            1,
+            "Scanning",
+            all_files.len(),
+            total_file_count,
+            total_bytes,
+            total_bytes,
+            &format!("Found {} files in {}", files_count, dir_str),
+        );
+    }
+
+    let total_files = all_files.len();
+
+    // ========== STAGE 2: SIZE COMPARISON ==========
+    send_json_progress(
+        2,
+        "Grouping",
+        0,
+        total_files,
+        0,
+        total_bytes,
+        "Grouping files by size",
+    );
+
+    // Group files by size
+    let mut size_groups: HashMap<u64, Vec<FileInfo>> = HashMap::new();
+    let mut files_processed = 0;
+
+    for file in all_files {
+        size_groups.entry(file.size).or_default().push(file);
+        files_processed += 1;
+
+        // Update progress periodically
+        if files_processed % 1000 == 0 || files_processed == total_files {
+            send_json_progress(
+                2,
+                "Grouping",
+                files_processed,
+                total_files,
+                total_bytes,
+                total_bytes,
+                &format!(
+                    "Grouped {} of {} files by size",
+                    files_processed, total_files
+                ),
+            );
+        }
+    }
+
+    // Keep only groups with more than one file (potential duplicates)
+    let potential_duplicates: Vec<(u64, Vec<FileInfo>)> = size_groups
+        .into_iter()
+        .filter(|(_, files)| files.len() > 1)
+        .collect();
+
+    let _potential_duplicate_count = potential_duplicates.len();
+
+    if potential_duplicates.is_empty() {
+        send_json_progress(
+            3,
+            "Complete",
+            total_files,
+            total_files,
+            total_bytes,
+            total_bytes,
+            "Scan complete. No potential duplicates found.",
+        );
+        log::info!("[ScanThread] No potential duplicates found after size grouping.");
+
+        // No duplicates found, but if media mode is enabled, we should handle it separately
+        if cli.media_mode && cli.media_dedup_options.enabled {
+            // Clone before moving tx_progress into closure
+            let tx_clone = tx_progress_for_media.clone();
+            return find_similar_media_files_with_progress(cli, tx_clone);
+        }
+
+        // Return empty result, but also output JSON result summary
+        if cli.json {
+            let result = JsonOutput::Result {
+                duplicate_count: 0,
+                total_files,
+                total_bytes,
+                duplicate_bytes: 0,
+                elapsed_seconds: start_time.elapsed().as_secs_f64(),
+            };
+
+            if let Ok(json_str) = serde_json::to_string(&result) {
+                println!("{}", json_str);
+            }
+        }
+
+        return Ok(Vec::new());
+    }
+
+    let potential_groups = potential_duplicates.len();
+    let potential_files: usize = potential_duplicates
+        .iter()
+        .map(|(_, group)| group.len())
+        .sum();
+
+    send_json_progress(
+        2,
+        "Grouping",
+        total_files,
+        total_files,
+        total_bytes,
+        total_bytes,
+        &format!(
+            "Found {} size groups with {} potential duplicate files",
+            potential_groups, potential_files
+        ),
+    );
+
+    log::info!(
+        "[ScanThread] Found {} sizes with potential duplicates. Calculating hashes...",
+        potential_groups
+    );
+
+    // ========== STAGE 3: HASH CALCULATION ==========
+    let num_threads = cli.parallel.unwrap_or_else(num_cpus::get);
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(num_threads)
+        .build()?;
+    log::info!("[ScanThread] Using {} threads for hashing.", num_threads);
+
+    // For MPSC between hashing threads and this function's aggregation logic
+    let (local_tx, local_rx) = std::sync::mpsc::channel::<Result<HashMap<String, Vec<FileInfo>>>>();
+    let total_groups_to_hash = potential_duplicates.len();
+    let mut groups_hashed_count = 0;
+    let total_files_to_hash = potential_files;
+    let mut files_hashed_count = 0;
+
+    send_json_progress(
+        3,
+        "Hashing",
+        0,
+        total_files_to_hash,
+        0,
+        total_bytes,
+        &format!(
+            "Hashing {} files across {} size groups (using {} threads)...",
+            total_files_to_hash, total_groups_to_hash, num_threads
+        ),
+    );
+
+    // Shared storage for all duplicate sets
+    let mut duplicate_sets: Vec<DuplicateSet> = Vec::new();
+
+    // Some variables needed for updating UI
+    let update_interval = std::time::Duration::from_millis(400);
+    let mut last_update_time = std::time::Instant::now();
+
+    pool.install(|| {
+        potential_duplicates.par_iter().for_each_with(
+            local_tx,
+            |thread_local_tx, (size, files)| {
+                let mut hashes_in_group: HashMap<String, Vec<FileInfo>> = HashMap::new();
+
+                // Thread-local cache hits counter
+                let mut thread_cache_hits = 0;
+
+                for file_info in files {
+                    // Try to get hash from cache first if fast mode is enabled
+                    let mut hash_from_cache = None;
+                    if let Some(cache) = file_cache.as_ref() {
+                        if let Ok(cache_guard) = cache.lock() {
+                            hash_from_cache = cache_guard.get_file_info(&file_info.path);
+                            if hash_from_cache.is_some() {
+                                thread_cache_hits += 1;
+                            }
+                        }
+                    }
+
+                    match hash_from_cache {
+                        // Use cached hash if available
+                        Some(cached_info) => {
+                            if let Some(hash_str) = &cached_info.hash {
+                                hashes_in_group.entry(hash_str.clone()).or_default().push(
+                                    FileInfo {
+                                        path: file_info.path.clone(),
+                                        size: *size,
+                                        hash: Some(hash_str.clone()),
+                                        modified_at: cached_info.modified_at,
+                                        created_at: cached_info.created_at,
+                                    },
+                                );
+                            }
+                        }
+                        // Calculate hash if not cached or cache miss
+                        None => match calculate_hash(&file_info.path, &cli.algorithm) {
+                            Ok(hash_str) => {
+                                let metadata = match fs::metadata(&file_info.path) {
+                                    Ok(m) => m,
+                                    Err(e) => {
+                                        log::warn!(
+                                            "Failed to get metadata for {:?}: {}",
+                                            file_info.path,
+                                            e
+                                        );
+                                        continue;
+                                    }
+                                };
+                                let file_info = FileInfo {
+                                    path: file_info.path.clone(),
+                                    size: *size,
+                                    hash: Some(hash_str.clone()),
+                                    modified_at: file_time_to_system_time(metadata.modified()),
+                                    created_at: file_time_to_system_time(metadata.created()),
+                                };
+
+                                // Update cache if available
+                                if let Some(cache) = &file_cache {
+                                    if let Ok(mut cache_guard) = cache.lock() {
+                                        let _ = cache_guard.store(&file_info, &cli.algorithm);
+                                    }
+                                }
+
+                                hashes_in_group.entry(hash_str).or_default().push(file_info);
+                            }
+                            Err(e) => {
+                                log::warn!("Failed to hash file {:?}: {}", file_info.path, e);
+                            }
+                        },
+                    }
+                }
+
+                // Accumulate cache hits
+                cache_hits.fetch_add(thread_cache_hits, std::sync::atomic::Ordering::Relaxed);
+
+                // Return hashes from this group via channel
+                thread_local_tx
+                    .send(Ok(hashes_in_group))
+                    .expect("Channel to be open");
+            },
+        );
+    });
+
+    // Process results from hashing threads
+    let mut files_hashed = 0;
+    let mut duplicate_bytes = 0;
+
+    while let Ok(result) = local_rx.try_recv() {
+        match result {
+            Ok(hashes_in_group) => {
+                groups_hashed_count += 1;
+
+                // Count files to be processed for progress updates
+                let files_in_group = hashes_in_group.values().map(|v| v.len()).sum::<usize>();
+                files_hashed += files_in_group;
+
+                // Only keep duplicate sets (with 2+ files)
+                for (hash, files) in hashes_in_group {
+                    if files.len() >= 2 {
+                        // Count the duplicate bytes (size * (count-1) because we keep one copy)
+                        let size = files[0].size;
+                        duplicate_bytes += size * (files.len() as u64 - 1);
+
+                        // Stream each duplicate set as it's found if in JSON mode
+                        if cli.json {
+                            let duplicate_set = DuplicateSet {
+                                files: files.clone(),
+                                size,
+                                hash: hash.clone(),
+                            };
+
+                            let json_output = JsonOutput::DuplicateSet(duplicate_set);
+                            if let Ok(json_str) = serde_json::to_string(&json_output) {
+                                println!("{}", json_str);
+                            }
+                        }
+
+                        duplicate_sets.push(DuplicateSet { files, size, hash });
+                    }
+                }
+
+                // Update progress UI periodically to avoid too many updates
+                let now = std::time::Instant::now();
+                if now.duration_since(last_update_time) >= update_interval
+                    || groups_hashed_count == total_groups_to_hash
+                {
+                    last_update_time = now;
+                    files_hashed_count += files_hashed;
+                    files_hashed = 0;
+
+                    let percent =
+                        (groups_hashed_count as f32 / total_groups_to_hash as f32) * 100.0;
+                    let status = format!(
+                        "Hashed {} of {} files ({:.1}%, {} duplicate sets found)",
+                        files_hashed_count,
+                        total_files_to_hash,
+                        percent,
+                        duplicate_sets.len()
+                    );
+
+                    send_json_progress(
+                        3,
+                        "Hashing",
+                        files_hashed_count,
+                        total_files_to_hash,
+                        0,
+                        total_bytes,
+                        &status,
+                    );
+                }
+            }
+            Err(e) => {
+                log::error!("Error during hashing: {}", e);
+                if cli.json {
+                    let error = JsonOutput::Error {
+                        message: format!("Error during hashing: {}", e),
+                        code: Some(1),
+                    };
+                    if let Ok(json_str) = serde_json::to_string(&error) {
+                        println!("{}", json_str);
+                    }
+                }
+            }
+        }
+    }
+
+    // Final progress update
+    let status = format!(
+        "Scan complete. Found {} duplicate sets with {} files.",
+        duplicate_sets.len(),
+        duplicate_sets.iter().map(|s| s.files.len()).sum::<usize>()
+    );
+
+    send_json_progress(
+        3,
+        "Complete",
+        total_files,
+        total_files,
+        total_bytes,
+        total_bytes,
+        &status,
+    );
+
+    // Output final result summary
+    if cli.json {
+        let result = JsonOutput::Result {
+            duplicate_count: duplicate_sets.len(),
+            total_files,
+            total_bytes,
+            duplicate_bytes,
+            elapsed_seconds: start_time.elapsed().as_secs_f64(),
+        };
+
+        if let Ok(json_str) = serde_json::to_string(&result) {
+            println!("{}", json_str);
+        }
+    }
+
+    // Sort sets by size (largest first) for more useful output
+    duplicate_sets.sort_by(|a, b| b.size.cmp(&a.size));
+
+    Ok(duplicate_sets)
 }

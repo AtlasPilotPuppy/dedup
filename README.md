@@ -33,17 +33,30 @@ A high-performance duplicate file finder and manager written in Rust. `dedups` e
 curl -sSL https://raw.githubusercontent.com/AtlasPilotPuppy/dedup/main/install.sh | bash
 ```
 
-Or run this one-liner to install manually:
+If you need SSH/remote file system support, use:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/AtlasPilotPuppy/dedup/main/install.sh > install.sh && chmod +x install.sh && ./install.sh
+# Install with SSH support
+curl -sSL https://raw.githubusercontent.com/AtlasPilotPuppy/dedup/main/install.sh | bash -s -- --ssh
+```
+
+Alternatively, save the script and run it manually:
+
+```bash
+curl -sSL https://raw.githubusercontent.com/AtlasPilotPuppy/dedup/main/install.sh > install.sh && chmod +x install.sh
+
+# Standard version
+./install.sh
+
+# SSH-enabled version
+./install.sh --ssh
 ```
 
 The script will:
 1. Detect your operating system and architecture
-2. Download the appropriate binary from the latest release
-3. Install it to `/usr/local/bin` (or `~/.local/bin` if no sudo access)
-4. Make it executable
+2. Download the appropriate binary from the latest GitHub release
+3. Install it to `/usr/local/bin` or `~/.local/bin` if no sudo access is available
+4. Make the binary executable
 
 ### From Cargo
 
@@ -273,7 +286,7 @@ ARGS:
 OPTIONS:
     -d, --delete                 Delete duplicate files automatically based on selection strategy
     -M, --move-to <move-to>      Move duplicate files to a specified directory
-    -l, --log                    Enable logging to a file (default: dedup.log)
+    -l, --log                    Enable logging to a file (default: dedups.log)
         --log-file <PATH>        Specify a custom log file path
     -o, --output <o>             Output duplicate sets to a file (e.g., duplicates.json)
     -f, --format <format>        Format for the output file [json|toml] [default: json]
@@ -304,6 +317,10 @@ OPTIONS:
                                  Preferred formats for media files (comma-separated, e.g., 'raw,png,jpg')
         --media-similarity <threshold>
                                  Similarity threshold percentage for media files (0-100) [default: 90]
+        --allow-remote-install    Allow installation of dedups on remote systems [default: true]
+        --ssh-options <options>   SSH options to pass to the ssh command (comma-separated)
+        --rsync-options <options> Rsync options to pass to the rsync command (comma-separated)
+        --use-remote-dedups       Use remote dedups instance if available [default: true]
     -h, --help                   Print help information
     -V, --version                Print version information
 ```
@@ -415,3 +432,329 @@ You can also specify a custom configuration file using the `--config-file` optio
 ```bash
 dedups --config-file /path/to/my-config.toml /path/to/directory
 ```
+
+## Remote File Systems with SSH/Rsync
+
+The SSH version of dedups supports working with remote file systems to:
+- Find duplicates on remote systems
+- Copy missing files between local and remote systems
+- Delete or move remote duplicate files
+- Deduplicate across local and remote file systems
+
+### SSH Path Format
+
+Remote paths are specified in the following format:
+- `ssh:host:/path` - Basic format with hostname and path
+- `ssh:user@host:/path` - With username
+- `ssh:user@host:port:/path` - With username and port
+- `ssh:host:/path:ssh_opts:rsync_opts` - With SSH and rsync options
+
+Examples:
+```bash
+# Scan remote directory
+dedups ssh:server.example.com:/home/user/photos
+
+# Sync files from local to remote
+dedups /local/photos ssh:user@server.example.com:/remote/backup
+
+# Use custom SSH options
+dedups ssh:server.example.com:/data:-i,~/.ssh/custom_key,-o,StrictHostKeyChecking=no
+
+# Use custom rsync options
+dedups /local/data ssh:server.example.com:/remote/data::--info=progress2,--no-perms
+
+# Use SSH tunnel for reliable JSON streaming (for interactive progress monitoring)
+dedups ssh:server.example.com:/home/user/photos --json --use-ssh-tunnel
+```
+
+### Requirements
+
+- SSH access to the remote system
+- SSH key authentication configured (password auth is not supported)
+- rsync installed on both local and remote systems for file transfers
+- Optional: dedups installed on the remote system for advanced features
+- For SSH tunneling: `netcat` (nc) on the remote system for reliable JSON streaming
+
+### Remote Dedups Detection
+
+When connecting to a remote system, dedups automatically:
+1. Checks if dedups is installed on the remote system
+2. If found, uses the remote dedups for efficient scanning and deduplication
+3. If not found, offers to install dedups on the remote system
+
+You can control this behavior with:
+- `--allow-remote-install=[true|false]` - Allow or prevent remote installation
+- `--use-remote-dedups=[true|false]` - Enable or disable using remote dedups
+- `--use-sudo` - Use sudo for installation (will prompt for password if needed)
+- `--use-ssh-tunnel=[true|false]` - Enable or disable SSH tunneling for JSON streaming (default: true)
+
+The installation location depends on sudo access:
+- With sudo: `/usr/local/bin` (system-wide installation)
+- Without sudo: `~/.local/bin` (user-specific installation)
+
+### SSH Tunneling for JSON Output
+
+When using remote dedups with JSON output (which is used for interactive features and progress monitoring), 
+dedups uses an SSH tunnel to ensure reliable JSON streaming between the local and remote instances.
+
+This feature:
+- Creates a secure tunnel for JSON data transmission
+- Uses a dedicated API-style communication channel on port 29875 (configurable)
+- Separates protocol data from logs and other output
+- Provides real-time progress updates from remote operations
+- Uses Protocol Buffers for efficient data serialization
+- Falls back to standard SSH if tunneling is unavailable
+
+You can control this behavior with:
+- `--use-ssh-tunnel` - Enable SSH tunneling (default)
+- `--no-use-ssh-tunnel` - Disable SSH tunneling and use standard SSH connection
+- `--tunnel-api-mode` - Use the improved API-style communication (default)
+- `--no-tunnel-api-mode` - Use basic tunneling without the enhanced API separation
+- `--port <number>` - Specify a custom port for the tunnel (default: 29875)
+
+Requirements for optimal tunneling:
+- SSH port forwarding permissions
+- Local and remote ports available (default 29875 or auto-selected)
+
+### Remote File Operations
+
+All standard dedups operations work with remote paths:
+
+```bash
+# Find duplicates on a remote system
+dedups ssh:server.example.com:/home/user/photos -o duplicates.json
+
+# Find and delete duplicates on a remote system
+dedups ssh:server.example.com:/home/user/photos --delete --mode newest_modified
+
+# Copy missing files from local to remote
+dedups /local/photos ssh:server.example.com:/remote/backup
+
+# Copy missing files from remote to local
+dedups ssh:server.example.com:/remote/photos /local/backup
+
+# Move duplicate files on a remote system to a different remote directory
+dedups ssh:server.example.com:/photos --move-to ssh:server.example.com:/duplicates
+
+# Deduplicate between local and remote directories
+dedups /local/photos ssh:server.example.com:/remote/photos --deduplicate
+```
+
+### Additional SSH Examples
+
+Here are more examples showing how to use dedups with SSH/remote filesystems:
+
+#### Delete Duplicates on Remote Host with Dry Run
+
+Delete duplicate files on a remote host keeping the newest copies (safely test with dry run):
+
+```bash
+dedups ssh:user@example.com:/remote/photos --delete --mode newest_modified --dry-run
+```
+
+(Remove `--dry-run` to actually delete files once you're confident with the selection)
+
+#### Move Remote Duplicates to Local Archive
+
+Move duplicates from a remote directory to a local archive:
+
+```bash
+dedups ssh:user@example.com:/remote/photos --move-to /local/archive/duplicates
+```
+
+#### Cross-Host Deduplication
+
+Find and handle duplicates between two remote hosts:
+
+```bash
+dedups ssh:user@server1.com:/data ssh:user@server2.com:/backup --deduplicate
+```
+
+#### Media File Deduplication on Remote Host
+
+Find similar media files (not just exact duplicates) on a remote host:
+
+```bash
+dedups ssh:user@example.com:/photos --media-mode --media-similarity 80
+```
+
+#### Complex Example with Multiple Options
+
+```bash
+dedups /local/photos ssh:user@example.com:/remote/photos:-i,~/.ssh/custom_key:--info=progress2 \
+  --deduplicate --delete --mode newest_modified --media-mode --media-similarity 85 \
+  --output duplicates.json --dry-run
+```
+
+### Performance Considerations
+
+- Using a remote dedups installation is significantly faster for large directories
+- Without remote dedups, operations will be limited to basic file manipulation
+- Media deduplication is not available in fallback mode (without remote dedups)
+- Consider using `--algorithm` with faster hash options like xxhash for remote operations
+
+### Security Considerations
+
+- SSH connections use your standard SSH configuration and keys
+- dedups respects your SSH configuration including key files, known hosts, etc.
+- The `--allow-remote-install` option controls whether dedups can be installed remotely
+- Remote installation requires write access to either `/usr/local/bin` or `~/.local/bin`
+
+### Configuration
+
+You can set default SSH and rsync options in your `.deduprc` file:
+
+```toml
+[ssh]
+allow_remote_install = true
+use_remote_dedups = true
+ssh_options = ["-o", "StrictHostKeyChecking=no"]
+rsync_options = ["--info=progress2"]
+```
+
+### Fallback Mode
+
+If dedups is not installed on the remote system and cannot be installed:
+- Basic file listing and manipulation will be used
+- Limited hashing functionality is available
+- Media deduplication is not available
+- All operations will be significantly slower for large directories
+
+## Protocol Improvements with Protobuf and ZSTD Compression
+
+When using SSH/remote features, `dedups` now supports an improved communication protocol using Protocol Buffers (Protobuf) with optional ZSTD compression. This significantly improves performance and reduces bandwidth usage for remote operations.
+
+### Benefits
+
+- **Faster Communication**: Protocol Buffers offer more efficient serialization compared to JSON
+- **Reduced Bandwidth**: Smaller message size for network transfers
+- **Enhanced Compression**: ZSTD compression provides high compression ratios with minimal CPU usage
+- **Better Performance**: Especially noticeable with large directories or high-latency connections
+
+### How to Enable
+
+Protocol Buffers and compression are enabled by default when using SSH features with the `proto` feature enabled, but you can control them explicitly with these options:
+
+```bash
+# Specify protocol and compression options
+dedups ssh:server.example.com:/home/user/photos --use-protobuf --use-compression
+
+# Disable Protocol Buffers (fall back to JSON)
+dedups ssh:server.example.com:/home/user/photos --no-use-protobuf
+
+# Use Protocol Buffers without compression
+dedups ssh:server.example.com:/home/user/photos --use-protobuf --no-use-compression
+
+# Adjust compression level (1-22, higher = more compression but slower)
+dedups ssh:server.example.com:/home/user/photos --compression-level 9
+```
+
+### Configuration
+
+You can set default Protocol Buffers and compression options in your `.deduprc` file:
+
+```toml
+[protocol]
+use_protobuf = true
+use_compression = true
+compression_level = 3  # Default is 3, range is 1-22
+```
+
+### Performance Impact
+
+- **Small Directories**: For small directories, the overhead of Protobuf might outweigh benefits
+- **Large Directories**: For large directories (1000+ files), expect 2-5x faster network communication
+- **Many Small Files**: When dealing with many small files, compression is particularly effective
+- **High-Latency Networks**: Over VPNs or high-latency networks, the benefits increase significantly
+- **Media Operations**: When using `--media-mode` remotely, expect much better performance due to reduced data transfer
+
+### Protocol Compatibility
+
+`dedups` automatically negotiates the protocol based on:
+
+1. The features with which the client and server were compiled
+2. The settings passed via command line or config file
+3. Client/server capabilities detection
+
+When communicating with older versions of remote `dedups`, the system will automatically fall back to JSON.
+
+# SSH API Communication
+
+When working with remote SSH paths, there are two modes of communication:
+
+1. **Standard mode** (stdout parsing): Used when tunnel mode is explicitly disabled.
+
+2. **Tunnel API mode** (DEFAULT): Creates an SSH tunnel and communicates with a dedicated API server on the remote host for more reliable operation.
+
+## Using Tunnel API Mode
+
+Tunnel API mode is the default for SSH communication. The system automatically:
+- Establishes an SSH tunnel
+- Starts a dedups server on the remote host
+- Communicates using Protocol Buffers (when available)
+- Applies compression for better performance
+- Terminates the server when the client disconnects
+
+For optimal performance, compile with both SSH and protocol features:
+
+```bash
+cargo build --release --features ssh,proto
+```
+
+With this build, all optimal settings are enabled by default:
+```bash
+dedups ssh:host:/path
+```
+
+You can be explicit about using these features:
+```bash
+dedups ssh:host:/path --use-ssh-tunnel --tunnel-api-mode --use-protobuf --use-compression
+```
+
+Or disable the tunnel mode (not recommended):
+```bash
+dedups ssh:host:/path --no-use-ssh-tunnel
+```
+
+## Run the Example
+
+To test this functionality, run the included example script:
+
+```bash
+bash scripts/ssh_api_example.sh
+```
+
+This demonstrates both modes of operation and explains the advantages of tunnel API mode.
+
+## Troubleshooting SSH Connections
+
+If you encounter SSH connection issues:
+
+1. Make sure the host is configured in your `~/.ssh/config`
+2. Verify you have SSH key access to the host
+3. Ensure the host is reachable
+4. Check that the remote path exists
+
+# Local API Server Mode
+
+You can also run dedups in server mode locally for direct API communication:
+
+```bash
+# Start a dedups server on port 29876
+dedups --server-mode --port 29876 /path/to/directory
+
+# Connect to the server (in another terminal)
+dedups /path/to/directory --port 29876 --json
+```
+
+To test this functionality and see protocol communication in action:
+
+```bash
+# Run the local API test script
+./scripts/local_api_test.sh
+
+# For advanced protocol testing
+./scripts/local_api_test.sh --advanced
+```
+
+This demonstrates the same API protocol that is used automatically when working with SSH paths. For detailed protocol documentation, see [docs/api-protocol.md](docs/api-protocol.md).

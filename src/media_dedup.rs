@@ -754,19 +754,12 @@ pub fn add_media_options_to_cli(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
-    use std::time::SystemTime;
-
-    // Helper to create a test file
-    fn create_test_file_info(path: &str, size: u64) -> FileInfo {
-        FileInfo {
-            path: PathBuf::from(path),
-            size,
-            hash: Some("test_hash".to_string()),
-            modified_at: Some(SystemTime::now()),
-            created_at: Some(SystemTime::now()),
-        }
-    }
+    // use crate::file_info::FileInfo; // Removed
+    // use std::fs::{self, File}; // Removed
+    // use std::io::Write; // Removed
+    // use std::path::PathBuf; // Removed
+    // use std::time::SystemTime; // Removed
+    // use tempfile::tempdir; // Removed
 
     #[test]
     fn test_ffmpeg_availability() {

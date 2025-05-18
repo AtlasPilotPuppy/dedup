@@ -2,12 +2,20 @@ name: Release
 
 on:
   push:
+    branches:
+      - main
+      - ssh
     tags:
       - 'v*'
   workflow_dispatch:
 
 permissions:
   contents: write
+
+env:
+  MACOSX_DEPLOYMENT_TARGET: "11.0"  # Set minimum macOS version
+  OPENSSL_DIR: "/usr/local/opt/openssl@3"  # x86_64 OpenSSL path
+  OPENSSL_ROOT_DIR: "/usr/local/opt/openssl@3"  # Required by some build scripts
 
 jobs:
   build:
@@ -16,92 +24,405 @@ jobs:
     strategy:
       matrix:
         include:
+          # Linux x86_64 builds
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             artifact_name: dedups-linux-x86_64
             binary_name: dedups
+            features: "linux"
+            features_flag: "--features linux"
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact_name: dedups-linux-x86_64-ssh-proto
+            binary_name: dedups
+            features: "linux,ssh,proto"
+            features_flag: "--features linux,ssh,proto"
+          
+          # macOS x86_64 builds
           - os: macos-latest
             target: x86_64-apple-darwin
             artifact_name: dedups-macos-x86_64
             binary_name: dedups
+            features: "linux"
+            features_flag: "--features linux"
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact_name: dedups-macos-x86_64-ssh-proto
+            binary_name: dedups
+            features: "linux,ssh,proto"
+            features_flag: "--features linux,ssh,proto"
+          
+          # macOS ARM64 builds
           - os: macos-latest
             target: aarch64-apple-darwin
             artifact_name: dedups-macos-aarch64
             binary_name: dedups
+            features: "linux"
+            features_flag: "--features linux"
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact_name: dedups-macos-aarch64-ssh-proto
+            binary_name: dedups
+            features: "linux,ssh,proto"
+            features_flag: "--features linux,ssh,proto"
+          
+          # Windows x86_64 builds
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             artifact_name: dedups-windows-x86_64.exe
             binary_name: dedups.exe
+            features: ""
+            features_flag: ""
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_name: dedups-windows-x86_64-ssh.exe
+            binary_name: dedups.exe
+            features: "ssh"
+            features_flag: "--features ssh"
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_name: dedups-windows-x86_64-ssh-proto.exe
+            binary_name: dedups.exe
+            features: "ssh,proto"
+            features_flag: "--features ssh,proto"
 
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          target: ${{ matrix.target }}
+      
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      
+      # Install Linux dependencies
+      - name: Install Linux dependencies
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            pkg-config \
+            libssl-dev \
+            build-essential \
+            zlib1g-dev \
+            libssh2-1-dev \
+            openssl
 
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
-      with:
-        targets: ${{ matrix.target }}
+          # Install protobuf compiler if proto feature is enabled
+          if [[ "${{ matrix.features }}" == *"proto"* ]]; then
+            sudo apt-get install -y protobuf-compiler
+            echo "PROTOC=/usr/bin/protoc" >> $GITHUB_ENV
+          fi
+          
+          # Set OpenSSL environment variables
+          echo "OPENSSL_DIR=/usr" >> $GITHUB_ENV
+          echo "OPENSSL_LIB_DIR=/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
+          echo "OPENSSL_INCLUDE_DIR=/usr/include" >> $GITHUB_ENV
+          echo "PKG_CONFIG_PATH=/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/lib/pkgconfig" >> $GITHUB_ENV
 
-    - name: Cache dependencies
-      uses: actions/cache@v4
-      with:
-        path: |
-          ~/.cargo/registry
-          ~/.cargo/git
-          target
-        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          # Verify OpenSSL installation
+          pkg-config --libs openssl
+          pkg-config --modversion openssl
+          ls -la /usr/include/openssl/ || true
+          ls -la /usr/lib/x86_64-linux-gnu/ || true
 
-    - name: Build
-      run: cargo build --release --target ${{ matrix.target }}
+      # Set up x86_64 Homebrew for Intel builds
+      - name: Set up x86_64 Homebrew
+        if: matrix.os == 'macos-latest' && matrix.target == 'x86_64-apple-darwin'
+        shell: bash
+        run: |
+          # Remove existing Homebrew if any
+          sudo rm -rf /usr/local/Homebrew /usr/local/Caskroom /usr/local/Cellar /usr/local/bin/brew
 
-    - name: Prepare artifact
-      shell: bash
-      run: |
-        mkdir -p artifacts
-        if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-          cp target/${{ matrix.target }}/release/dedups.exe artifacts/dedups-windows-x86_64.exe
-        elif [[ "${{ matrix.os }}" == "macos-latest" && "${{ matrix.target }}" == "aarch64-apple-darwin" ]]; then
-          cp target/${{ matrix.target }}/release/dedups artifacts/dedups-macos-aarch64
-        elif [[ "${{ matrix.os }}" == "macos-latest" ]]; then
-          cp target/${{ matrix.target }}/release/dedups artifacts/dedups-macos-x86_64
-        else
-          cp target/${{ matrix.target }}/release/dedups artifacts/dedups-linux-x86_64
-        fi
+          # Set up directories with proper permissions
+          sudo mkdir -p /usr/local
+          sudo chown -R $(whoami) /usr/local/*
+          sudo chown -R $(whoami) /usr/local/
 
-    - name: Upload artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: ${{ matrix.artifact_name }}
-        path: artifacts/${{ matrix.artifact_name }}
+          # Install x86_64 Homebrew
+          NONINTERACTIVE=1 arch -x86_64 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+
+          # Add Homebrew to PATH
+          echo "/usr/local/bin" >> $GITHUB_PATH
+          
+          # Use x86_64 Homebrew
+          eval "$(/usr/local/bin/brew shellenv)"
+          
+          # Verify installation
+          which brew
+          brew --version
+          
+          # Verify architecture
+          arch_name="$(uname -m)"
+          if [ "${arch_name}" = "x86_64" ]; then
+            echo "Running on Intel (${arch_name})"
+          else
+            echo "Will use Rosetta 2 for Intel builds on ${arch_name}"
+          fi
+          
+          # Update Homebrew
+          brew update
+
+      # Install macOS x86_64 dependencies
+      - name: Install macOS x86_64 dependencies
+        if: matrix.os == 'macos-latest' && matrix.target == 'x86_64-apple-darwin'
+        shell: bash
+        run: |
+          # Use x86_64 Homebrew
+          eval "$(/usr/local/bin/brew shellenv)"
+          
+          # Clean up any existing OpenSSL
+          brew uninstall --ignore-dependencies openssl@3 openssl@1.1 || true
+          rm -rf /usr/local/opt/openssl* || true
+          
+          # Install dependencies with x86_64 architecture
+          brew install openssl@3
+          brew install pkg-config
+          
+          # Install protobuf if proto feature is enabled
+          if [[ "${{ matrix.features }}" == *"proto"* ]]; then
+            brew install protobuf
+            echo "PROTOC=/usr/local/bin/protoc" >> $GITHUB_ENV
+          fi
+          
+          # Set OpenSSL environment variables for x86_64
+          echo "OPENSSL_DIR=/usr/local/opt/openssl@3" >> $GITHUB_ENV
+          echo "OPENSSL_ROOT_DIR=/usr/local/opt/openssl@3" >> $GITHUB_ENV
+          echo "OPENSSL_INCLUDE_DIR=/usr/local/opt/openssl@3/include" >> $GITHUB_ENV
+          echo "OPENSSL_LIB_DIR=/usr/local/opt/openssl@3/lib" >> $GITHUB_ENV
+          echo "PKG_CONFIG_PATH=/usr/local/opt/openssl@3/lib/pkgconfig" >> $GITHUB_ENV
+          
+          if [[ "${{ matrix.features }}" == *"ssh"* ]]; then
+            brew install libssh2
+            echo "LIBSSH2_DIR=/usr/local/opt/libssh2" >> $GITHUB_ENV
+            echo "PKG_CONFIG_PATH=/usr/local/opt/openssl@3/lib/pkgconfig:/usr/local/opt/libssh2/lib/pkgconfig" >> $GITHUB_ENV
+          fi
+          
+          # Verify OpenSSL installation
+          pkg-config --libs openssl || true
+          pkg-config --modversion openssl || true
+          ls -la /usr/local/opt/openssl@3/lib/
+          
+          # Link OpenSSL properly
+          mkdir -p /usr/local/lib/pkgconfig
+          ln -sf /usr/local/opt/openssl@3/lib/pkgconfig/* /usr/local/lib/pkgconfig/
+
+      # Install macOS ARM64 dependencies
+      - name: Install macOS ARM64 dependencies
+        if: matrix.os == 'macos-latest' && matrix.target == 'aarch64-apple-darwin'
+        shell: bash
+        run: |
+          # Use ARM64 Homebrew
+          eval "$(/opt/homebrew/bin/brew shellenv)"
+          
+          # Install ARM64 OpenSSL
+          brew install openssl@3
+          brew install pkg-config
+          
+          # Install protobuf if proto feature is enabled
+          if [[ "${{ matrix.features }}" == *"proto"* ]]; then
+            brew install protobuf
+            echo "PROTOC=/opt/homebrew/bin/protoc" >> $GITHUB_ENV
+          fi
+          
+          # Set OpenSSL environment variables for ARM64
+          echo "OPENSSL_DIR=/opt/homebrew/opt/openssl@3" >> $GITHUB_ENV
+          echo "OPENSSL_ROOT_DIR=/opt/homebrew/opt/openssl@3" >> $GITHUB_ENV
+          echo "OPENSSL_INCLUDE_DIR=/opt/homebrew/opt/openssl@3/include" >> $GITHUB_ENV
+          echo "OPENSSL_LIB_DIR=/opt/homebrew/opt/openssl@3/lib" >> $GITHUB_ENV
+          echo "PKG_CONFIG_PATH=/opt/homebrew/opt/openssl@3/lib/pkgconfig" >> $GITHUB_ENV
+          
+          if [[ "${{ matrix.features }}" == *"ssh"* ]]; then
+            brew install libssh2
+            echo "LIBSSH2_DIR=/opt/homebrew/opt/libssh2" >> $GITHUB_ENV
+            echo "PKG_CONFIG_PATH=/opt/homebrew/opt/openssl@3/lib/pkgconfig:/opt/homebrew/opt/libssh2/lib/pkgconfig" >> $GITHUB_ENV
+          fi
+          
+          # Verify OpenSSL installation
+          pkg-config --libs openssl
+          pkg-config --modversion openssl
+          ls -la /opt/homebrew/opt/openssl@3/lib/
+
+      # Set up cross-compilation for ARM on macOS
+      - name: Install cross-compilation tools for macOS ARM
+        if: matrix.target == 'aarch64-apple-darwin'
+        shell: bash
+        run: |
+          rustup target add aarch64-apple-darwin
+
+      # Build with Linux-specific flags
+      - name: Build (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          # Verify environment
+          echo "OpenSSL Dir: $OPENSSL_DIR"
+          echo "OpenSSL Lib Dir: $OPENSSL_LIB_DIR"
+          echo "OpenSSL Include Dir: $OPENSSL_INCLUDE_DIR"
+          echo "PKG_CONFIG_PATH: $PKG_CONFIG_PATH"
+          
+          # Set architecture-specific flags
+          export RUSTFLAGS="-C target-cpu=x86-64-v3 -C target-feature=+aes,+sse2"
+          
+          # Build with OpenSSL configuration
+          OPENSSL_NO_VENDOR=1 cargo build --release --target ${{ matrix.target }} ${{ matrix.features_flag }}
+        env:
+          OPENSSL_NO_VENDOR: "1"
+          OPENSSL_STATIC: "0"
+
+      # Build with macOS x86_64 flags
+      - name: Build (macOS x86_64)
+        if: matrix.os == 'macos-latest' && matrix.target == 'x86_64-apple-darwin'
+        shell: bash
+        run: |
+          # Use x86_64 Homebrew environment
+          eval "$(/usr/local/bin/brew shellenv)"
+          
+          # Verify environment
+          echo "OpenSSL Dir: $OPENSSL_DIR"
+          echo "OpenSSL Root Dir: $OPENSSL_ROOT_DIR"
+          echo "OpenSSL Include Dir: $OPENSSL_INCLUDE_DIR"
+          echo "OpenSSL Lib Dir: $OPENSSL_LIB_DIR"
+          echo "PKG_CONFIG_PATH: $PKG_CONFIG_PATH"
+          
+          # Build with OpenSSL configuration
+          OPENSSL_NO_VENDOR=1 cargo build --release --target ${{ matrix.target }} ${{ matrix.features_flag }}
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+          OPENSSL_NO_VENDOR: "1"
+          OPENSSL_STATIC: "0"
+          RUSTFLAGS: "-C target-cpu=x86-64-v2 -C target-feature=+aes,+sse2"
+
+      # Build with macOS ARM flags
+      - name: Build (macOS ARM)
+        if: matrix.target == 'aarch64-apple-darwin'
+        shell: bash
+        run: |
+          cargo build --release --target ${{ matrix.target }} ${{ matrix.features_flag }}
+        env:
+          RUSTFLAGS: "-C target-feature=+neon"
+
+      # Build with Windows-specific flags
+      - name: Build (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          # Set architecture-specific flags
+          $env:RUSTFLAGS="-C target-cpu=x86-64-v2"
+
+          # Configure vcpkg for OpenSSL
+          $env:VCPKG_ROOT = "$env:GITHUB_WORKSPACE\vcpkg"
+          git clone https://github.com/Microsoft/vcpkg.git $env:VCPKG_ROOT
+          Set-Location $env:VCPKG_ROOT
+          .\bootstrap-vcpkg.bat
+          .\vcpkg.exe install openssl:x64-windows-static
+          
+          # Install protobuf if proto feature is enabled
+          if ("${{ matrix.features }}" -like "*proto*") {
+            # Download and install protoc
+            $protocVersion = "25.1"
+            $protocUrl = "https://github.com/protocolbuffers/protobuf/releases/download/v${protocVersion}/protoc-${protocVersion}-win64.zip"
+            $protocZip = "protoc.zip"
+            $protocDir = "$env:GITHUB_WORKSPACE\protoc"
+            
+            # Download protoc
+            Invoke-WebRequest -Uri $protocUrl -OutFile $protocZip
+            
+            # Extract protoc
+            Expand-Archive -Path $protocZip -DestinationPath $protocDir
+            
+            # Add protoc to PATH and set PROTOC env variable
+            $protocBin = Join-Path $protocDir "bin"
+            $protocExe = Join-Path $protocBin "protoc.exe"
+            $env:PATH = "$protocBin;$env:PATH"
+            $env:PROTOC = $protocExe
+            
+            # Verify protoc installation
+            Write-Host "Protoc bin: $protocBin"
+            Write-Host "Protoc exe: $protocExe"
+            Get-ChildItem $protocBin
+            protoc --version
+          }
+          
+          # Set OpenSSL environment variables
+          $env:OPENSSL_NO_VENDOR = "1"
+          $env:OPENSSL_STATIC = "1"
+          $env:OPENSSL_DIR = "$env:VCPKG_ROOT\installed\x64-windows-static"
+          
+          # Return to workspace and build
+          Set-Location $env:GITHUB_WORKSPACE
+          cargo build --release --target ${{ matrix.target }} ${{ matrix.features_flag }}
+        env:
+          OPENSSL_NO_VENDOR: "1"
+          OPENSSL_STATIC: "1"
+
+      # Prepare artifact on Linux/macOS
+      - name: Prepare artifact (Unix)
+        if: matrix.os != 'windows-latest'
+        shell: bash
+        run: |
+          cd target/${{ matrix.target }}/release
+          cp ${{ matrix.binary_name }} ${{ matrix.artifact_name }}
+          strip ${{ matrix.artifact_name }}
+      
+      # Prepare artifact on Windows (no strip command)
+      - name: Prepare artifact (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          cd target/${{ matrix.target }}/release
+          Copy-Item ${{ matrix.binary_name }} ${{ matrix.artifact_name }}
+      
+      # Upload the artifact
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
+          if-no-files-found: error
 
   release:
-    name: Create Release
+    name: Release
     needs: build
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
+    if: startsWith(github.ref, 'refs/tags/v')
     steps:
-    - uses: actions/checkout@v4
-
-    - name: Download all artifacts
-      uses: actions/download-artifact@v4
-      with:
-        path: artifacts
-
-    - name: Move all artifacts to root
-      run: |
-        find artifacts -type f -exec mv {} . \;
-
-    - name: List downloaded artifacts
-      run: ls -la
-
-    - name: Create Release and Upload Assets
-      uses: softprops/action-gh-release@v1
-      with:
-        files: |
-          dedups-linux-x86_64
-          dedups-macos-x86_64
-          dedups-macos-aarch64
-          dedups-windows-x86_64.exe
-        generate_release_notes: true
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      
+      - name: Move all artifacts to root
+        shell: bash
+        run: |
+          for dir in artifacts/*/; do
+            cp "$dir"/* .
+          done
+          ls -la
+      
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            dedups-linux-x86_64
+            dedups-linux-x86_64-ssh-proto
+            dedups-macos-x86_64
+            dedups-macos-x86_64-ssh-proto
+            dedups-macos-aarch64
+            dedups-macos-aarch64-ssh-proto
+            dedups-windows-x86_64.exe
+            dedups-windows-x86_64-ssh.exe
+            dedups-windows-x86_64-ssh-proto.exe
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
