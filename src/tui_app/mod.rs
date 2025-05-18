@@ -27,6 +27,9 @@ use crate::file_utils::{
 };
 use crate::options::Options; // Using Options instead of Cli
 
+// Add the copy_missing module
+pub mod copy_missing;
+
 // Application state
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)] // Added PartialEq, Eq
 pub enum ActionType {
@@ -132,6 +135,7 @@ pub struct AppState {
     pub job_progress: (usize, usize), // (done, total)
 
     pub dry_run: bool, // Indicates if actions should be performed in dry run mode
+    pub is_copy_missing_mode: bool, // Set to true for copy missing mode
 }
 
 // Channel for messages from scan thread to TUI thread
@@ -194,6 +198,7 @@ impl App {
             job_processing_message: String::new(),
             job_progress: (0, 0),
             dry_run: options.dry_run, // Initialize from Options args
+            is_copy_missing_mode: false, // Set to false for regular mode
         };
 
         // Always perform async scan for TUI
@@ -290,6 +295,17 @@ impl App {
             scan_tx: Some(tx),
             options_config: options.clone(),
         }
+    }
+
+    pub fn new_copy_missing_mode(options: &Options) -> Self {
+        // Start with regular initialization
+        let mut app = Self::new(options);
+        
+        // Override for copy missing mode
+        app.state.is_copy_missing_mode = true;
+        app.state.status_message = Some("Copy Missing Mode - Preparing to scan for files to copy...".to_string());
+        
+        app
     }
 
     fn process_raw_sets_into_grouped_view(
@@ -2747,7 +2763,7 @@ fn ui(frame: &mut Frame, app: &mut App) {
                 if let Some((count, total_count)) = file_counts {
                     // If we have file counts, use those for more granular progress
                     ((current.saturating_sub(1) as f64 / total.max(1) as f64) + 
-                    ((count as f64 / total_count.max(1) as f64) / total.max(1) as f64)).clamp(0.0, 1.0)
+                    ((count as f64 / total_count as f64) / total.max(1) as f64)).clamp(0.0, 1.0)
                 } else {
                     // Otherwise just use the stage number
                     ((current as f64 - 0.5) / total.max(1) as f64).clamp(0.0, 1.0)
@@ -3001,4 +3017,49 @@ fn extract_detailed_metrics(message: &str) -> HashMap<String, String> {
     }
     
     metrics
+}
+
+/// Entry point for the Copy Missing TUI mode
+pub fn run_copy_missing_tui(options: &Options) -> Result<()> {
+    // Just call our unified function with copy_missing set to true
+    run_tui_app_for_mode(options, true)
+}
+
+/// Run the TUI app with support for both deduplication and copy missing modes
+pub fn run_tui_app_for_mode(options: &Options, is_copy_missing: bool) -> Result<()> {
+    // Terminal initialization
+    enable_raw_mode()?;
+    let mut stdout = stdout();
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+    terminal.hide_cursor()?;
+
+    // Create app state based on mode
+    let mut app = if is_copy_missing {
+        log::info!("Creating app in Copy Missing mode");
+        // Use the copy_missing module's specialized constructor
+        copy_missing::create_copy_missing_app(options)
+    } else {
+        log::info!("Creating app in Deduplication mode");
+        App::new(options)
+    };
+    
+    // Main loop
+    let show_tui_progress = options.progress_tui;
+    log::info!("Running main loop with show_tui_progress={}", show_tui_progress);
+    let result = run_main_loop(&mut terminal, &mut app, show_tui_progress);
+
+    // Cleanup and restore terminal
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
+    terminal.show_cursor()?;
+
+    // If there was an error, log it and return it
+    if let Err(err) = &result {
+        log::error!("TUI error: {}", err);
+    }
+
+    result
 }

@@ -1043,3 +1043,147 @@ mod integration {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod copy_missing_tests {
+    use std::fs::{self, File};
+    use std::io::Write;
+    use std::path::{Path, PathBuf};
+    use assert_cmd::Command;
+    use tempfile::TempDir;
+    use predicates::prelude::*;
+
+    fn create_test_directory_structure() -> (TempDir, PathBuf, PathBuf) {
+        // Create temp directories
+        let root_dir = TempDir::new().unwrap();
+        let root_path = root_dir.path().to_path_buf();
+        
+        // Create source directory structure
+        let source_dir = root_path.join("source");
+        fs::create_dir(&source_dir).unwrap();
+        
+        // Create files in source
+        let files = vec![
+            ("file1.txt", "Content of file 1"),
+            ("file2.txt", "Content of file 2"),
+            ("subdir/file3.txt", "Content of file 3"),
+            ("subdir/nested/file4.txt", "Content of file 4"),
+        ];
+        
+        for (path, content) in files {
+            let file_path = source_dir.join(path);
+            if let Some(parent) = file_path.parent() {
+                fs::create_dir_all(parent).unwrap();
+            }
+            let mut file = File::create(file_path).unwrap();
+            file.write_all(content.as_bytes()).unwrap();
+        }
+        
+        // Create destination directory
+        let dest_dir = root_path.join("dest");
+        fs::create_dir(&dest_dir).unwrap();
+        
+        // Create some files in destination that overlap with source
+        let dest_files = vec![
+            ("file1.txt", "Already in destination"), // This one already exists
+        ];
+        
+        for (path, content) in dest_files {
+            let file_path = dest_dir.join(path);
+            let mut file = File::create(file_path).unwrap();
+            file.write_all(content.as_bytes()).unwrap();
+        }
+        
+        (root_dir, source_dir, dest_dir)
+    }
+    
+    fn count_files_in_dir(dir: &Path) -> usize {
+        let mut count = 0;
+        for entry in walkdir::WalkDir::new(dir)
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|e| e.file_type().is_file())
+        {
+            count += 1;
+        }
+        count
+    }
+    
+    #[test]
+    fn test_copy_missing_basic() {
+        // Create test directory structure
+        let (temp_dir, source_dir, dest_dir) = create_test_directory_structure();
+        
+        // Verify initial counts
+        let initial_source_count = count_files_in_dir(&source_dir);
+        let initial_dest_count = count_files_in_dir(&dest_dir);
+        
+        assert_eq!(initial_source_count, 4, "Source should have 4 files");
+        assert_eq!(initial_dest_count, 1, "Destination should have 1 file");
+        
+        // Run the command with copy-missing flag in dry run mode to test
+        let mut cmd = Command::cargo_bin("dedups").unwrap();
+        cmd.arg("--copy-missing")
+           .arg("--dry-run") // Start with dry run for safety
+           .arg(&source_dir)
+           .arg(&dest_dir);
+        
+        let output = cmd.output().unwrap();
+        
+        // Check output has the expected copy missing text
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("Copy Missing mode"), "Should indicate Copy Missing mode");
+        assert!(stdout.contains("files that exist in source but not in target"), "Should show missing files");
+        
+        // Count files again - should be unchanged in dry run
+        let post_dryrun_dest_count = count_files_in_dir(&dest_dir);
+        assert_eq!(post_dryrun_dest_count, initial_dest_count, "No files should be copied in dry run mode");
+        
+        // Now run without dry run to actually copy files
+        let mut cmd = Command::cargo_bin("dedups").unwrap();
+        cmd.arg("--copy-missing")
+           .arg(&source_dir)
+           .arg(&dest_dir);
+        
+        let output = cmd.output().unwrap();
+        
+        // Check output indicates success
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("Successfully copied"), "Should indicate files were copied");
+        
+        // Count files again - should have 3 new files copied (all except file1.txt which already existed)
+        let post_copy_dest_count = count_files_in_dir(&dest_dir);
+        assert_eq!(post_copy_dest_count, initial_dest_count + 3, 
+                   "Should copy 3 new files to destination");
+        
+        // Verify the directory structure is preserved
+        assert!(dest_dir.join("file2.txt").exists(), "file2.txt should be copied");
+        assert!(dest_dir.join("subdir").exists(), "subdir should be created");
+        assert!(dest_dir.join("subdir/file3.txt").exists(), "file3.txt should be copied");
+        assert!(dest_dir.join("subdir/nested").exists(), "nested subdir should be created");
+        assert!(dest_dir.join("subdir/nested/file4.txt").exists(), "file4.txt should be copied");
+    }
+    
+    #[test]
+    fn test_copy_missing_with_explicit_target() {
+        // Create test directory structure
+        let (temp_dir, source_dir, dest_dir) = create_test_directory_structure();
+        
+        // Run the command with copy-missing flag and explicit target
+        let mut cmd = Command::cargo_bin("dedups").unwrap();
+        cmd.arg("--copy-missing")
+           .arg("--target")
+           .arg(&dest_dir)
+           .arg(&source_dir);
+        
+        let output = cmd.output().unwrap();
+        
+        // Check output indicates success
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("Successfully copied"), "Should indicate files were copied");
+        
+        // Verify the missing files were copied
+        assert!(dest_dir.join("file2.txt").exists(), "file2.txt should be copied");
+        assert!(dest_dir.join("subdir/file3.txt").exists(), "file3.txt should be copied");
+    }
+}

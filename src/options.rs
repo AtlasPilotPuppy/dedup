@@ -1,52 +1,17 @@
-// src/lib.rs
-
-// Re-export modules and items that integration tests (and potentially other crates) might need.
-
-// If file_utils is a module in your src directory (e.g., src/file_utils.rs)
-pub mod file_utils;
-
-// If tui_app is a module (e.g., src/tui_app.rs or src/tui_app/mod.rs)
-pub mod tui_app;
-
-// Add the new config module
-pub mod config;
-
-// Add the file cache module
-pub mod file_cache;
-
-// Add the media deduplication module
-pub mod media_dedup;
-
-// Add audio fingerprinting module
-pub mod audio_fingerprint;
-
-// Add video fingerprinting module
-pub mod video_fingerprint;
-
-// Add the new options module
-pub mod options;
-
-// Add the new commands module
-pub mod commands;
-
-// Add the new app_mode module
-pub mod app_mode;
-
-// The old Cli struct is being replaced by Options, so we no longer need to use it directly
-
 use clap::Parser;
 use std::path::PathBuf;
 use std::str::FromStr;
-// Ensure these are correctly pathed if they are part of file_utils module
+use anyhow::Result;
+
+use crate::app_mode::AppMode;
 use crate::config::DedupConfig;
 use crate::file_utils::{SortCriterion, SortOrder};
 use crate::media_dedup::MediaDedupOptions;
 
-// Maintaining Cli for backwards compatibility during migration
-// Applications should transition to using Options instead
+/// Centralized options structure combining CLI arguments and configuration
 #[derive(Parser, Debug, Clone)]
 #[clap(author, version, about, long_about = None)]
-pub struct Cli {
+pub struct Options {
     /// The directories to scan for duplicate or missing files.
     /// When multiple directories are specified, the last one is treated as the target
     /// for copying missing files, unless --target is specified.
@@ -224,46 +189,57 @@ pub struct Cli {
     /// Media deduplication options (will be populated from above arguments)
     #[clap(skip)]
     pub media_dedup_options: MediaDedupOptions,
+
+    /// Application mode - determined automatically based on arguments
+    #[clap(skip)]
+    pub app_mode: AppMode,
 }
 
-impl Cli {
-    /// Apply configuration values from .deduprc to CLI arguments
-    pub fn with_config() -> anyhow::Result<Self> {
+impl Options {
+    /// Create new options instance from CLI args and config file
+    pub fn new() -> Result<Self> {
         // Parse CLI arguments first
-        let mut cli = Self::parse();
+        let mut options = Self::parse();
 
         // Initialize media_dedup_options with defaults
-        cli.media_dedup_options = MediaDedupOptions::default();
+        options.media_dedup_options = MediaDedupOptions::default();
+
+        // Determine app_mode based on arguments
+        options.app_mode = if options.copy_missing {
+            AppMode::CopyMissing
+        } else {
+            AppMode::Deduplication
+        };
 
         // Load configuration from specified file or default location
-        let config = if let Some(config_path) = &cli.config_file {
+        let config = if let Some(config_path) = &options.config_file {
             DedupConfig::load_from_path(config_path)?
         } else {
             DedupConfig::load()?
         };
 
         // Apply config values for any unspecified CLI arguments
-        cli.apply_config(config);
+        options.apply_config(config);
 
         // Apply media deduplication options based on CLI arguments
-        if cli.media_mode {
+        if options.media_mode {
             // If media mode is enabled via CLI, update options accordingly
             crate::media_dedup::add_media_options_to_cli(
-                &mut cli.media_dedup_options,
-                cli.media_mode,
-                &cli.media_resolution,
-                &cli.media_formats,
-                cli.media_similarity,
+                &mut options.media_dedup_options,
+                options.media_mode,
+                &options.media_resolution,
+                &options.media_formats,
+                options.media_similarity,
             );
         }
 
         // Create default config file if it doesn't exist
         // Only do this if we're using the default config path
-        if cli.config_file.is_none() {
+        if options.config_file.is_none() {
             let _ = DedupConfig::create_default_if_not_exists();
         }
 
-        Ok(cli)
+        Ok(options)
     }
 
     /// Apply config values to CLI arguments that weren't explicitly provided
@@ -352,23 +328,49 @@ impl Cli {
             self.mode = "newest_modified".to_string();
         }
     }
-}
 
-// If your Cli struct is already in main.rs and you want to keep it there for now (less ideal for testing library parts),
-// you might need to adjust your integration tests to not depend on Cli directly if it's not easily importable.
-// However, the standard way is to define such core structs in lib.rs.
+    /// Convert from Cli to Options - for backward compatibility during transition
+    pub fn from_cli(cli: &crate::Cli) -> Self {
+        let app_mode = if cli.copy_missing {
+            AppMode::CopyMissing
+        } else {
+            AppMode::Deduplication
+        };
 
-// For the integration tests to compile with `use dedup::Cli;`
-// You need to define or re-export `Cli` from your library crate (src/lib.rs)
-// If Cli is in main.rs, consider moving it to lib.rs or a module within lib.rs.
-// If you cannot move it now, the tests might need to construct a Cli-like struct or
-// the tests that use Cli might need to be adjusted or temporarily disabled.
-
-// Assuming you will make Cli available through the library crate:
-// Remove the problematic 'pub use crate::main_cli_struct::Cli;' line
-// The Cli struct is now defined above directly in this file.
-
-// If Cli is in main.rs, and main.rs becomes a binary that uses this library,
-// then main.rs would use `use dedup::Cli;` (if Cli is made public in lib.rs).
-
-// Simplest path for now: Define Cli in a new module within the library, e.g. `
+        Self {
+            directories: cli.directories.clone(),
+            target: cli.target.clone(),
+            deduplicate: cli.deduplicate,
+            copy_missing: cli.copy_missing,
+            delete: cli.delete,
+            move_to: cli.move_to.clone(),
+            log: cli.log,
+            log_file: cli.log_file.clone(),
+            output: cli.output.clone(),
+            format: cli.format.clone(),
+            algorithm: cli.algorithm.clone(),
+            parallel: cli.parallel,
+            mode: cli.mode.clone(),
+            interactive: cli.interactive,
+            verbose: cli.verbose,
+            include: cli.include.clone(),
+            exclude: cli.exclude.clone(),
+            filter_from: cli.filter_from.clone(),
+            progress: cli.progress,
+            progress_tui: cli.progress_tui,
+            sort_by: cli.sort_by,
+            sort_order: cli.sort_order,
+            raw_sizes: cli.raw_sizes,
+            config_file: cli.config_file.clone(),
+            dry_run: cli.dry_run,
+            cache_location: cli.cache_location.clone(),
+            fast_mode: cli.fast_mode,
+            media_mode: cli.media_mode,
+            media_resolution: cli.media_resolution.clone(),
+            media_formats: cli.media_formats.clone(),
+            media_similarity: cli.media_similarity,
+            media_dedup_options: cli.media_dedup_options.clone(),
+            app_mode: app_mode,
+        }
+    }
+} 
