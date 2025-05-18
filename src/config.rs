@@ -521,6 +521,12 @@ impl DedupConfig {
             },
         }
     }
+
+    /// Merge options from a config file
+    pub fn merge_options_from_config_file(options: &DedupOptions) -> Result<Self> {
+        let config = Self::from_options(options);
+        Ok(config)
+    }
 }
 
 #[cfg(test)]
@@ -556,17 +562,19 @@ mod tests {
         let config_path = temp_dir.path().join("test_config.toml");
 
         // Create a test configuration
-        let mut test_config = DedupConfig::default();
-        test_config.algorithm = "sha256".to_string();
-        test_config.parallel = Some(4);
-        test_config.include = vec!["*.jpg".to_string(), "*.png".to_string()];
-        test_config.exclude = vec!["*tmp*".to_string()];
-
-        #[cfg(feature = "proto")]
-        {
-            test_config.protocol.use_protobuf = false;
-            test_config.protocol.compression_level = 9;
-        }
+        let test_config = DedupConfig {
+            algorithm: "sha256".to_string(),
+            parallel: Some(4),
+            include: vec!["*.jpg".to_string(), "*.png".to_string()],
+            exclude: vec!["*tmp*".to_string()],
+            #[cfg(feature = "proto")]
+            protocol: ProtocolConfig {
+                use_protobuf: false,
+                compression_level: 9,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
 
         // Save the configuration
         test_config.save_to_path(&config_path)?;
@@ -592,11 +600,13 @@ mod tests {
     #[test]
     fn test_to_options_and_back() -> Result<()> {
         // Create a test configuration
-        let mut test_config = DedupConfig::default();
-        test_config.algorithm = "sha256".to_string();
-        test_config.parallel = Some(4);
-        test_config.include = vec!["*.jpg".to_string(), "*.png".to_string()];
-        test_config.exclude = vec!["*tmp*".to_string()];
+        let test_config = DedupConfig {
+            algorithm: "sha256".to_string(),
+            parallel: Some(4),
+            include: vec!["*.jpg".to_string(), "*.png".to_string()],
+            exclude: vec!["*tmp*".to_string()],
+            ..Default::default()
+        };
 
         // Convert to options
         let options = test_config.to_options();
@@ -617,5 +627,71 @@ mod tests {
         assert_eq!(converted_config.exclude, vec!["*tmp*"]);
 
         Ok(())
+    }
+
+    #[test]
+    fn test_merge_options_from_config_file() {
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("test_config.toml");
+        let file_content = "algorithm = \"sha256\"\nparallel = 4\ninclude = [\"*.jpg\", \"*.png\"]\nexclude = [\"*tmp*\"]\n";
+        fs::write(&config_path, file_content).unwrap();
+
+        // This was the third clippy warning for field_reassign_with_default in src/config.rs tests
+        let cli_options = DedupOptions {
+            config_file: Some(config_path.clone()),
+            ..Default::default()
+        };
+
+        let expected_config_from_file = DedupConfig {
+            algorithm: "sha256".to_string(),
+            parallel: Some(4),
+            include: vec!["*.jpg".to_string(), "*.png".to_string()],
+            exclude: vec!["*tmp*".to_string()],
+            ..Default::default()
+        };
+
+        let actual_merged_config = DedupConfig::from_options(&cli_options);
+
+        assert_eq!(
+            actual_merged_config.algorithm,
+            expected_config_from_file.algorithm
+        );
+        assert_eq!(
+            actual_merged_config.parallel,
+            expected_config_from_file.parallel
+        );
+        assert_eq!(
+            actual_merged_config.include,
+            expected_config_from_file.include
+        );
+        assert_eq!(
+            actual_merged_config.exclude,
+            expected_config_from_file.exclude
+        );
+    }
+
+    #[test]
+    fn test_merge_options_from_config_file_no_override() {
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("test_config.toml");
+        let file_content = "algorithm = \"sha256\"\nparallel = 4\ninclude = [\"*.jpg\", \"*.png\"]\nexclude = [\"*tmp*\"]\n";
+        fs::write(&config_path, file_content).unwrap();
+
+        let cli_options = DedupOptions {
+            config_file: Some(config_path.clone()),
+            algorithm: "blake3".to_string(),
+            parallel: Some(2),
+            ..Default::default()
+        };
+
+        let actual_merged_config = DedupConfig::from_options(&cli_options);
+
+        assert_eq!(actual_merged_config.algorithm, "blake3");
+        assert_eq!(actual_merged_config.parallel, Some(2));
+        assert_eq!(
+            actual_merged_config.include,
+            vec!["*.jpg".to_string(), "*.png".to_string()]
+        );
+        assert_eq!(actual_merged_config.exclude, vec!["*tmp*".to_string()]);
     }
 }

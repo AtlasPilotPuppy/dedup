@@ -28,10 +28,10 @@ use std::time::{Duration, Instant};
 const MAX_TIMEOUTS: u32 = 50;
 /// Default timeout duration for receiving messages
 const DEFAULT_RECEIVE_TIMEOUT: Duration = Duration::from_millis(100);
-/// Keep-alive interval
-const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(5);
 /// Keep-alive timeout
 const KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(15);
+/// Constants for heartbeat timing
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Client connection state
 #[derive(Debug, PartialEq)]
@@ -335,24 +335,24 @@ impl DedupClient {
         Ok(())
     }
 
-    /// Send a keep-alive ping to the server
-    fn send_keep_alive(&mut self) -> Result<()> {
+    /// Send a heartbeat to the server
+    fn send_heartbeat(&mut self) -> Result<()> {
         if let Some(protocol) = self.protocol.as_mut() {
             if self.verbose >= 3 {
-                log::debug!("Sending keep-alive ping");
+                log::debug!("Sending heartbeat to server");
             }
 
             let message = DedupMessage {
                 message_type: MessageType::Result,
-                payload: "pong".to_string(),
+                payload: "heartbeat".to_string(),
             };
 
             protocol
                 .send_message(message)
-                .with_context(|| "Failed to send keep-alive pong")?;
+                .with_context(|| "Failed to send heartbeat")?;
 
             if self.verbose >= 3 {
-                log::debug!("Sent keep-alive pong");
+                log::debug!("Sent heartbeat");
             }
         }
         Ok(())
@@ -533,30 +533,34 @@ impl DedupClient {
 
         let mut output = String::new();
         let mut timeout_count = 0;
-        let mut last_activity = Instant::now();
+        let mut last_heartbeat = Instant::now();
         let start_time = Instant::now();
 
         // Use a fixed timeout of 10 seconds for all commands
-        let command_timeout = Duration::from_secs(10);
+        let command_timeout = Duration::from_secs(60);
+
+        // Send initial heartbeat
+        if let Err(e) = self.send_heartbeat() {
+            log::warn!("Failed to send initial heartbeat: {}", e);
+        }
 
         loop {
-            // Send keep-alive ping if needed
-            if self.options.keep_alive && last_activity.elapsed() > KEEP_ALIVE_INTERVAL {
-                if let Err(e) = self.send_keep_alive() {
-                    log::warn!("Failed to send keep-alive ping: {}", e);
+            // Send heartbeat if needed
+            if last_heartbeat.elapsed() > HEARTBEAT_INTERVAL {
+                if let Err(e) = self.send_heartbeat() {
+                    log::warn!("Failed to send heartbeat: {}", e);
                 }
-                last_activity = Instant::now();
+                last_heartbeat = Instant::now();
             }
 
             match self.receive_message() {
                 Ok(Some(msg)) => {
-                    last_activity = Instant::now();
                     timeout_count = 0;
 
                     match msg.message_type {
                         MessageType::Result => {
                             if self.verbose >= 3 {
-                                log::debug!("Received final result from server");
+                                log::debug!("Received result from server");
                             }
 
                             // For handshake, verify protocol match
@@ -733,7 +737,7 @@ impl DedupClient {
                         ));
                     }
 
-                    thread::sleep(Duration::from_millis(10)); // Reduced from 100ms to 10ms
+                    thread::sleep(Duration::from_millis(10));
                 }
                 Err(e) => {
                     // Check if it's a temporary error
@@ -745,7 +749,7 @@ impl DedupClient {
                                 if self.verbose >= 3 {
                                     log::debug!("Temporary error reading from server: {}", io_err);
                                 }
-                                thread::sleep(Duration::from_millis(10)); // Reduced from 100ms to 10ms
+                                thread::sleep(Duration::from_millis(10));
                                 continue;
                             }
                             ErrorKind::ConnectionReset | ErrorKind::BrokenPipe => {

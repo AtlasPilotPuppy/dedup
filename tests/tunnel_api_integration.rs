@@ -13,7 +13,7 @@
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
-use std::net::TcpStream;
+use std::net::{TcpListener, TcpStream};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -25,7 +25,6 @@ use anyhow::{Context, Result};
 use assert_cmd::cargo::cargo_bin;
 
 use dedups::client::{ConnectionState, DedupClient};
-use dedups::protocol::find_available_port;
 
 const SERVER_START_TIMEOUT: u64 = 10000; // 10 seconds
 const SERVER_STOP_TIMEOUT: u64 = 5000; // 5 seconds
@@ -63,28 +62,34 @@ fn find_free_port() -> Result<u16> {
     // First try to clean up and use the default port
     kill_process_on_port(DEFAULT_PORT)?;
 
-    if wait_for_port_free(DEFAULT_PORT, 1000) {
-        // Double check port is actually free
-        if TcpStream::connect(("127.0.0.1", DEFAULT_PORT)).is_err() {
-            // Wait a bit to ensure the port isn't in TIME_WAIT state
-            std::thread::sleep(Duration::from_millis(100));
-
-            // Check again to be really sure
-            if TcpStream::connect(("127.0.0.1", DEFAULT_PORT)).is_err() {
+    // Wait longer for the port to be free
+    if wait_for_port_free(DEFAULT_PORT, 2000) {
+        // Try to bind to the port ourselves to ensure it's free
+        match TcpListener::bind(("127.0.0.1", DEFAULT_PORT)) {
+            Ok(_listener) => {
+                // Port is free, keep the listener until we're ready to start the server
                 return Ok(DEFAULT_PORT);
+            }
+            Err(e) => {
+                println!("Failed to bind to default port: {}", e);
             }
         }
     }
 
-    // If default port is not available, try incrementing
+    // If default port is not available, try incrementing from default port
     for port in (DEFAULT_PORT + 1)..=(DEFAULT_PORT + 10) {
         kill_process_on_port(port)?;
 
-        if wait_for_port_free(port, 1000) {
-            if TcpStream::connect(("127.0.0.1", port)).is_err() {
-                std::thread::sleep(Duration::from_millis(100));
-                if TcpStream::connect(("127.0.0.1", port)).is_err() {
+        if wait_for_port_free(port, 2000) {
+            // Try to bind to the port ourselves to ensure it's free
+            match TcpListener::bind(("127.0.0.1", port)) {
+                Ok(_listener) => {
+                    // Port is free, keep the listener until we're ready to start the server
                     return Ok(port);
+                }
+                Err(e) => {
+                    println!("Failed to bind to port {}: {}", port, e);
+                    continue;
                 }
             }
         }
@@ -100,7 +105,13 @@ fn find_free_port() -> Result<u16> {
 fn kill_process_on_port(port: u16) -> Result<()> {
     #[cfg(target_os = "macos")]
     {
-        // First try lsof
+        // First try to kill any remaining dedups processes
+        let output = Command::new("pkill").arg("-f").arg("dedups").output()?;
+
+        // Wait for processes to die
+        std::thread::sleep(Duration::from_millis(1000));
+
+        // Then try lsof
         let output = Command::new("lsof")
             .arg("-i")
             .arg(format!(":{}", port))
@@ -112,11 +123,17 @@ fn kill_process_on_port(port: u16) -> Result<()> {
             let pids: Vec<&str> = stdout_str.split('\n').filter(|s| !s.is_empty()).collect();
 
             for pid in pids {
-                Command::new("kill").arg("-9").arg(pid).output()?;
+                println!("Killing process {} on port {}", pid, port);
+                // First try SIGTERM
+                let _ = Command::new("kill").arg("-15").arg(pid).output();
+                // Wait a bit
+                std::thread::sleep(Duration::from_millis(500));
+                // Then try SIGKILL if still needed
+                let _ = Command::new("kill").arg("-9").arg(pid).output();
             }
 
-            // Wait for the processes to die
-            std::thread::sleep(Duration::from_millis(500));
+            // Wait longer for the processes to die
+            std::thread::sleep(Duration::from_millis(1000));
         }
 
         // Then try netstat
@@ -133,13 +150,43 @@ fn kill_process_on_port(port: u16) -> Result<()> {
                     || line.contains(&format!("127.0.0.1.{}", port))
                 {
                     if let Some(pid) = line.split_whitespace().nth(8) {
-                        Command::new("kill").arg("-9").arg(pid).output()?;
+                        println!("Killing process {} on port {}", pid, port);
+                        // First try SIGTERM
+                        let _ = Command::new("kill").arg("-15").arg(pid).output();
+                        // Wait a bit
+                        std::thread::sleep(Duration::from_millis(500));
+                        // Then try SIGKILL if still needed
+                        let _ = Command::new("kill").arg("-9").arg(pid).output();
                     }
                 }
             }
 
-            // Wait for the processes to die
-            std::thread::sleep(Duration::from_millis(500));
+            // Wait longer for the processes to die
+            std::thread::sleep(Duration::from_millis(1000));
+        }
+
+        // Finally, try to kill any remaining processes using the port
+        let output = Command::new("lsof")
+            .arg("-i")
+            .arg(format!(":{}", port))
+            .output()?;
+
+        if !output.stdout.is_empty() {
+            // Wait for processes to die
+            std::thread::sleep(Duration::from_millis(1000));
+        }
+
+        // Try to bind to the port to ensure it's free
+        match TcpListener::bind(("127.0.0.1", port)) {
+            Ok(listener) => {
+                // Port is free, drop the listener
+                drop(listener);
+                // Wait a bit to ensure the port is released
+                std::thread::sleep(Duration::from_millis(500));
+            }
+            Err(e) => {
+                println!("Failed to bind to port {}: {}", port, e);
+            }
         }
     }
 
@@ -353,58 +400,6 @@ fn ensure_server_running(child: &mut Child, port: u16) -> Result<ManagedReceiver
     ))
 }
 
-/// Helper: start server with retries
-fn start_server_with_retries(
-    verbose: u8,
-    _max_retries: u32, // Prefix with underscore to indicate intentionally unused
-) -> Result<(Child, u16, ManagedReceiver<String>)> {
-    let port = find_free_port()?;
-
-    // Kill any existing process on this port
-    kill_process_on_port(port)?;
-
-    // Wait for port to be free
-    if !wait_for_port_free(port, 1000) {
-        return Err(anyhow::anyhow!("Port {} still in use after cleanup", port));
-    }
-
-    let mut cmd = Command::new(cargo_bin("dedups"));
-    cmd.arg("--server-mode")
-        .arg("--port")
-        .arg(port.to_string())
-        .arg("--use-protobuf")
-        .arg("--use-compression")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    // propagate verbosity for manual debugging if desired
-    for _ in 0..verbose {
-        cmd.arg("-v");
-    }
-
-    // Set RUST_LOG for better debugging
-    cmd.env("RUST_LOG", "debug");
-
-    println!("Starting server with command: {:?}", cmd);
-    match cmd.spawn() {
-        Ok(mut child) => {
-            // Wait for server to start
-            match ensure_server_running(&mut child, port) {
-                Ok(rx) => {
-                    println!("Server started successfully on port {}", port);
-                    Ok((child, port, rx))
-                }
-                Err(e) => {
-                    println!("Failed to start server on port {}: {}", port, e);
-                    let _ = stop_server(child);
-                    Err(e)
-                }
-            }
-        }
-        Err(e) => Err(anyhow::anyhow!("Failed to spawn server: {}", e)),
-    }
-}
-
 /// Helper: stop server with timeout and cleanup
 fn stop_server(mut child: Child) -> Result<()> {
     // Try graceful shutdown first
@@ -418,7 +413,7 @@ fn stop_server(mut child: Child) -> Result<()> {
     // Attempt graceful SIGTERM before SIGKILL
     #[cfg(unix)]
     {
-        use std::os::unix::process::CommandExt;
+        // use std::os::unix::process::CommandExt; // Removed
 
         println!("Sending SIGTERM to server");
         let pid = child.id();
@@ -480,7 +475,101 @@ fn stop_server(mut child: Child) -> Result<()> {
 
 /// Helper: spawn a local server
 fn spawn_local_server(verbose: u8) -> Result<(Child, u16, ManagedReceiver<String>)> {
-    start_server_with_retries(verbose, 1) // Only try once since we clean up properly
+    // First try to clean up any existing processes
+    let port = find_free_port()?;
+    println!("Found free port: {}", port);
+
+    // Kill any existing processes using this port
+    kill_process_on_port(port)?;
+
+    // Double check the port is free
+    if !wait_for_port_free(port, 2000) {
+        return Err(anyhow::anyhow!("Port {} still in use after cleanup", port));
+    }
+
+    // Try to bind to the port ourselves to ensure it's free
+    let listener = match TcpListener::bind(("127.0.0.1", port)) {
+        Ok(listener) => listener,
+        Err(e) => {
+            return Err(anyhow::anyhow!(
+                "Port {} is not free after cleanup: {}",
+                port,
+                e
+            ));
+        }
+    };
+
+    let mut cmd = Command::new(cargo_bin("dedups"));
+    cmd.arg("--server-mode")
+        .arg("--port")
+        .arg(port.to_string())
+        .arg("--use-protobuf")
+        .arg("--use-compression")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    // propagate verbosity for manual debugging if desired
+    for _ in 0..verbose {
+        cmd.arg("-v");
+    }
+
+    // Set RUST_LOG for better debugging
+    cmd.env("RUST_LOG", "debug");
+
+    println!("Starting server with command: {:?}", cmd);
+
+    // Drop the listener right before spawning the server
+    drop(listener);
+    // Wait a bit to ensure the port is released
+    std::thread::sleep(Duration::from_millis(500));
+
+    match cmd.spawn() {
+        Ok(mut child) => {
+            // Wait for server to start
+            match ensure_server_running(&mut child, port) {
+                Ok(rx) => {
+                    println!("Server started successfully on port {}", port);
+                    // Wait a bit to ensure server is fully ready
+                    std::thread::sleep(Duration::from_millis(500));
+
+                    // Double check server is still running
+                    match child.try_wait() {
+                        Ok(None) => {
+                            println!("Server is still running (expected)");
+                            Ok((child, port, rx))
+                        }
+                        Ok(Some(status)) => {
+                            println!("Server exited unexpectedly with status: {}", status);
+                            Err(anyhow::anyhow!(
+                                "Server exited unexpectedly with status: {}",
+                                status
+                            ))
+                        }
+                        Err(e) => {
+                            println!("Error checking server status: {}", e);
+                            Err(anyhow::anyhow!("Error checking server status: {}", e))
+                        }
+                    }
+                }
+                Err(e) => {
+                    println!("Failed to start server on port {}: {}", port, e);
+                    let _ = stop_server(child);
+                    // Clean up port
+                    let _ = cleanup_test_server(port);
+                    // Wait a bit before returning error
+                    std::thread::sleep(Duration::from_millis(500));
+                    Err(e)
+                }
+            }
+        }
+        Err(e) => {
+            // Clean up port
+            let _ = cleanup_test_server(port);
+            // Wait a bit before returning error
+            std::thread::sleep(Duration::from_millis(500));
+            Err(anyhow::anyhow!("Failed to spawn server: {}", e))
+        }
+    }
 }
 
 /// Helper: ensure proper cleanup after tests
@@ -569,6 +658,172 @@ fn verify_server_running(server_child: &mut Child) -> Result<()> {
     }
 }
 
+// Helper struct for cleanup
+struct CleanupGuard {
+    child: Option<Child>,
+    port: u16,
+    rx: Option<ManagedReceiver<String>>,
+}
+
+impl Drop for CleanupGuard {
+    fn drop(&mut self) {
+        println!("Performing cleanup in guard...");
+
+        // First drop receiver to terminate its threads
+        if let Some(rx) = self.rx.take() {
+            drop(rx);
+            println!("Dropped server output receiver");
+            // Give threads time to exit cleanly
+            std::thread::sleep(Duration::from_millis(500));
+        }
+
+        // Kill server process if it's still running
+        if let Some(mut child) = self.child.take() {
+            println!("Stopping server process...");
+            // Use stop_server which attempts SIGTERM first
+            if let Err(e) = stop_server(child) {
+                println!("Error during server cleanup: {}", e);
+            }
+            // Wait longer to ensure process is fully stopped
+            std::thread::sleep(Duration::from_millis(1000));
+        }
+
+        // Clean up port
+        println!("Cleaning up port {}...", self.port);
+        if let Err(e) = cleanup_test_server(self.port) {
+            println!("Error cleaning up port: {}", e);
+        }
+
+        // Sleep longer to allow resources to be freed
+        std::thread::sleep(Duration::from_millis(1000));
+        println!("Cleanup complete");
+    }
+}
+
+/// Test heartbeat functionality
+#[test]
+#[ignore]
+fn test_heartbeat_functionality() -> Result<()> {
+    // opt-in via env so we don't run by default in CI without ssh feature build
+    if std::env::var("DEDUPS_SSH_TEST").is_err() {
+        eprintln!("DEDUPS_SSH_TEST not set – skipping test_heartbeat_functionality");
+        return Ok(());
+    }
+
+    run_test_with_timeout(|| {
+        // Spawn server with verbosity
+        let (mut server_child, port, mut server_rx) = spawn_local_server(3)?;
+
+        // Create cleanup guard
+        let mut guard = CleanupGuard {
+            child: Some(server_child),
+            port,
+            rx: Some(server_rx),
+        };
+
+        // Wait until we can connect
+        println!("Waiting for server to start on port {}", port);
+        assert!(
+            wait_for_port(port, SERVER_START_TIMEOUT),
+            "server did not start listening in time"
+        );
+        println!("Server is listening");
+
+        // Connect client with heartbeat enabled
+        let mut client = DedupClient::with_options(
+            "127.0.0.1".into(),
+            port,
+            dedups::options::DedupOptions {
+                use_ssh_tunnel: false,
+                tunnel_api_mode: true,
+                port,
+                use_protobuf: true,
+                use_compression: true,
+                compression_level: 3,
+                keep_alive: true,
+                ..Default::default()
+            },
+        );
+
+        // Connect and verify state
+        println!("Attempting to connect to server");
+        client.connect()?;
+        println!("Connected successfully");
+        assert_eq!(client.connection_state(), &ConnectionState::Connected);
+
+        // Get reference to server_rx
+        let server_rx_ref = guard.rx.as_mut().unwrap();
+
+        // Execute a command to start heartbeat
+        println!("Executing command to start heartbeat");
+        let version_response = client.execute_command(
+            "dedups".to_string(),
+            vec!["--version".to_string()],
+            HashMap::new(),
+        )?;
+        assert!(
+            version_response.contains("dedups"),
+            "Response should contain version info"
+        );
+
+        // Wait and verify heartbeats are being sent and received
+        println!("Waiting to verify heartbeat mechanism");
+        let mut heartbeat_seen = false;
+        let mut heartbeat_count = 0;
+        let start = Instant::now();
+        let timeout = Duration::from_secs(15); // Increased timeout
+
+        while start.elapsed() < timeout {
+            // Check server output
+            while let Ok(line) = server_rx_ref.try_recv() {
+                println!("Server log: {}", line);
+                if line.contains("Received heartbeat from client") {
+                    heartbeat_seen = true;
+                    heartbeat_count += 1;
+                    println!("Heartbeat {} received", heartbeat_count);
+                }
+            }
+            if heartbeat_seen && heartbeat_count >= 2 {
+                println!("Received {} heartbeats, test passing", heartbeat_count);
+                break;
+            }
+            // Execute another command to trigger more heartbeats
+            if heartbeat_count < 2 && start.elapsed() > Duration::from_secs(5) {
+                println!("Executing another command to trigger heartbeats");
+                let _ = client.execute_command(
+                    "dedups".to_string(),
+                    vec!["--help".to_string()],
+                    HashMap::new(),
+                )?;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+
+        assert!(heartbeat_seen, "No heartbeat received from client");
+        assert!(
+            heartbeat_count >= 2,
+            "Not enough heartbeats received (got {})",
+            heartbeat_count
+        );
+
+        // Verify server is still running
+        if let Some(child) = &mut guard.child {
+            verify_server_running(child)?;
+        }
+
+        // Disconnect and verify state
+        println!("Disconnecting client");
+        client.disconnect()?;
+        assert_eq!(client.connection_state(), &ConnectionState::Disconnected);
+
+        // Clean up
+        drop(client);
+        drop(guard);
+
+        Ok(())
+    })
+}
+
 #[test]
 #[ignore]
 fn test_tunnel_api_functionality() -> Result<()> {
@@ -581,10 +836,10 @@ fn test_tunnel_api_functionality() -> Result<()> {
     run_test_with_timeout(|| {
         // Set a max execution time to prevent hangs
         let test_start = Instant::now();
-        let test_max_duration = Duration::from_secs(20); // 20 seconds max
+        let _test_max_duration = Duration::from_secs(20); // Prefixed with _ as it's not used after this point
 
         // Spawn server with verbosity
-        let (mut server_child, port, mut server_rx) = spawn_local_server(3)?;
+        let (server_child, port, server_rx) = spawn_local_server(3)?;
 
         // We'll use a cleanup guard with Drop trait to ensure resources are freed
         struct CleanupGuard {
@@ -602,7 +857,7 @@ fn test_tunnel_api_functionality() -> Result<()> {
                     drop(rx);
                     println!("Dropped server output receiver");
                     // Give threads time to exit cleanly
-                    std::thread::sleep(Duration::from_millis(200));
+                    std::thread::sleep(Duration::from_millis(500));
                 }
 
                 // Kill server process if it's still running
@@ -612,6 +867,8 @@ fn test_tunnel_api_functionality() -> Result<()> {
                     if let Err(e) = stop_server(child) {
                         println!("Error during server cleanup: {}", e);
                     }
+                    // Wait longer to ensure process is fully stopped
+                    std::thread::sleep(Duration::from_millis(1000));
                 }
 
                 // Clean up port
@@ -620,8 +877,8 @@ fn test_tunnel_api_functionality() -> Result<()> {
                     println!("Error cleaning up port: {}", e);
                 }
 
-                // Sleep briefly to allow resources to be freed
-                std::thread::sleep(Duration::from_millis(200));
+                // Sleep longer to allow resources to be freed
+                std::thread::sleep(Duration::from_millis(1000));
                 println!("Cleanup complete");
             }
         }
@@ -834,7 +1091,7 @@ fn test_tunnel_api_functionality() -> Result<()> {
         drop(guard);
 
         // Ensure we clean up before time limit
-        if test_start.elapsed() > test_max_duration {
+        if test_start.elapsed() > _test_max_duration {
             println!("Test is taking too long, but cleaning up before exit");
             // Sleep to ensure cleanup callbacks can run
             std::thread::sleep(Duration::from_secs(1));

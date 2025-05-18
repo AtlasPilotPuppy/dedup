@@ -681,6 +681,17 @@ impl Cli {
     }
 }
 
+// Add the new protocol-related modules conditionally when SSH feature is enabled
+#[cfg(feature = "ssh")]
+pub mod client;
+#[cfg(feature = "ssh")]
+pub mod protocol;
+#[cfg(feature = "ssh")]
+pub mod server;
+
+// Export the primary types
+pub use config::DedupConfig as Config;
+
 // If your Cli struct is already in main.rs and you want to keep it there for now (less ideal for testing library parts),
 // you might need to adjust your integration tests to not depend on Cli directly if it's not easily importable.
 // However, the standard way is to define such core structs in lib.rs.
@@ -705,16 +716,5 @@ mod tests {
     #[cfg(feature = "ssh")]
     mod ssh_tests;
 }
-
-// Add the new protocol-related modules conditionally when SSH feature is enabled
-#[cfg(feature = "ssh")]
-pub mod client;
-#[cfg(feature = "ssh")]
-pub mod protocol;
-#[cfg(feature = "ssh")]
-pub mod server;
-
-// Export the primary types
-pub use config::DedupConfig as Config;
 // No need to re-export DedupOptions since it's already imported
 // pub use options::DedupOptions;

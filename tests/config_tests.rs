@@ -1,6 +1,8 @@
 #![cfg_attr(feature = "test_mode", allow(unused_imports))]
 
+use anyhow::Result;
 use dedups::config::DedupConfig;
+use dedups::options::DedupOptions;
 use dedups::Cli;
 use std::fs;
 use tempfile::tempdir;
@@ -26,12 +28,14 @@ fn test_save_and_load_config() -> anyhow::Result<()> {
     let temp_dir = tempdir()?;
     let config_path = temp_dir.path().join("test_deduprc");
 
-    // Create a test configuration
-    let mut config = DedupConfig::default();
-    config.algorithm = "sha256".to_string();
-    config.parallel = Some(4);
-    config.include = vec!["*.jpg".to_string(), "*.png".to_string()];
-    config.exclude = vec!["*tmp*".to_string()];
+    // Create a test configuration using direct initialization
+    let config = DedupConfig {
+        algorithm: "sha256".to_string(),
+        parallel: Some(4),
+        include: vec!["*.jpg".to_string(), "*.png".to_string()],
+        exclude: vec!["*tmp*".to_string()],
+        ..Default::default() // Ensure other fields get their defaults
+    };
 
     // Save the configuration
     config.save_to_path(&config_path)?;
@@ -158,11 +162,13 @@ fn test_custom_config_file() -> anyhow::Result<()> {
     let temp_dir = tempdir()?;
     let custom_config_path = temp_dir.path().join("custom_config.toml");
 
-    // Create a custom configuration
-    let mut custom_config = DedupConfig::default();
-    custom_config.algorithm = "sha1".to_string();
-    custom_config.parallel = Some(2);
-    custom_config.progress = true;
+    // Create a custom configuration using direct initialization
+    let custom_config = DedupConfig {
+        algorithm: "sha1".to_string(),
+        parallel: Some(2),
+        progress: true,       // Assuming DedupConfig has this field from its Default
+        ..Default::default()  // Ensure other fields get their defaults
+    };
 
     // Save the custom config
     custom_config.save_to_path(&custom_config_path)?;
@@ -195,4 +201,107 @@ fn test_custom_config_file() -> anyhow::Result<()> {
     assert!(config.progress);
 
     Ok(())
+}
+
+#[test]
+fn test_load_config_from_cli_options() {
+    // Create a DedupOptions instance that might come from CLI parsing
+    let cli_options = DedupOptions {
+        algorithm: "sha256".to_string(),
+        parallel: Some(4),
+        include: vec!["*.jpg".to_string(), "*.png".to_string()],
+        exclude: vec!["*tmp*".to_string()],
+        // Set other DedupOptions fields as needed for the test
+        ..Default::default()
+    };
+
+    // Convert DedupOptions to DedupConfig (this is the action under test)
+    let config = DedupConfig::from_options(&cli_options);
+
+    // Assertions to verify that DedupConfig is correctly populated
+    assert_eq!(config.algorithm, "sha256");
+    assert_eq!(config.parallel, Some(4));
+    assert_eq!(
+        config.include,
+        vec!["*.jpg".to_string(), "*.png".to_string()]
+    );
+    assert_eq!(config.exclude, vec!["*tmp*".to_string()]);
+}
+
+#[test]
+fn test_custom_config_values_override_defaults() {
+    // Create a DedupOptions struct with some custom values
+    let custom_options = DedupOptions {
+        algorithm: "sha1".to_string(),
+        parallel: Some(2),
+        progress: true, // This field exists in DedupOptions, ensure it's mapped if DedupConfig has it
+        // any other fields for DedupOptions
+        ..Default::default()
+    };
+
+    // Convert to DedupConfig
+    let custom_config = DedupConfig::from_options(&custom_options);
+
+    // Verify that the custom values are reflected in DedupConfig
+    assert_eq!(custom_config.algorithm, "sha1");
+    assert_eq!(custom_config.parallel, Some(2));
+    assert!(custom_config.progress);
+}
+
+#[test]
+fn test_create_default_config_if_not_exists() -> Result<()> {
+    // Create a temporary directory for the test
+    let temp_dir = tempdir().unwrap();
+    let test_config_dir = temp_dir.path().join("test_config_home");
+    fs::create_dir_all(&test_config_dir)?;
+
+    // Set the test config path using the helper if the feature is enabled
+    #[cfg(feature = "test_mode")]
+    crate::config::set_test_config_path(Some(test_config_dir.join(".deduprc")));
+
+    // Ensure no config file exists initially
+    let config_path = DedupConfig::get_config_path()?;
+    if config_path.exists() {
+        fs::remove_file(&config_path)?;
+    }
+
+    // Call the function to create a default config
+    let created = DedupConfig::create_default_if_not_exists()?;
+    assert!(created, "Config file should have been created");
+    assert!(
+        config_path.exists(),
+        "Config file should exist at the expected path"
+    );
+
+    // Verify the content of the created config file (optional, basic check)
+    let loaded_config = DedupConfig::load_from_path(&config_path)?;
+    assert_eq!(loaded_config.algorithm, "xxhash".to_string());
+
+    // Call again, should not create
+    let created_again = DedupConfig::create_default_if_not_exists()?;
+    assert!(!created_again, "Config file should not be created again");
+
+    // Clean up: Reset test config path and remove the created file
+    #[cfg(feature = "test_mode")]
+    crate::config::set_test_config_path(None);
+    if config_path.exists() {
+        fs::remove_file(config_path)?;
+    }
+    Ok(())
+}
+
+// Placeholder for the actual test function that needs fixing near line 30
+#[test]
+fn test_config_initialization_fix_1() {
+    // Renamed for clarity if this is a new test stub
+    let config = DedupConfig {
+        algorithm: "sha256".to_string(),
+        parallel: Some(4),
+        include: vec!["*.jpg".to_string(), "*.png".to_string()],
+        exclude: vec!["*tmp*".to_string()],
+        // Add other fields that were being set if necessary
+        ..Default::default()
+    };
+    // Add assertions relevant to this test scenario
+    assert_eq!(config.algorithm, "sha256");
 }

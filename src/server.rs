@@ -41,6 +41,9 @@ pub struct DedupServer {
 
 #[cfg(feature = "ssh")]
 impl DedupServer {
+    // Constants for heartbeat timing
+    const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(30); // Allow for 2 missed heartbeats
+
     pub fn new(port: u16) -> Self {
         // Get verbosity from environment if set
         let verbose = if let Ok(val) = std::env::var("RUST_LOG") {
@@ -348,7 +351,6 @@ impl DedupServer {
             }
         };
 
-        let keep_alive = opts.keep_alive;
         drop(opts); // Release the lock
 
         let mut protocol =
@@ -363,8 +365,7 @@ impl DedupServer {
 
         // Set up client session start time for tracking
         let session_start = std::time::Instant::now();
-        let mut last_activity = std::time::Instant::now();
-        let mut last_ping = std::time::Instant::now();
+        let mut last_heartbeat = std::time::Instant::now();
 
         if verbose >= 2 {
             log::info!("Client connected and ready to receive commands");
@@ -373,33 +374,12 @@ impl DedupServer {
         // Set a flag to detect client disconnection
         let mut client_disconnected = false;
 
-        // Keep-alive settings
-        let keep_alive_interval = Duration::from_secs(5); // Reduced from 30s to 5s
-        let keep_alive_timeout = Duration::from_secs(15); // Reduced from 90s to 15s
-
         while running.load(Ordering::SeqCst) && !client_disconnected {
-            // Send keep-alive ping if needed
-            if keep_alive && last_ping.elapsed() > keep_alive_interval {
-                if verbose >= 3 {
-                    log::debug!("Sending keep-alive ping to client");
-                }
-                let ping_msg = DedupMessage {
-                    message_type: MessageType::Result,
-                    payload: "ping".to_string(),
-                };
-                if let Err(e) = protocol.send_message(ping_msg) {
-                    log::error!("Failed to send keep-alive ping: {}", e);
-                    client_disconnected = true;
-                    continue;
-                }
-                last_ping = Instant::now();
-            }
-
-            // Check keep-alive timeout
-            if keep_alive && last_activity.elapsed() > keep_alive_timeout {
+            // Check for missed heartbeats
+            if last_heartbeat.elapsed() > Self::HEARTBEAT_TIMEOUT {
                 log::error!(
-                    "Keep-alive timeout exceeded ({} seconds)",
-                    keep_alive_timeout.as_secs()
+                    "Client heartbeat timeout exceeded ({} seconds)",
+                    Self::HEARTBEAT_TIMEOUT.as_secs()
                 );
                 client_disconnected = true;
                 continue;
@@ -407,7 +387,6 @@ impl DedupServer {
 
             match protocol.receive_message() {
                 Ok(Some(message)) => {
-                    last_activity = std::time::Instant::now();
                     if verbose >= 3 {
                         log::debug!("Received message type: {:?}", message.message_type);
                     }
@@ -444,12 +423,12 @@ impl DedupServer {
                                 }
                                 client_disconnected = true;
                                 continue;
-                            } else if message.payload == "pong" {
-                                // Handle keep-alive pong response
+                            } else if message.payload == "heartbeat" {
+                                // Handle heartbeat from client
                                 if verbose >= 3 {
-                                    log::debug!("Received keep-alive pong from client");
+                                    log::debug!("Received heartbeat from client");
                                 }
-                                last_activity = Instant::now();
+                                last_heartbeat = Instant::now();
                             } else {
                                 log::warn!(
                                     "Received unexpected result message: {}",
@@ -475,9 +454,9 @@ impl DedupServer {
                     }
                 }
                 Ok(None) => {
-                    // Check keep-alive timeout
-                    if keep_alive && last_activity.elapsed() > keep_alive_timeout {
-                        log::error!("Keep-alive timeout exceeded");
+                    // Check heartbeat timeout
+                    if last_heartbeat.elapsed() > Self::HEARTBEAT_TIMEOUT {
+                        log::error!("Client heartbeat timeout exceeded");
                         client_disconnected = true;
                         continue;
                     }
@@ -486,9 +465,9 @@ impl DedupServer {
                 Err(e) => {
                     match e.downcast_ref::<std::io::Error>() {
                         Some(io_err) if io_err.kind() == std::io::ErrorKind::TimedOut => {
-                            // Read timeout, check keep-alive
-                            if keep_alive && last_activity.elapsed() > keep_alive_timeout {
-                                log::error!("Keep-alive timeout exceeded");
+                            // Read timeout, check heartbeat
+                            if last_heartbeat.elapsed() > Self::HEARTBEAT_TIMEOUT {
+                                log::error!("Client heartbeat timeout exceeded");
                                 client_disconnected = true;
                                 continue;
                             }
@@ -844,7 +823,7 @@ impl DedupServer {
                 });
 
                 // Wait for stdout thread to complete with timeout
-                let stdout_timeout = Duration::from_secs(5); // Reduced from 30s to 5s
+                let stdout_timeout = Duration::from_secs(60); // Increased from 5s
                 let stdout_thread_done = match rx.recv_timeout(stdout_timeout) {
                     Ok(_) => {
                         if verbose >= 3 {
@@ -859,7 +838,7 @@ impl DedupServer {
                 };
 
                 // Wait for process to exit with timeout
-                let process_timeout = Duration::from_secs(5); // Reduced from 30s to 5s
+                let process_timeout = Duration::from_secs(300); // Increased from 5s
                 let start = Instant::now();
                 let status = loop {
                     match child.try_wait() {
