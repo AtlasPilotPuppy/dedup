@@ -25,7 +25,7 @@ use crate::file_utils::{
     self, delete_files, move_files, DuplicateSet, FileInfo, SelectionStrategy, SortCriterion,
     SortOrder,
 };
-use crate::Cli; // Added SortCriterion, SortOrder
+use crate::options::Options; // Using Options instead of Cli
 
 // Application state
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)] // Added PartialEq, Eq
@@ -149,12 +149,14 @@ pub struct App {
     scan_thread_join_handle: Option<std_thread::JoinHandle<()>>,
     scan_rx: Option<std_mpsc::Receiver<ScanMessage>>,
     scan_tx: Option<std_mpsc::Sender<ScanMessage>>, // Added sender to be stored for rescans
-    cli_config: Cli,                                // Store the initial CLI config
+    options_config: Options,                                // Store the initial options config
 }
 
 impl App {
-    pub fn new(cli_args: &Cli) -> Self {
-        let strategy = SelectionStrategy::from_str(&cli_args.mode)
+    pub fn new(options: &Options) -> Self {
+        log::info!("Creating TUI app with progress_tui={}", options.progress_tui);
+        
+        let strategy = SelectionStrategy::from_str(&options.mode)
             .unwrap_or(SelectionStrategy::NewestModified);
         let initial_status = "Preparing to scan for duplicates...";
 
@@ -173,17 +175,17 @@ impl App {
             file_for_copy_move: None,
             is_loading: true, // Always start in loading state, scan will update
             loading_message: initial_status.to_string(),
-            current_algorithm: cli_args.algorithm.clone(),
-            current_parallel: cli_args.parallel,
+            current_algorithm: options.algorithm.clone(),
+            current_parallel: options.parallel,
             rescan_needed: false,
             selected_setting_category_index: 0,
-            current_sort_criterion: cli_args.sort_by, // Initialize from Cli
-            current_sort_order: cli_args.sort_order,  // Initialize from Cli
+            current_sort_criterion: options.sort_by, // Initialize from Options
+            current_sort_order: options.sort_order,  // Initialize from Options
             sort_settings_changed: false,
-            media_mode: cli_args.media_mode,
-            media_resolution: cli_args.media_resolution.clone(),
-            media_formats: cli_args.media_formats.clone(),
-            media_similarity: cli_args.media_similarity,
+            media_mode: options.media_mode,
+            media_resolution: options.media_resolution.clone(),
+            media_formats: options.media_formats.clone(),
+            media_similarity: options.media_similarity,
             log_messages: Vec::new(),
             log_scroll: 0,
             log_focus: false,
@@ -191,49 +193,62 @@ impl App {
             is_processing_jobs: false,
             job_processing_message: String::new(),
             job_progress: (0, 0),
-            dry_run: cli_args.dry_run, // Initialize from CLI args
+            dry_run: options.dry_run, // Initialize from Options args
         };
 
         // Always perform async scan for TUI
         log::info!(
             "Initializing TUI with directory: {:?}",
-            cli_args.directories[0]
+            options.directories[0]
         );
+        
         let (tx, rx) = std_mpsc::channel::<ScanMessage>();
 
         // Send an immediate status update to show we're properly initialized
-        tx.send(ScanMessage::StatusUpdate(
+        if let Err(e) = tx.send(ScanMessage::StatusUpdate(
             1,
-            format!("Starting scan of {}...", cli_args.directories[0].display()),
-        ))
-        .unwrap_or_else(|e| log::error!("Failed to send initial status update: {}", e));
+            format!("Starting scan of {}...", options.directories[0].display()),
+        )) {
+            log::error!("Failed to send initial status update: {}", e);
+        }
 
-        let mut current_cli_for_scan = cli_args.clone();
-        current_cli_for_scan.algorithm = app_state.current_algorithm.clone();
-        current_cli_for_scan.parallel = app_state.current_parallel;
-        current_cli_for_scan.sort_by = app_state.current_sort_criterion;
-        current_cli_for_scan.sort_order = app_state.current_sort_order;
+        let mut current_options_for_scan = options.clone();
+        current_options_for_scan.algorithm = app_state.current_algorithm.clone();
+        current_options_for_scan.parallel = app_state.current_parallel;
+        current_options_for_scan.sort_by = app_state.current_sort_criterion;
+        current_options_for_scan.sort_order = app_state.current_sort_order;
+        
+        // Ensure progress and progress_tui are always set to true for TUI mode
+        current_options_for_scan.progress = true;
+        current_options_for_scan.progress_tui = true;
+        
+        log::debug!(
+            "Using scan options: progress={}, progress_tui={}", 
+            current_options_for_scan.progress,
+            current_options_for_scan.progress_tui
+        );
 
         log::info!(
             "Starting scan thread with algorithm={}, parallel={:?}",
-            current_cli_for_scan.algorithm,
-            current_cli_for_scan.parallel
+            current_options_for_scan.algorithm,
+            current_options_for_scan.parallel
         );
 
         let thread_tx = tx.clone();
         let scan_thread = std_thread::spawn(move || {
             log::info!("[ScanThread] Starting initial duplicate scan...");
+            
             thread_tx
                 .send(ScanMessage::StatusUpdate(
                     1,
                     "Scan thread initialized, starting file scan...".to_string(),
                 ))
                 .unwrap_or_else(|e| {
-                    log::error!("[ScanThread] Failed to send initialization message: {}", e)
+                    log::error!("[ScanThread] Failed to send initialization message: {}", e);
                 });
 
             match file_utils::find_duplicate_files_with_progress(
-                &current_cli_for_scan,
+                &current_options_for_scan,
                 thread_tx.clone(),
             ) {
                 Ok(raw_sets) => {
@@ -241,6 +256,7 @@ impl App {
                         "[ScanThread] Scan completed successfully with {} sets",
                         raw_sets.len()
                     );
+                    
                     if thread_tx
                         .send(ScanMessage::Completed(Ok(raw_sets)))
                         .is_err()
@@ -250,6 +266,7 @@ impl App {
                 }
                 Err(e) => {
                     log::error!("[ScanThread] Scan failed with error: {}", e);
+                    
                     if thread_tx.send(ScanMessage::Error(e.to_string())).is_err() {
                         log::error!("[ScanThread] Failed to send error message to TUI.");
                     }
@@ -271,7 +288,7 @@ impl App {
             scan_thread_join_handle: scan_join_handle,
             scan_rx: Some(rx),
             scan_tx: Some(tx),
-            cli_config: cli_args.clone(),
+            options_config: options.clone(),
         }
     }
 
@@ -362,30 +379,30 @@ impl App {
         self.state.status_message = Some("Starting rescan...".to_string());
         self.state.rescan_needed = false; // Reset flag as we are acting on it
 
-        let mut current_cli_for_scan = self.cli_config.clone(); // Use stored cli_config
-        current_cli_for_scan.algorithm = self.state.current_algorithm.clone();
-        current_cli_for_scan.parallel = self.state.current_parallel;
-        current_cli_for_scan.sort_by = self.state.current_sort_criterion;
-        current_cli_for_scan.sort_order = self.state.current_sort_order;
+        let mut current_options_for_scan = self.options_config.clone(); // Use stored options_config
+        current_options_for_scan.algorithm = self.state.current_algorithm.clone();
+        current_options_for_scan.parallel = self.state.current_parallel;
+        current_options_for_scan.sort_by = self.state.current_sort_criterion;
+        current_options_for_scan.sort_order = self.state.current_sort_order;
         // Always enable progress for TUI mode
-        current_cli_for_scan.progress = true;
-        current_cli_for_scan.progress_tui = true;
+        current_options_for_scan.progress = true;
+        current_options_for_scan.progress_tui = true;
 
         // Apply media deduplication options
-        current_cli_for_scan.media_mode = self.state.media_mode;
-        current_cli_for_scan.media_resolution = self.state.media_resolution.clone();
-        current_cli_for_scan.media_formats = self.state.media_formats.clone();
-        current_cli_for_scan.media_similarity = self.state.media_similarity;
+        current_options_for_scan.media_mode = self.state.media_mode;
+        current_options_for_scan.media_resolution = self.state.media_resolution.clone();
+        current_options_for_scan.media_formats = self.state.media_formats.clone();
+        current_options_for_scan.media_similarity = self.state.media_similarity;
 
         // If media mode is enabled, set up the media_dedup_options
-        if current_cli_for_scan.media_mode {
+        if current_options_for_scan.media_mode {
             // Clear any existing options first
-            current_cli_for_scan.media_dedup_options =
+            current_options_for_scan.media_dedup_options =
                 crate::media_dedup::MediaDedupOptions::default();
 
             // Apply settings to media_dedup_options
             crate::media_dedup::add_media_options_to_cli(
-                &mut current_cli_for_scan.media_dedup_options,
+                &mut current_options_for_scan.media_dedup_options,
                 self.state.media_mode,
                 &self.state.media_resolution,
                 &self.state.media_formats,
@@ -413,7 +430,7 @@ impl App {
         let scan_thread = std_thread::spawn(move || {
             log::info!("[ScanThread] Starting rescan...");
             match file_utils::find_duplicate_files_with_progress(
-                &current_cli_for_scan,
+                &current_options_for_scan,
                 thread_tx.clone(),
             ) {
                 Ok(raw_sets) => {
@@ -451,8 +468,16 @@ impl App {
     // Method to handle messages from the scan thread
     pub fn handle_scan_messages(&mut self) {
         if let Some(ref rx) = self.scan_rx {
+            log::trace!("Checking for scan messages");
+            
             match rx.try_recv() {
                 Ok(message) => {
+                    log::debug!("Received scan message: {:?}", match &message {
+                        ScanMessage::StatusUpdate(stage, msg) => format!("Status({}): {}", stage, msg),
+                        ScanMessage::Completed(_) => "Completed".to_string(),
+                        ScanMessage::Error(e) => format!("Error: {}", e),
+                    });
+                    
                     match message {
                         ScanMessage::StatusUpdate(stage, msg) => {
                             // Format the stage indicator for display
@@ -471,6 +496,7 @@ impl App {
                             match result {
                                 Ok(sets) => {
                                     log::info!("Scan completed with {} sets", sets.len());
+                                    
                                     self.state.is_loading = false;
 
                                     // Process the raw sets into our grouped view
@@ -490,35 +516,54 @@ impl App {
                                             .map(|g| g.sets.len())
                                             .sum::<usize>()
                                     ));
+                                    
+                                    // Also add to log messages for persistence
+                                    self.state.log_messages.push(format!(
+                                        "Scan complete! Found {} duplicate sets.",
+                                        self.state
+                                            .grouped_data
+                                            .iter()
+                                            .map(|g| g.sets.len())
+                                            .sum::<usize>()
+                                    ));
                                 }
                                 Err(e) => {
                                     log::error!("Scan completed with error: {}", e);
+                                    
                                     self.state.is_loading = false;
                                     self.state.status_message = Some(format!("Scan failed: {}", e));
+                                    self.state.log_messages.push(format!("Scan failed: {}", e));
                                 }
                             }
                         }
                         ScanMessage::Error(err) => {
                             log::error!("Scan error: {}", err);
+                            
                             self.state.is_loading = false;
                             self.state.status_message = Some(format!("Scan error: {}", err));
+                            self.state.log_messages.push(format!("Scan error: {}", err));
                         }
                     }
                 }
                 Err(std_mpsc::TryRecvError::Empty) => {
                     // No messages available, perfectly normal.
+                    log::trace!("No scan messages in queue");
                 }
                 Err(std_mpsc::TryRecvError::Disconnected) => {
                     // Channel disconnected. This could happen if the scan thread finishes.
                     log::warn!("Scan thread channel disconnected.");
+                    
                     if self.state.is_loading {
                         // If still in loading state, this is an error.
                         self.state.is_loading = false;
                         self.state.status_message =
                             Some("Scan thread disconnected unexpectedly.".to_string());
+                        self.state.log_messages.push("Scan thread disconnected unexpectedly.".to_string());
                     }
                 }
             }
+        } else {
+            log::warn!("No scan_rx receiver available");
         }
     }
 
@@ -1835,63 +1880,38 @@ impl App {
 
 type TerminalBackend = CrosstermBackend<Stdout>;
 
-pub fn run_tui_app(cli: &Cli) -> Result<()> {
+pub fn run_tui_app(options: &Options) -> Result<()> {
+    log::info!("Starting TUI with progress_tui={}", options.progress_tui);
+    
+    // Terminal initialization
     enable_raw_mode()?;
     let mut stdout = stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+
     let backend = CrosstermBackend::new(stdout);
+
     let mut terminal = Terminal::new(backend)?;
+    terminal.hide_cursor()?;
 
-    // Create a modified cli config with progress always enabled for TUI mode
-    let mut tui_cli = cli.clone();
-    tui_cli.progress = true;
-    tui_cli.progress_tui = true;
+    // Create app state
+    let mut app = App::new(options);
+    
+    // Main loop
+    let show_tui_progress = options.progress_tui;
+    log::info!("Running main loop with show_tui_progress={}", show_tui_progress);
+    let result = run_main_loop(&mut terminal, &mut app, show_tui_progress);
 
-    let mut app = App::new(&tui_cli);
-    app.validate_selection_indices(); // Initial validation for sync loaded data if any
-
-    // Always enable progress for TUI mode regardless of cli.progress setting
-    let res = run_main_loop(&mut terminal, &mut app, true);
-
-    // Restore terminal
+    // Cleanup and restore terminal
     disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
     terminal.show_cursor()?;
 
-    // Join scan thread if it exists (especially on quit)
-    if let Some(handle) = app.scan_thread_join_handle.take() {
-        log::debug!("Attempting to join scan thread...");
-        if let Err(e) = handle.join() {
-            log::error!("Failed to join scan thread: {:?}", e);
-        } else {
-            log::debug!("Scan thread joined successfully.");
-        }
+    // If there was an error, log it and return it
+    if let Err(err) = &result {
+        log::error!("TUI error: {}", err);
     }
 
-    if let Err(err) = res {
-        log::error!("TUI Error: {}", err);
-        if log::log_enabled!(log::Level::Debug) {
-            let mut backtrace_output = "(backtrace not available or disabled)".to_string();
-
-            // Explicitly wrap the backtrace reference in Some() because err.backtrace() returns &Backtrace
-            let an_option_of_backtrace: Option<&std::backtrace::Backtrace> = Some(err.backtrace());
-
-            // Now match on this explicitly typed Option
-            if let Some(bt_ref) = an_option_of_backtrace {
-                // bt_ref should be &std::backtrace::Backtrace
-                backtrace_output = format!("Stack backtrace:\n{}", bt_ref); // &std::backtrace::Backtrace implements Display
-            }
-            println!("Error in TUI: {}\n{}", err, backtrace_output);
-        } else {
-            println!("Error in TUI: {}. Run with -vv for more details.", err);
-        }
-    }
-
-    Ok(())
+    result
 }
 
 fn run_main_loop(
@@ -1899,11 +1919,12 @@ fn run_main_loop(
     app: &mut App,
     show_tui_progress: bool,
 ) -> Result<()> {
-    let tick_rate = Duration::from_millis(100); // Faster tick rate for responsiveness with async msgs
+    let tick_rate = Duration::from_millis(50); // Faster tick rate for better responsiveness
     let mut last_tick = Instant::now();
 
     // Handle messages from scan thread immediately for the first frame
     if show_tui_progress {
+        log::debug!("Initial call to handle_scan_messages");
         app.handle_scan_messages();
     }
 
@@ -1911,6 +1932,7 @@ fn run_main_loop(
         // Handle messages from scan thread first
         if show_tui_progress {
             // Only check messages if async scan was started
+            log::trace!("Calling handle_scan_messages in loop");
             app.handle_scan_messages();
         }
 
@@ -1928,6 +1950,7 @@ fn run_main_loop(
             }
         }
 
+        // Reset the tick timer even if no event was processed
         if last_tick.elapsed() >= tick_rate {
             last_tick = Instant::now();
         }
@@ -1939,7 +1962,7 @@ fn run_main_loop(
 }
 
 // Helper function to parse progress information from loading messages
-fn parse_progress_from_message(message: &str) -> (String, String, Option<f64>) {
+fn parse_progress_from_message(message: &str) -> (String, String, Option<f64>, Option<(usize, usize)>) {
     // Extract stage from messages like "📁 [1/3] File Discovery: Found 196200 files..."
     let stage = if message.contains("[0/3]") {
         "0/3 Pre-scan".to_string()
@@ -1949,18 +1972,57 @@ fn parse_progress_from_message(message: &str) -> (String, String, Option<f64>) {
         "2/3 Size Analysis".to_string()
     } else if message.contains("[3/3]") {
         "3/3 Hashing".to_string()
+    } else if message.contains("media files") {
+        "4/4 Media Analysis".to_string()
     } else {
         "Loading".to_string()
     };
 
     // Extract file counts and percentages
     let mut progress_text = message.to_string();
+    let mut file_counts: Option<(usize, usize)> = None;
 
     // Try to extract file counts for a better display format
     if let Some(count_start) = message.find("Found ") {
         if let Some(count_end) = message[count_start..].find(" files") {
             let file_count_str = &message[count_start + 6..count_start + count_end];
             progress_text = format!("Found {} files", file_count_str);
+        }
+    }
+
+    // Extract file count in format "123/456 files"
+    if let Some(slash_pos) = message.find("/") {
+        if let Some(files_end) = message[slash_pos..].find(" files") {
+            if let Ok(current) = message[..slash_pos].trim().parse::<usize>() {
+                if let Ok(total) = message[slash_pos+1..slash_pos+files_end].trim().parse::<usize>() {
+                    file_counts = Some((current, total));
+                    progress_text = format!("Processed {}/{} files", current, total);
+                }
+            }
+        }
+    }
+
+    // Extract "Hashed 10/20 groups" format
+    if let Some(hashed_start) = message.find("Hashed ") {
+        if let Some(slash_pos) = message[hashed_start..].find("/") {
+            if let Some(groups_end) = message[hashed_start+slash_pos..].find(" groups") {
+                if let Ok(current) = message[hashed_start+7..hashed_start+slash_pos].trim().parse::<usize>() {
+                    if let Ok(total) = message[hashed_start+slash_pos+1..hashed_start+slash_pos+groups_end].trim().parse::<usize>() {
+                        file_counts = Some((current, total));
+                        progress_text = format!("Hashed {}/{} groups", current, total);
+                    }
+                }
+            }
+        }
+    }
+
+    // Extract detailed progress information from the stage
+    if message.contains("duplicate sets") {
+        if let Some(sets_start) = message.find("Found ") {
+            if let Some(sets_end) = message[sets_start..].find(" duplicate sets") {
+                let sets_count = &message[sets_start + 6..sets_start + sets_end];
+                progress_text = format!("Found {} duplicate sets", sets_count);
+            }
         }
     }
 
@@ -1973,7 +2035,7 @@ fn parse_progress_from_message(message: &str) -> (String, String, Option<f64>) {
     let percentage = if let Some(pct_start) = message.find("(") {
         if let Some(pct_end) = message[pct_start..].find("%)") {
             let pct_str = &message[pct_start + 1..pct_start + pct_end];
-            pct_str.parse::<f64>().ok()
+            pct_str.parse::<f64>().ok().map(|pct| pct.clamp(0.0, 100.0))
         } else {
             None
         }
@@ -1981,7 +2043,16 @@ fn parse_progress_from_message(message: &str) -> (String, String, Option<f64>) {
         None
     };
 
-    (stage, progress_text, percentage)
+    // Ensure file counts produce valid ratios if they're going to be used for progress bars
+    if let Some((current, total)) = file_counts {
+        if total == 0 {
+            // Avoid division by zero by ensuring total is at least 1
+            let file_counts = Some((current.min(1), 1));
+            return (stage, progress_text, percentage, file_counts);
+        }
+    }
+
+    (stage, progress_text, percentage, file_counts)
 }
 
 fn format_file_size(size: u64, raw_sizes: bool) -> String {
@@ -2019,7 +2090,7 @@ fn ui(frame: &mut Frame, app: &mut App) {
             .split(frame.size());
 
         // Extract progress information from loading message
-        let (stage_str, progress_text, percentage) =
+        let (stage_str, progress_text, percentage, file_counts) =
             parse_progress_from_message(&app.state.loading_message);
 
         // Calculate the total progress based on the stage
@@ -2029,6 +2100,16 @@ fn ui(frame: &mut Frame, app: &mut App) {
         {
             // Overall progress = (completed stages + current stage progress)
             ((current - 1) as f64 / total as f64) + (pct / 100.0 / total as f64)
+        } else if let (Some(current), Some(total)) = (current_stage, total_stages) {
+            // If no percentage but we have stage numbers, use simple stage-based progress
+            if let Some((count, total_count)) = file_counts {
+                // If we have file counts, use those for more granular progress
+                ((current - 1) as f64 / total as f64) + 
+                ((count as f64 / total_count as f64) / total as f64)
+            } else {
+                // Otherwise just use the stage number
+                (current as f64 - 0.5) / total as f64
+            }
         } else {
             // Indeterminate if we can't extract actual values
             let now = std::time::Instant::now();
@@ -2037,17 +2118,27 @@ fn ui(frame: &mut Frame, app: &mut App) {
         };
 
         // Top bar: Total progress
-        let total_progress_text =
-            if let (Some(current), Some(total)) = (current_stage, total_stages) {
+        let total_progress_text = if let (Some(current), Some(total)) = (current_stage, total_stages) {
+            if let Some((count, total_count)) = file_counts {
+                format!(
+                    "Total Progress: Stage {} of {} - {}/{} ({:.1}% Complete)",
+                    current,
+                    total,
+                    count,
+                    total_count,
+                    total_progress * 100.0
+                )
+            } else {
                 format!(
                     "Total Progress: Stage {} of {} - {:.1}% Complete",
                     current,
                     total,
                     total_progress * 100.0
                 )
-            } else {
-                "Processing...".to_string()
-            };
+            }
+        } else {
+            "Processing...".to_string()
+        };
 
         let total_progress_gauge = Gauge::default()
             .block(
@@ -2057,23 +2148,44 @@ fn ui(frame: &mut Frame, app: &mut App) {
             )
             .gauge_style(Style::default().fg(Color::Cyan).bg(Color::Black))
             .label(total_progress_text)
-            .ratio(total_progress);
+            .ratio(total_progress.clamp(0.0, 1.0));
 
         frame.render_widget(total_progress_gauge, chunks[1]);
 
         // Stage-specific progress (bottom bar)
-        // Use extracted percentage if available, otherwise animate
+        // Use extracted percentage if available, otherwise animate or use file counts
         let stage_progress_value = if let Some(pct) = percentage {
             pct / 100.0
+        } else if let Some((count, total)) = file_counts {
+            if total > 0 {
+                count as f64 / total as f64
+            } else {
+                0.0
+            }
         } else {
             // Animate when no percentage available
             let now = std::time::Instant::now();
             let secs = now.elapsed().as_secs_f64();
             (secs % 3.0) / 3.0 // Cycles every 3 seconds (0.0 to 1.0)
         };
+        
+        // Ensure stage_progress_value is always between 0.0 and 1.0
+        let stage_progress_value = stage_progress_value.clamp(0.0, 1.0);
+
+        // Enhance stage description with more detail
+        let stage_details = match stage_str.as_str() {
+            "0/3 Pre-scan" => "Counting files for accurate progress tracking",
+            "1/3 Discovery" => "Scanning filesystem and grouping files by size",
+            "2/3 Size Analysis" => "Analyzing file groups with identical sizes",
+            "3/3 Hashing" => "Computing hash values to identify duplicates",
+            "4/4 Media Analysis" => "Analyzing media files for similarities",
+            _ => "",
+        };
 
         let stage_gauge = Gauge::default()
-            .block(Block::default().borders(Borders::ALL).title(stage_str))
+            .block(Block::default().borders(Borders::ALL)
+                .title(Span::styled(format!("{} - {}", stage_str, stage_details), 
+                    Style::default().add_modifier(Modifier::BOLD))))
             .gauge_style(Style::default().fg(Color::White).bg(Color::Black))
             .label(progress_text)
             .ratio(stage_progress_value);
@@ -2359,7 +2471,7 @@ fn ui(frame: &mut Frame, app: &mut App) {
                             indent_str,
                             set_hash_preview,
                             file_count_in_set,
-                            format_file_size(*set_total_size, app.cli_config.raw_sizes)
+                            format_file_size(*set_total_size, app.options_config.raw_sizes)
                         ),
                         Style::default(),
                     )))
@@ -2604,7 +2716,7 @@ fn ui(frame: &mut Frame, app: &mut App) {
                     total,
                     percent * 100.0
                 ))
-                .ratio(percent);
+                .ratio(percent.clamp(0.0, 1.0));
 
             // Bottom gauge shows per-job details
             let bottom_gauge = Gauge::default()
@@ -2614,17 +2726,13 @@ fn ui(frame: &mut Frame, app: &mut App) {
                     "Current job: {}/{} - {}",
                     done, total, app.state.job_processing_message
                 ))
-                .ratio(if done < total {
-                    (done as f64 + 0.5) / total as f64
-                } else {
-                    1.0
-                });
+                .ratio((if done < total { ((done as f64 + 0.5) / total.max(1) as f64) } else { 1.0 }).clamp(0.0, 1.0));
 
             frame.render_widget(top_gauge, progress_layout[0]);
             frame.render_widget(bottom_gauge, progress_layout[1]);
         } else if app.state.is_loading {
             // Extract progress information from the loading message
-            let (stage_str, progress_text, percentage) =
+            let (stage_str, progress_text, percentage, file_counts) =
                 parse_progress_from_message(&app.state.loading_message);
 
             // Calculate total progress across stages
@@ -2632,12 +2740,23 @@ fn ui(frame: &mut Frame, app: &mut App) {
             let total_progress = if let (Some(current), Some(total), Some(pct)) =
                 (current_stage, total_stages, percentage)
             {
-                ((current - 1) as f64 / total as f64) + (pct / 100.0 / total as f64)
+                // Ensure the calculated progress is between 0.0 and 1.0
+                ((current.saturating_sub(1) as f64 / total.max(1) as f64) + (pct / 100.0 / total.max(1) as f64)).clamp(0.0, 1.0)
+            } else if let (Some(current), Some(total)) = (current_stage, total_stages) {
+                // If no percentage but we have stage numbers, use simple stage-based progress
+                if let Some((count, total_count)) = file_counts {
+                    // If we have file counts, use those for more granular progress
+                    ((current.saturating_sub(1) as f64 / total.max(1) as f64) + 
+                    ((count as f64 / total_count.max(1) as f64) / total.max(1) as f64)).clamp(0.0, 1.0)
+                } else {
+                    // Otherwise just use the stage number
+                    ((current as f64 - 0.5) / total.max(1) as f64).clamp(0.0, 1.0)
+                }
             } else {
-                // Animate when no percentage available
+                // Indeterminate if we can't extract actual values
                 let now = std::time::Instant::now();
                 let secs = now.elapsed().as_secs_f64();
-                (secs % 3.0) / 3.0 // Cycles every 3 seconds (0.0 to 1.0)
+                (secs % 2.0) / 2.0 // Pulse every 2 seconds, always between 0.0 and 1.0
             };
 
             // Create a progress display area with two progress bars
@@ -2665,25 +2784,46 @@ fn ui(frame: &mut Frame, app: &mut App) {
                         "Processing...".to_string()
                     },
                 )
-                .ratio(total_progress);
+                .ratio(total_progress.clamp(0.0, 1.0));
 
             // Bottom gauge shows progress for current stage
             let stage_progress_value = if let Some(pct) = percentage {
-                pct / 100.0
+                // Ensure the percentage is between 0 and 100, then convert to ratio between 0.0 and 1.0
+                pct.clamp(0.0, 100.0) / 100.0
+            } else if let Some((current, total)) = file_counts {
+                if total > 0 {
+                    // Clamp the ratio between 0.0 and 1.0
+                    (current as f64 / total as f64).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                }
             } else if let Some(counts) = extract_scan_counts(&app.state.loading_message) {
-                counts.0 as f64 / counts.1 as f64
+                if counts.1 > 0 {
+                    (counts.0 as f64 / counts.1 as f64).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                }
             } else {
-                // Animate when no percentage available
+                // Animate when no percentage available - ensure it's between 0.0 and 1.0
                 let now = std::time::Instant::now();
                 let secs = now.elapsed().as_secs_f64();
                 (secs % 3.0) / 3.0 // Cycles every 3 seconds (0.0 to 1.0)
             };
 
-            let bottom_gauge = Gauge::default()
-                .block(Block::default().borders(Borders::NONE).title(""))
-                .gauge_style(Style::default().fg(Color::White).bg(Color::Black))
-                .label(progress_text)
-                .ratio(stage_progress_value);
+            // If in pre-scan stage, show a simpler progress indicator
+            let bottom_gauge = if stage_str.contains("Pre-scan") {
+                Gauge::default()
+                    .block(Block::default().borders(Borders::NONE).title(""))
+                    .gauge_style(Style::default().fg(Color::White).bg(Color::Black))
+                    .label(progress_text)
+                    .ratio(stage_progress_value.clamp(0.0, 1.0))
+            } else {
+                Gauge::default()
+                    .block(Block::default().borders(Borders::NONE).title(""))
+                    .gauge_style(Style::default().fg(Color::White).bg(Color::Black))
+                    .label(progress_text)
+                    .ratio(stage_progress_value.clamp(0.0, 1.0))
+            };
 
             frame.render_widget(top_gauge, progress_layout[0]);
             frame.render_widget(bottom_gauge, progress_layout[1]);
@@ -2702,7 +2842,7 @@ fn ui(frame: &mut Frame, app: &mut App) {
                     "Pending jobs: {} | Ctrl+E: Execute, x: Remove job",
                     total
                 ))
-                .ratio(percent);
+                .ratio(percent.clamp(0.0, 1.0));
             frame.render_widget(gauge, chunks[4]);
         } else {
             // Draw an empty block if no progress
@@ -2820,4 +2960,45 @@ fn parse_stage_numbers(stage_str: &str) -> (Option<usize>, Option<usize>) {
 
     // Default if we couldn't parse the stage numbers
     (None, None)
+}
+
+// Add this new extract_detailed_progress function to get more metrics
+#[allow(dead_code)]
+fn extract_detailed_metrics(message: &str) -> HashMap<String, String> {
+    let mut metrics = HashMap::new();
+    
+    // Extract file counts
+    if let Some(count_pos) = message.find("Found ") {
+        if let Some(files_pos) = message[count_pos..].find(" files") {
+            if let Ok(count) = message[count_pos + 6..count_pos + files_pos].trim().parse::<usize>() {
+                metrics.insert("files_found".to_string(), count.to_string());
+            }
+        }
+    }
+    
+    // Extract size groups
+    if let Some(size_pos) = message.find("size groups") {
+        let start_pos = message[..size_pos].rfind(" ").unwrap_or(0);
+        if let Ok(groups) = message[start_pos+1..size_pos-1].trim().parse::<usize>() {
+            metrics.insert("size_groups".to_string(), groups.to_string());
+        }
+    }
+    
+    // Extract duplicate sets
+    if let Some(dup_pos) = message.find("duplicate sets") {
+        let start_pos = message[..dup_pos].rfind(" ").unwrap_or(0);
+        if let Ok(sets) = message[start_pos+1..dup_pos-1].trim().parse::<usize>() {
+            metrics.insert("duplicate_sets".to_string(), sets.to_string());
+        }
+    }
+    
+    // Extract cache hits
+    if let Some(cache_pos) = message.find("from cache") {
+        let start_pos = message[..cache_pos].rfind("(").unwrap_or(0);
+        if let Ok(hits) = message[start_pos+1..cache_pos-1].trim().parse::<usize>() {
+            metrics.insert("cache_hits".to_string(), hits.to_string());
+        }
+    }
+    
+    metrics
 }

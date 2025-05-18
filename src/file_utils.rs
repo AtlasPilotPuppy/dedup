@@ -13,7 +13,7 @@ use std::time::SystemTime;
 use walkdir::WalkDir;
 
 use crate::tui_app::ScanMessage;
-use crate::Cli;
+use crate::options::Options;
 use std::sync::mpsc::Sender as StdMpscSender;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,11 +111,11 @@ pub struct FilterRules {
 }
 
 impl FilterRules {
-    pub fn new(cli: &Cli) -> Result<Self> {
+    pub fn new(options: &Options) -> Result<Self> {
         let mut rules = FilterRules::default();
 
         // Process --filter-from file first
-        if let Some(filter_file_path) = &cli.filter_from {
+        if let Some(filter_file_path) = &options.filter_from {
             log::info!("Loading filter rules from: {:?}", filter_file_path);
             let file = File::open(filter_file_path).map_err(|e| {
                 anyhow::anyhow!("Failed to open filter file {:?}: {}", filter_file_path, e)
@@ -148,12 +148,12 @@ impl FilterRules {
         }
 
         // Process --include flags
-        for pattern_str in &cli.include {
+        for pattern_str in &options.include {
             rules.add_include(pattern_str)?;
         }
 
         // Process --exclude flags
-        for pattern_str in &cli.exclude {
+        for pattern_str in &options.exclude {
             rules.add_exclude(pattern_str)?;
         }
 
@@ -280,7 +280,7 @@ pub fn calculate_hash(path: &Path, algorithm: &str) -> Result<String> {
 
 /// Find duplicate files with progress reporting (TUI mode)
 pub fn find_duplicate_files_with_progress(
-    cli: &Cli,
+    options: &Options,
     tx_progress: StdMpscSender<ScanMessage>,
 ) -> Result<Vec<DuplicateSet>> {
     // Clone tx_progress before moving it into any closure
@@ -288,14 +288,14 @@ pub fn find_duplicate_files_with_progress(
 
     log::info!(
         "[ScanThread] Starting scan with progress updates for directory: {:?}",
-        cli.directories[0]
+        options.directories[0]
     );
-    let filter_rules = FilterRules::new(cli)?;
+    let filter_rules = FilterRules::new(options)?;
 
     // Initialize file cache if using fast mode
-    let file_cache = if cli.fast_mode && cli.cache_location.is_some() {
-        let cache_dir = cli.cache_location.as_ref().unwrap();
-        match crate::file_cache::FileCache::new(cache_dir, &cli.algorithm) {
+    let file_cache = if options.fast_mode && options.cache_location.is_some() {
+        let cache_dir = options.cache_location.as_ref().unwrap();
+        match crate::file_cache::FileCache::new(cache_dir, &options.algorithm) {
             Ok(cache) => {
                 log::info!(
                     "[ScanThread] Using file cache at {:?} with {} entries",
@@ -330,12 +330,12 @@ pub fn find_duplicate_files_with_progress(
         0,
         format!(
             "Pre-scan: Counting files in {}",
-            cli.directories[0].display()
+            options.directories[0].display()
         ),
     );
 
     // Pre-scan to count total files
-    let total_files = match count_files_in_directory(&cli.directories[0], &filter_rules) {
+    let total_files = match count_files_in_directory(&options.directories[0], &filter_rules) {
         Ok(count) => {
             send_status(0, format!("Pre-scan complete: Found {} total files", count));
             count
@@ -352,7 +352,7 @@ pub fn find_duplicate_files_with_progress(
         1,
         format!(
             "Stage 1/3: 📁 Starting file discovery in {} (0/{} files)",
-            cli.directories[0].display(),
+            options.directories[0].display(),
             if total_files > 0 {
                 total_files.to_string()
             } else {
@@ -362,7 +362,7 @@ pub fn find_duplicate_files_with_progress(
     );
 
     let mut files_by_size: HashMap<u64, Vec<PathBuf>> = HashMap::new();
-    let walker = WalkDir::new(&cli.directories[0]).into_iter();
+    let walker = WalkDir::new(&options.directories[0]).into_iter();
     let mut files_scanned_count = 0;
     let mut last_update_time = std::time::Instant::now();
     let update_interval = std::time::Duration::from_millis(400); // Less frequent updates (400ms)
@@ -413,15 +413,20 @@ pub fn find_duplicate_files_with_progress(
                     send_status(
                         1,
                         format!(
-                            "Stage 1/3: 📁 Scanning files: {}/{} ({:.1}%)",
-                            files_scanned_count, total_files, percent
+                            "Stage 1/3: 📁 Scanning files: {}/{} ({:.1}%) - Current: {}",
+                            files_scanned_count, total_files, percent,
+                            path.display().to_string()
                         ),
                     );
                 } else {
-                    // Remove file name from status update to reduce repaints
+                    // More detailed status when no total available
                     send_status(
                         1,
-                        format!("Stage 1/3: 📁 Found {} files...", files_scanned_count),
+                        format!(
+                            "Stage 1/3: 📁 Found {} files... (Current: {})",
+                            files_scanned_count,
+                            path.display().to_string()
+                        ),
                     );
                 }
             }
@@ -442,6 +447,9 @@ pub fn find_duplicate_files_with_progress(
     let file_count = files_by_size.values().map(|v| v.len()).sum::<usize>();
     let size_group_count = files_by_size.len();
 
+    // Collect file bytes sum for average calculation before moving files_by_size
+    let total_bytes: u64 = files_by_size.iter().map(|(size, paths)| size * paths.len() as u64).sum();
+    
     if total_files > 0 {
         let percent_found = (files_scanned_count as f64 / total_files as f64) * 100.0;
         send_status(
@@ -484,10 +492,10 @@ pub fn find_duplicate_files_with_progress(
         log::info!("[ScanThread] No potential duplicates found after size grouping.");
 
         // No duplicates found, but if media mode is enabled, we should handle it separately
-        if cli.media_mode && cli.media_dedup_options.enabled {
+        if options.media_mode && options.media_dedup_options.enabled {
             // Clone before moving tx_progress into closure
             let tx_clone = tx_progress_for_media.clone();
-            return find_similar_media_files_with_progress(cli, tx_clone);
+            return find_similar_media_files_with_progress(options, tx_clone);
         }
 
         return Ok(Vec::new());
@@ -502,8 +510,9 @@ pub fn find_duplicate_files_with_progress(
     send_status(
         2,
         format!(
-            "Stage 2/3: 🔍 Found {} size groups with {} potential duplicate files",
-            potential_groups, potential_files
+            "Stage 2/3: 🔍 Found {} size groups with {} potential duplicate files ({:.1}% of total)",
+            potential_groups, potential_files,
+            if total_files > 0 { (potential_files as f64 / total_files as f64) * 100.0 } else { 0.0 }
         ),
     );
 
@@ -513,11 +522,29 @@ pub fn find_duplicate_files_with_progress(
     );
 
     // ========== STAGE 3: HASH CALCULATION ==========
-    let num_threads = cli.parallel.unwrap_or_else(num_cpus::get);
+    let num_threads = options.parallel.unwrap_or_else(num_cpus::get);
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(num_threads)
         .build()?;
     log::info!("[ScanThread] Using {} threads for hashing.", num_threads);
+
+    // Calculate estimated hash time based on file count and average hash speed 
+    // (rough estimate: 20MB/s per thread for xxhash)
+    let avg_file_size_mb = if total_files > 0 && file_count > 0 {
+        // Estimate average file size from first discovery pass
+        (total_bytes as f64) / (1024.0 * 1024.0 * file_count as f64)
+    } else {
+        1.0 // Default assumption: 1MB per file
+    };
+    
+    let est_hashing_time_sec = (avg_file_size_mb * potential_files as f64) / (20.0 * num_threads as f64);
+    let est_time_formatted = if est_hashing_time_sec < 60.0 {
+        format!("{:.1} seconds", est_hashing_time_sec)
+    } else if est_hashing_time_sec < 3600.0 {
+        format!("{:.1} minutes", est_hashing_time_sec / 60.0)
+    } else {
+        format!("{:.1} hours", est_hashing_time_sec / 3600.0)
+    };
 
     // For MPSC between hashing threads and this function's aggregation logic
     let (local_tx, local_rx) = std::sync::mpsc::channel::<Result<HashMap<String, Vec<FileInfo>>>>();
@@ -531,13 +558,17 @@ pub fn find_duplicate_files_with_progress(
     send_status(
         3,
         format!(
-            "Stage 3/3: 🔄 Hashing {} files across {} size groups (using {} threads)...",
-            total_files_to_hash, total_groups_to_hash, num_threads
+            "Stage 3/3: 🔄 Hashing {} files across {} size groups (using {} threads, est. time: {})",
+            total_files_to_hash, total_groups_to_hash, num_threads, est_time_formatted
         ),
     );
 
     // Keep track of all collected FileInfos for possible media processing later
     let mut all_file_infos = Vec::new();
+
+    let mut start_time = std::time::Instant::now();
+    let mut files_hashed_count = 0;
+    let mut file_hashing_speed: Vec<f64> = Vec::with_capacity(10); // Keep track of recent speeds
 
     pool.install(|| {
         potential_duplicates
@@ -568,7 +599,7 @@ pub fn find_duplicate_files_with_progress(
                             }
                         },
                         // Calculate hash if not cached or cache miss
-                        None => match calculate_hash(&path, &cli.algorithm) {
+                        None => match calculate_hash(&path, &options.algorithm) {
                             Ok(hash_str) => {
                                 let metadata = match fs::metadata(&path) {
                                     Ok(m) => m,
@@ -588,7 +619,7 @@ pub fn find_duplicate_files_with_progress(
                                 // Update cache if available
                                 if let Some(cache) = &file_cache {
                                     if let Ok(mut cache_guard) = cache.lock() {
-                                        let _ = cache_guard.store(&file_info, &cli.algorithm);
+                                        let _ = cache_guard.store(&file_info, &options.algorithm);
                                     }
                                 }
 
@@ -624,9 +655,12 @@ pub fn find_duplicate_files_with_progress(
             Ok(Ok(hashed_group)) => {
                 for (hash, file_infos_vec) in hashed_group {
                     // Keep all file infos for media processing if needed
-                    if cli.media_mode {
+                    if options.media_mode {
                         all_file_infos.extend(file_infos_vec.iter().cloned());
                     }
+
+                    // Count files processed 
+                    files_hashed_count += file_infos_vec.len();
 
                     if file_infos_vec.len() > 1 {
                         actual_duplicate_sets += 1;
@@ -662,42 +696,73 @@ pub fn find_duplicate_files_with_progress(
         }
         groups_hashed_count += 1;
 
-        // Determine update frequency for hash progress
-        let should_update = if total_groups_to_hash < 20 {
-            true // Always update for small hash groups
-        } else if total_groups_to_hash < 100 {
-            groups_hashed_count % 5 == 0 || groups_hashed_count == total_groups_to_hash
-        } else if total_groups_to_hash < 500 {
-            groups_hashed_count % 10 == 0 || groups_hashed_count == total_groups_to_hash
-        } else {
-            groups_hashed_count % 20 == 0 || groups_hashed_count == total_groups_to_hash
-        };
-
-        if should_update || last_update_time.elapsed() >= update_interval {
-            last_update_time = std::time::Instant::now();
-            let progress_percent =
-                (groups_hashed_count as f64 / total_groups_to_hash as f64) * 100.0;
-
-            let cache_status = if cache_hits.load(std::sync::atomic::Ordering::Relaxed) > 0 {
-                format!(
-                    " ({} from cache)",
-                    cache_hits.load(std::sync::atomic::Ordering::Relaxed)
-                )
+        // Calculate hashing speed and ETA
+        let elapsed = start_time.elapsed().as_secs_f64();
+        if elapsed >= 2.0 || files_hashed_count > 100 || groups_hashed_count == total_groups_to_hash {
+            let files_per_second = files_hashed_count as f64 / elapsed;
+            file_hashing_speed.push(files_per_second);
+            
+            // Keep only the last 5 measurements for more responsive updating
+            if file_hashing_speed.len() > 5 {
+                file_hashing_speed.remove(0);
+            }
+            
+            // Calculate average speed and ETA
+            let avg_speed = file_hashing_speed.iter().sum::<f64>() / file_hashing_speed.len() as f64;
+            let remaining_files = total_files_to_hash - files_hashed_count;
+            let eta_seconds = if avg_speed > 0.0 { remaining_files as f64 / avg_speed } else { 0.0 };
+            
+            // Format ETA
+            let eta_formatted = if eta_seconds < 60.0 {
+                format!("{:.0} seconds", eta_seconds)
+            } else if eta_seconds < 3600.0 {
+                format!("{:.1} minutes", eta_seconds / 60.0)
             } else {
-                "".to_string()
+                format!("{:.1} hours", eta_seconds / 3600.0)
             };
 
-            send_status(
-                3,
-                format!(
-                    "Stage 3/3: 🔄 Hashed {}/{} groups ({:.1}%){}... Found {} duplicate sets",
-                    groups_hashed_count,
-                    total_groups_to_hash,
-                    progress_percent,
-                    cache_status,
-                    actual_duplicate_sets
-                ),
-            );
+            // Reset for next measurement
+            start_time = std::time::Instant::now();
+            files_hashed_count = 0;
+        
+            // Determine update frequency for hash progress
+            let should_update = if total_groups_to_hash < 20 {
+                true // Always update for small hash groups
+            } else if total_groups_to_hash < 100 {
+                groups_hashed_count % 5 == 0 || groups_hashed_count == total_groups_to_hash
+            } else if total_groups_to_hash < 500 {
+                groups_hashed_count % 10 == 0 || groups_hashed_count == total_groups_to_hash
+            } else {
+                groups_hashed_count % 20 == 0 || groups_hashed_count == total_groups_to_hash
+            };
+
+            if should_update || last_update_time.elapsed() >= update_interval {
+                last_update_time = std::time::Instant::now();
+                let progress_percent =
+                    (groups_hashed_count as f64 / total_groups_to_hash as f64) * 100.0;
+
+                let cache_status = if cache_hits.load(std::sync::atomic::Ordering::Relaxed) > 0 {
+                    format!(
+                        " ({} from cache)",
+                        cache_hits.load(std::sync::atomic::Ordering::Relaxed)
+                    )
+                } else {
+                    "".to_string()
+                };
+
+                send_status(
+                    3,
+                    format!(
+                        "Stage 3/3: 🔄 Hashed {}/{} groups ({:.1}%){} - Found {} duplicate sets (ETA: {})",
+                        groups_hashed_count,
+                        total_groups_to_hash,
+                        progress_percent,
+                        cache_status,
+                        actual_duplicate_sets,
+                        eta_formatted
+                    ),
+                );
+            }
         }
     }
 
@@ -716,16 +781,27 @@ pub fn find_duplicate_files_with_progress(
         }
     }
 
+    // Finalize message with comprehensive statistics
     let message = if cache_hits.load(std::sync::atomic::Ordering::Relaxed) > 0 {
         format!(
-            "All stages complete. Found {} sets of duplicate files. Used {} cached hashes.",
+            "All stages complete. Found {} sets of duplicate files across {} file groups. Used {} cached hashes. Total duplicated storage: {}",
             duplicate_sets.len(),
-            cache_hits.load(std::sync::atomic::Ordering::Relaxed)
+            potential_groups,
+            cache_hits.load(std::sync::atomic::Ordering::Relaxed),
+            humansize::format_size(
+                duplicate_sets.iter().map(|set| set.size * (set.files.len() as u64 - 1)).sum::<u64>(),
+                humansize::DECIMAL
+            )
         )
     } else {
         format!(
-            "All stages complete. Found {} sets of duplicate files.",
-            duplicate_sets.len()
+            "All stages complete. Found {} sets of duplicate files across {} file groups. Total duplicated storage: {}",
+            duplicate_sets.len(),
+            potential_groups,
+            humansize::format_size(
+                duplicate_sets.iter().map(|set| set.size * (set.files.len() as u64 - 1)).sum::<u64>(),
+                humansize::DECIMAL
+            )
         )
     };
 
@@ -735,7 +811,7 @@ pub fn find_duplicate_files_with_progress(
         duplicate_sets.len()
     );
 
-    if cli.media_mode && cli.media_dedup_options.enabled {
+    if options.media_mode && options.media_dedup_options.enabled {
         // Logic for media mode handling will go here
         // For now, just a placeholder
         log::info!("Media mode is enabled but placeholder implementation");
@@ -746,7 +822,7 @@ pub fn find_duplicate_files_with_progress(
 
 /// Find similar media files with progress reporting
 fn find_similar_media_files_with_progress(
-    cli: &Cli,
+    options: &Options,
     tx_progress: StdMpscSender<ScanMessage>,
 ) -> Result<Vec<DuplicateSet>> {
     // Helper to send status updates through the channel
@@ -762,18 +838,18 @@ fn find_similar_media_files_with_progress(
     send_status(4, "Starting media similarity detection...".to_string());
 
     // First, collect all files recursively
-    let filter_rules = FilterRules::new(cli)?;
+    let filter_rules = FilterRules::new(options)?;
 
     send_status(
         4,
         format!(
             "Scanning directory for media files: {}",
-            cli.directories[0].display()
+            options.directories[0].display()
         ),
     );
 
     let mut file_infos = Vec::new();
-    let walker = WalkDir::new(&cli.directories[0]).into_iter();
+    let walker = WalkDir::new(&options.directories[0]).into_iter();
 
     for entry in walker
         .filter_entry(|e| {
@@ -869,13 +945,13 @@ fn find_similar_media_files_with_progress(
     // Process media files to find similar groups
     crate::media_dedup::process_media_type_similarity(
         &media_files.iter().collect::<Vec<_>>(),
-        &cli.media_dedup_options,
+        &options.media_dedup_options,
         &mut similar_groups,
     )?;
 
     // Convert to duplicate sets
     let duplicate_sets =
-        crate::media_dedup::convert_to_duplicate_sets(&similar_groups, &cli.media_dedup_options);
+        crate::media_dedup::convert_to_duplicate_sets(&similar_groups, &options.media_dedup_options);
 
     // Add media duplicates to regular duplicates
     log::info!(
@@ -1214,144 +1290,115 @@ pub struct DirectoryComparisonResult {
 }
 
 // Determine target directory from CLI arguments
-pub fn determine_target_directory(cli: &Cli) -> Result<PathBuf> {
-    if let Some(target) = &cli.target {
-        // User explicitly specified a target directory
+pub fn determine_target_directory(options: &Options) -> Result<PathBuf> {
+    // If --target is specified, use that
+    if let Some(target) = &options.target {
         if !target.exists() {
             return Err(anyhow::anyhow!(
-                "Specified target directory does not exist: {:?}",
+                "Target directory {:?} does not exist",
                 target
             ));
         }
         if !target.is_dir() {
-            return Err(anyhow::anyhow!(
-                "Specified target path is not a directory: {:?}",
-                target
-            ));
+            return Err(anyhow::anyhow!("Target path {:?} is not a directory", target));
         }
-        Ok(target.clone())
-    } else if cli.directories.len() > 1 {
-        // Use the last directory as target by default
-        let target = cli.directories.last().unwrap().clone();
-        if !target.exists() {
-            return Err(anyhow::anyhow!(
-                "Last specified directory (default target) does not exist: {:?}",
-                target
-            ));
-        }
-        if !target.is_dir() {
-            return Err(anyhow::anyhow!(
-                "Last specified path is not a directory: {:?}",
-                target
-            ));
-        }
-        Ok(target)
+        return Ok(target.clone());
+    }
+
+    // Otherwise, use the last directory in the list
+    if let Some(last_dir) = options.directories.last() {
+        Ok(last_dir.clone())
     } else {
-        Err(anyhow::anyhow!(
-            "No target directory specified and only one directory provided"
-        ))
+        Err(anyhow::anyhow!("No directories specified"))
     }
 }
 
 // Get source directories from CLI arguments
-pub fn get_source_directories(cli: &Cli, target: &Path) -> Vec<PathBuf> {
-    if let Some(t) = &cli.target {
-        // If target is explicitly specified, all directories are sources
-        cli.directories
-            .iter()
-            .filter(|d| d != &t)
-            .cloned()
-            .collect()
-    } else {
-        // Otherwise, all but the last directory are sources
-        cli.directories
-            .iter()
-            .filter(|d| d.as_path() != target)
-            .cloned()
-            .collect()
-    }
+pub fn get_source_directories(options: &Options, target: &Path) -> Vec<PathBuf> {
+    options
+        .directories
+        .iter()
+        .filter(|dir| dir != &target)
+        .cloned()
+        .collect()
 }
 
 // Compare directories to find missing files and optionally duplicates
-pub fn compare_directories(cli: &Cli) -> Result<DirectoryComparisonResult> {
-    let target_dir = determine_target_directory(cli)?;
-    let source_dirs = get_source_directories(cli, &target_dir);
+pub fn compare_directories(options: &Options) -> Result<DirectoryComparisonResult> {
+    let target_dir = determine_target_directory(options)?;
+    let source_dirs = get_source_directories(options, &target_dir);
 
     log::info!(
-        "Comparing directories: Sources: {:?}, Target: {:?}",
-        source_dirs,
-        target_dir
+        "Comparing directories. Target: {:?}, Sources: {:?}",
+        target_dir,
+        source_dirs
     );
 
-    if source_dirs.is_empty() {
-        return Err(anyhow::anyhow!("No source directories specified"));
+    // Scan target directory for files
+    let target_files = scan_directory(options, &target_dir)?;
+    log::info!("Target directory scan complete. Found {} files.", target_files.len());
+
+    // Create hash map for quick lookup
+    let mut target_files_map: HashMap<String, FileInfo> = HashMap::new();
+    for file_info in &target_files {
+        // Use the file name as the key (or full path if needed later)
+        let file_name = file_info.path.file_name().unwrap().to_string_lossy().to_string();
+        target_files_map.insert(file_name, file_info.clone());
     }
 
-    // Create a modified CLI for target directory scan
-    let mut target_cli = cli.clone();
-    target_cli.directories = vec![target_dir.clone()];
-
-    // Scan target directory
-    log::info!("Scanning target directory: {:?}", target_dir);
-    let target_files = scan_directory(&target_cli, &target_dir)?;
-    log::info!("Found {} files in target directory", target_files.len());
-
-    // Map of target file hashes for quick lookup
-    let target_hash_map: HashMap<String, &FileInfo> = target_files
-        .iter()
-        .filter_map(|file| file.hash.as_ref().map(|hash| (hash.clone(), file)))
-        .collect();
-
+    // Find files that are in source but not in target
     let mut missing_files = Vec::new();
     let mut all_duplicate_sets = Vec::new();
 
-    // Scan each source directory and find missing files
     for source_dir in &source_dirs {
         log::info!("Scanning source directory: {:?}", source_dir);
+        let source_files = scan_directory(options, source_dir)?;
+        log::info!("Source directory scan complete. Found {} files.", source_files.len());
 
-        // Create a modified CLI for source directory scan
-        let mut source_cli = cli.clone();
-        source_cli.directories = vec![source_dir.clone()];
+        for source_file in source_files {
+            // Skip dot files and certain system files
+            let file_name = match source_file.path.file_name() {
+                Some(name) => name.to_string_lossy().to_string(),
+                None => continue, // Skip files without a valid name
+            };
+            
+            if file_name.starts_with('.') || 
+               file_name == "thumbs.db" || 
+               file_name == "desktop.ini" {
+                continue;
+            }
 
-        let source_files = scan_directory(&source_cli, source_dir)?;
-        log::info!(
-            "Found {} files in source directory: {:?}",
-            source_files.len(),
-            source_dir
-        );
-
-        // Find files missing in target
-        for file in &source_files {
-            // Skip files with no hash
-            if let Some(hash) = &file.hash {
-                if !target_hash_map.contains_key(hash) {
-                    missing_files.push(file.clone());
-                    log::debug!("File missing in target: {:?}", file.path);
-                }
-
-                // If deduplication is enabled, collect duplicate sets
-                if cli.deduplicate {
-                    // This part will be expanded if deduplication is requested
-                    // For now we'll just identify duplicates across directories
-                }
+            // Check if file exists in target directory
+            let target_path = target_dir.join(&file_name);
+            
+            if !target_path.exists() {
+                log::debug!(
+                    "File {:?} missing from target directory",
+                    source_file.path
+                );
+                missing_files.push(source_file);
             }
         }
     }
 
-    // If deduplication is requested, we need additional processing
-    if cli.deduplicate {
+    log::info!(
+        "Found {} files in source directories missing from target",
+        missing_files.len()
+    );
+
+    if options.deduplicate {
         // Scan all directories together to find duplicates across them
-        let mut all_dirs_cli = cli.clone();
+        let mut all_dirs_options = options.clone();
         let mut all_dirs = source_dirs.clone();
         all_dirs.push(target_dir.clone());
-        all_dirs_cli.directories = all_dirs;
+        all_dirs_options.directories = all_dirs;
 
         log::info!("Finding duplicates across all directories for deduplication");
 
         // Use find_duplicate_files_with_progress instead of find_duplicate_files
         // Create a dummy channel for the progress updates
         let (tx, _rx) = std::sync::mpsc::channel::<ScanMessage>();
-        let duplicates = find_duplicate_files_with_progress(&all_dirs_cli, tx)?;
+        let duplicates = find_duplicate_files_with_progress(&all_dirs_options, tx)?;
 
         // Filter for duplicate sets that span across source and target
         let cross_dir_duplicates: Vec<DuplicateSet> = duplicates
@@ -1387,8 +1434,8 @@ pub fn compare_directories(cli: &Cli) -> Result<DirectoryComparisonResult> {
 }
 
 // Scans a single directory and returns FileInfo objects with hashes
-fn scan_directory(cli: &Cli, directory: &Path) -> Result<Vec<FileInfo>> {
-    let filter_rules = FilterRules::new(cli)?;
+fn scan_directory(options: &Options, directory: &Path) -> Result<Vec<FileInfo>> {
+    let filter_rules = FilterRules::new(options)?;
 
     let mut files = Vec::new();
     let walker = WalkDir::new(directory).into_iter();
@@ -1414,7 +1461,7 @@ fn scan_directory(cli: &Cli, directory: &Path) -> Result<Vec<FileInfo>> {
                         let size = metadata.len();
 
                         // Calculate hash
-                        let hash = match calculate_hash(&path, &cli.algorithm) {
+                        let hash = match calculate_hash(&path, &options.algorithm) {
                             Ok(h) => Some(h),
                             Err(e) => {
                                 log::warn!("Failed to hash file {:?}: {}", path, e);

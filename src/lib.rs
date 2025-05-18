@@ -23,20 +23,13 @@ pub mod audio_fingerprint;
 // Add video fingerprinting module
 pub mod video_fingerprint;
 
-// To make Cli accessible, you'll need to move its definition from main.rs to lib.rs
-// or re-export it from main.rs if main.rs uses this lib.rs as a library.
-// For a typical binary project that also wants to expose a library for testing/other uses:
-// Option 1: Move Cli to lib.rs
-// Option 2: Keep Cli in main.rs but ensure main.rs uses `dedup::Cli` after this lib.rs is established.
+// Add the new options module
+pub mod options;
 
-// For now, let's assume you will move or already have Cli definition in a way it can be exported.
-// If Cli is in main.rs, and main.rs is the binary entry point, you can't directly import from main.rs into lib.rs.
-// The common pattern is to define shared structs like Cli in lib.rs and then main.rs uses them.
+// Add the new commands module
+pub mod commands;
 
-// Let's assume Cli will be defined here or re-exported from a module within the library.
-// Placeholder for Cli - you'll need to ensure its actual definition is accessible here.
-// If your Cli struct is still in main.rs, you should move it to this lib.rs file.
-// For example:
+// The old Cli struct is being replaced by Options, so we no longer need to use it directly
 
 use clap::Parser;
 use std::path::PathBuf;
@@ -46,6 +39,8 @@ use crate::config::DedupConfig;
 use crate::file_utils::{SortCriterion, SortOrder};
 use crate::media_dedup::MediaDedupOptions;
 
+// Maintaining Cli for backwards compatibility during migration
+// Applications should transition to using Options instead
 #[derive(Parser, Debug, Clone)]
 #[clap(author, version, about, long_about = None)]
 pub struct Cli {
