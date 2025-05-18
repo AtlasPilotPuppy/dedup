@@ -850,7 +850,7 @@ impl SshProtocol {
     }
 
     /// Standard execution method (fallback) - uses JSON with prefix for reliable parsing
-    fn execute_dedups_standard(&self, args: &[&str], cli: &crate::Cli) -> Result<String> {
+    fn execute_dedups_standard(&self, args: &[&str], _cli: &crate::Cli) -> Result<String> {
         // Add JSON prefix to help with parsing
         let mut modified_args = args.to_vec();
         modified_args.push("--json-prefix");  // This needs to be added to the CLI options

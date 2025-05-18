@@ -47,6 +47,7 @@ regex = { version = "1.10" }
 dirs = "5.0"
 itertools = "0.12"
 socket2 = { version = "0.5", features = ["all"] }  # For TCP socket configuration
+ctrlc = { version = "3.4", features = ["termination"] }  # Signal handling
 
 # Protobuf and compression support
 prost = "0.12"

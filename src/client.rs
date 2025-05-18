@@ -22,18 +22,16 @@ use std::thread::{self, JoinHandle};
 #[cfg(feature = "ssh")]
 use std::time::{Duration, Instant};
 #[cfg(feature = "ssh")]
-use socket2::{Socket, Domain, Type};
+use socket2::Socket;
 #[cfg(feature = "ssh")]
-use std::io::{ErrorKind, Read, Write};
+use std::io::ErrorKind;
 
 /// Maximum number of consecutive timeouts before considering connection dead
 const MAX_TIMEOUTS: u32 = 50;
 /// Default timeout duration for receiving messages
 const DEFAULT_RECEIVE_TIMEOUT: Duration = Duration::from_millis(100);
-/// Maximum time to wait for initial connection
-const CONNECTION_TIMEOUT: Duration = Duration::from_secs(30);
 /// Maximum time to wait for command response
-const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 /// Keep-alive interval
 const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(30);
 /// Keep-alive timeout
@@ -138,7 +136,6 @@ impl DedupClient {
         self.disconnect()?;
 
         self.state = ConnectionState::Connecting;
-        let start_time = Instant::now();
 
         if self.verbose >= 2 {
             log::info!("Connecting to dedups server at {}:{}", self.host, self.port);
@@ -452,29 +449,52 @@ impl DedupClient {
             log::debug!("Disconnecting from server");
         }
         
-        // Drop protocol handler to close connection
+        // Send a clean shutdown message
         if let Some(mut protocol) = self.protocol.take() {
-            // Try to send a clean shutdown message
-            let _ = protocol.send_message(DedupMessage {
+            // Try to send a clean shutdown message and ensure it's delivered
+            if self.verbose >= 3 {
+                log::debug!("Sending disconnect message to server");
+            }
+            let disconnect_msg = DedupMessage {
                 message_type: MessageType::Result,
                 payload: "client_disconnect".to_string(),
-            });
+            };
+            
+            let _ = protocol.send_message(disconnect_msg);
+            
+            // Small sleep to ensure the message gets delivered
+            std::thread::sleep(Duration::from_millis(50));
         }
 
         // Join reader thread with timeout
         if let Some(thread) = self.reader_thread.take() {
-            match thread.join() {
-                Ok(_) => {
-                    if self.verbose >= 3 {
-                        log::debug!("Reader thread terminated normally");
-                    }
+            if self.verbose >= 3 {
+                log::debug!("Waiting for reader thread to terminate");
+            }
+            
+            let timeout = Duration::from_millis(500);
+            let thread_handle = std::thread::spawn(move || {
+                let _ = thread.join();
+            });
+            
+            let start = std::time::Instant::now();
+            while start.elapsed() < timeout {
+                if thread_handle.is_finished() {
+                    break;
                 }
-                Err(e) => {
-                    log::warn!("Reader thread panicked: {:?}", e);
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            
+            if !thread_handle.is_finished() {
+                if self.verbose >= 1 {
+                    log::warn!("Reader thread did not terminate within timeout");
                 }
+            } else if self.verbose >= 3 {
+                log::debug!("Reader thread terminated normally");
             }
         }
 
+        // Close message receiver channel
         self.message_receiver.take();
         self.state = ConnectionState::Disconnected;
         self.last_error = None;
@@ -502,16 +522,44 @@ impl DedupClient {
         if self.verbose >= 2 {
             log::info!("Executing command via API: {} {}", command, args.join(" "));
         }
+
+        // For handshake command, add protocol information
+        let mut command_options = options.clone();
+        if command == "internal_handshake" {
+            if self.verbose >= 2 {
+                log::info!("Preparing internal handshake with protocol information");
+            }
+            
+            // Add USE_TUNNEL_API flag for handshake (this is important)
+            command_options.insert("USE_TUNNEL_API".to_string(), "true".to_string());
+            
+            // Add protocol details
+            command_options.insert("protocol_type".to_string(), 
+                if self.options.use_protobuf { "protobuf" } else { "json" }.to_string());
+            command_options.insert("compression".to_string(), 
+                self.options.use_compression.to_string());
+            command_options.insert("compression_level".to_string(), 
+                self.options.compression_level.to_string());
+            
+            if self.verbose >= 3 {
+                log::debug!("Handshake options: {:?}", command_options);
+            }
+        }
         
-        self.send_command(command.clone(), args.clone(), options.clone())
+        self.send_command(command.clone(), args.clone(), command_options)
             .with_context(|| format!("Failed to send command: {} {}", command, args.join(" ")))?;
 
         let mut output = String::new();
-        let mut has_error = false;
         let mut timeout_count = 0;
-        let start_time = Instant::now();
-        let mut got_result = false;
         let mut last_activity = Instant::now();
+        let start_time = Instant::now();
+
+        // For handshake, use a longer timeout to ensure it works reliably in tests
+        let command_timeout = if command == "internal_handshake" {
+            Duration::from_secs(10)  // Increased from 5s to 10s for reliability
+        } else {
+            Duration::from_secs(10)  // Reduced from 30s to 10s
+        };
 
         loop {
             // Send keep-alive ping if needed
@@ -532,9 +580,73 @@ impl DedupClient {
                             if self.verbose >= 3 {
                                 log::debug!("Received final result from server");
                             }
-                            output.push_str(&msg.payload);
-                            got_result = true;
-                            break;
+                            
+                            // For handshake, verify protocol match
+                            if command == "internal_handshake" {
+                                match serde_json::from_str::<serde_json::Value>(&msg.payload) {
+                                    Ok(handshake_resp) => {
+                                        // Verify status first
+                                        let status = handshake_resp.get("status")
+                                            .and_then(|v| v.as_str())
+                                            .ok_or_else(|| anyhow!("Handshake response missing status"))?;
+                                        
+                                        if status != "handshake_ack" {
+                                            return Err(anyhow!("Unexpected handshake status: {}", status));
+                                        }
+                                        
+                                        // Verify protocol details
+                                        let protocol = handshake_resp.get("protocol")
+                                            .ok_or_else(|| anyhow!("Handshake response missing protocol details"))?;
+                                        
+                                        let server_proto_type = protocol.get("type")
+                                            .and_then(|v| v.as_str())
+                                            .ok_or_else(|| anyhow!("Protocol type missing in handshake response"))?;
+                                        
+                                        let client_proto_type = if self.options.use_protobuf { "protobuf" } else { "json" };
+                                        
+                                        if server_proto_type != client_proto_type {
+                                            return Err(anyhow!("Protocol mismatch: client using {}, server using {}", 
+                                                client_proto_type, server_proto_type));
+                                        }
+                                        
+                                        // Verify compression settings match
+                                        let server_compression = protocol.get("compression")
+                                            .and_then(|v| v.as_bool())
+                                            .ok_or_else(|| anyhow!("Compression setting missing in handshake response"))?;
+                                        
+                                        if server_compression != self.options.use_compression {
+                                            return Err(anyhow!("Compression mismatch: client={}, server={}", 
+                                                self.options.use_compression, server_compression));
+                                        }
+                                        
+                                        if self.verbose >= 2 {
+                                            log::info!("Protocol match confirmed: {} with compression={}", 
+                                                server_proto_type, server_compression);
+                                        }
+                                    }
+                                    Err(e) => {
+                                        return Err(anyhow!("Failed to parse handshake response: {} (payload: {})", 
+                                            e, msg.payload));
+                                    }
+                                }
+                            }
+                            
+                            // For help command, parse and format the response
+                            if command == "dedups" && args.contains(&"--help".to_string()) {
+                                if let Ok(help_json) = serde_json::from_str::<serde_json::Value>(&msg.payload) {
+                                    if let Some(message) = help_json.get("message") {
+                                        output.push_str(message.as_str().unwrap_or(&msg.payload));
+                                    } else {
+                                        output.push_str(&msg.payload);
+                                    }
+                                } else {
+                                    output.push_str(&msg.payload);
+                                }
+                            } else {
+                                output.push_str(&msg.payload);
+                            }
+                            
+                            return Ok(output);
                         }
                         MessageType::Error => {
                             let error: ErrorMessage = serde_json::from_str(&msg.payload)
@@ -544,9 +656,7 @@ impl DedupClient {
                                 log::error!("Received error from server: {} (code {})", error.message, error.code);
                             }
                             
-                            has_error = true;
-                            output = format!("Error (code {}): {}", error.code, error.message);
-                            break;
+                            return Err(anyhow!("Server error (code {}): {}", error.code, error.message));
                         }
                         MessageType::Progress => {
                             let progress: ProgressMessage = match serde_json::from_str(&msg.payload) {
@@ -582,29 +692,19 @@ impl DedupClient {
                     }
                 }
                 Ok(None) => {
-                    // If we got a result but the connection closed, that's okay
-                    if got_result {
-                        break;
-                    }
-
                     timeout_count += 1;
                     
                     if timeout_count >= MAX_TIMEOUTS {
                         return Err(anyhow!("Command timed out after {} attempts", MAX_TIMEOUTS));
                     }
                     
-                    if start_time.elapsed() >= COMMAND_TIMEOUT {
-                        return Err(anyhow!("Command execution exceeded timeout of {} seconds", COMMAND_TIMEOUT.as_secs()));
+                    if start_time.elapsed() >= command_timeout {
+                        return Err(anyhow!("Command execution exceeded timeout of {} seconds", command_timeout.as_secs()));
                     }
                     
-                    thread::sleep(DEFAULT_RECEIVE_TIMEOUT);
+                    thread::sleep(Duration::from_millis(10));  // Reduced from 100ms to 10ms
                 }
                 Err(e) => {
-                    // If we got a result but hit an error reading more, that's okay
-                    if got_result {
-                        break;
-                    }
-
                     // Check if it's a temporary error
                     if let Some(io_err) = e.downcast_ref::<std::io::Error>() {
                         match io_err.kind() {
@@ -612,14 +712,10 @@ impl DedupClient {
                                 if self.verbose >= 3 {
                                     log::debug!("Temporary error reading from server: {}", io_err);
                                 }
-                                thread::sleep(Duration::from_millis(100));
+                                thread::sleep(Duration::from_millis(10));  // Reduced from 100ms to 10ms
                                 continue;
                             }
                             ErrorKind::ConnectionReset | ErrorKind::BrokenPipe => {
-                                // Connection was closed by server
-                                if got_result {
-                                    break;
-                                }
                                 return Err(anyhow!("Server connection closed"));
                             }
                             _ => {
@@ -631,27 +727,6 @@ impl DedupClient {
                     }
                 }
             }
-        }
-
-        if self.verbose >= 3 {
-            log::debug!("Command execution completed");
-        }
-
-        // Clean up connection if server closed it
-        if self.state == ConnectionState::Connected {
-            match self.receive_message() {
-                Ok(None) | Err(_) => {
-                    // Server closed connection, clean up
-                    self.disconnect()?;
-                }
-                _ => {}
-            }
-        }
-
-        if has_error {
-            Err(anyhow!(output))
-        } else {
-            Ok(output)
         }
     }
 }

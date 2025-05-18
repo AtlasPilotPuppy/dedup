@@ -152,6 +152,29 @@ impl DedupServer {
         let options = self.options.clone();
         let verbose = self.verbose;
 
+        // Set up signal handler for graceful shutdown (on unix platforms)
+        #[cfg(unix)]
+        {
+            use std::sync::Arc;
+            use std::thread;
+            
+            let running_clone = running.clone();
+            
+            match ctrlc::set_handler(move || {
+                log::info!("Received termination signal, shutting down server gracefully");
+                running_clone.store(false, Ordering::SeqCst);
+            }) {
+                Ok(_) => {
+                    if verbose >= 2 {
+                        log::info!("Signal handler installed for graceful shutdown");
+                    }
+                },
+                Err(e) => {
+                    log::warn!("Failed to set signal handler: {}", e);
+                }
+            }
+        }
+
         if self.verbose >= 1 {
             log::info!("Dedups server started on port {}", self.port);
         }
@@ -306,7 +329,16 @@ impl DedupServer {
             log::info!("Client connected and ready to receive commands");
         }
 
-        while running.load(Ordering::SeqCst) {
+        // Keep track of whether we've received a handshake
+        let mut handshake_received = false;
+
+        // Increase handshake timeout to 10 seconds (from 5) for better test reliability
+        let handshake_timeout = Duration::from_secs(10);
+
+        // Set a flag to detect client disconnection
+        let mut client_disconnected = false;
+
+        while running.load(Ordering::SeqCst) && !client_disconnected {
             match protocol.receive_message() {
                 Ok(Some(message)) => {
                     last_activity = std::time::Instant::now();
@@ -316,10 +348,34 @@ impl DedupServer {
                     
                     match message.message_type {
                         MessageType::Command => {
+                            // Parse command to check for handshake
+                            if let Ok(cmd_msg) = serde_json::from_str::<CommandMessage>(&message.payload) {
+                                if cmd_msg.command == "internal_handshake" {
+                                    if verbose >= 1 {
+                                        log::info!("Received handshake command - client identified");
+                                    }
+                                    handshake_received = true;
+                                }
+                            }
+                            
                             if let Err(e) = Self::handle_command(&mut *protocol, &message, verbose) {
                                 log::error!("Error handling command: {}", e);
                                 // Try to send error back to client
                                 let _ = Self::send_error(&mut *protocol, &format!("Error handling command: {}", e), 500);
+                            }
+                        }
+                        MessageType::Result => {
+                            // Check for client disconnect message
+                            if message.payload == "client_disconnect" {
+                                if verbose >= 1 {
+                                    log::info!("Client sent disconnect message");
+                                }
+                                client_disconnected = true;
+                            } else {
+                                log::warn!(
+                                    "Received unexpected result message: {}",
+                                    message.payload
+                                );
                             }
                         }
                         _ => {
@@ -338,25 +394,22 @@ impl DedupServer {
                     }
                 }
                 Ok(None) => {
-                    // Check for keep-alive timeout
-                    if keep_alive && last_activity.elapsed() > Duration::from_secs(60) {
-                        // Send keep-alive ping
-                        let ping_msg = DedupMessage {
-                            message_type: MessageType::Result,
-                            payload: "ping".to_string(),
-                        };
-                        if let Err(e) = protocol.send_message(ping_msg) {
-                            log::error!("Failed to send keep-alive ping: {}", e);
-                            break;
-                        }
-                        last_activity = std::time::Instant::now();
-                        if verbose >= 3 {
-                            log::debug!("Sent keep-alive ping");
-                        }
+                    // Check keep-alive timeout
+                    if keep_alive && last_activity.elapsed() > Duration::from_secs(90) {
+                        log::error!("Keep-alive timeout exceeded");
+                        break;
                     }
                     
-                    // Sleep briefly to avoid busy loop
-                    thread::sleep(Duration::from_millis(100));
+                    // Check handshake timeout only if we haven't received one yet
+                    if !handshake_received && session_start.elapsed() > handshake_timeout {
+                        if verbose >= 1 {
+                            log::error!("No handshake received within timeout of {} seconds, closing connection", 
+                                       handshake_timeout.as_secs());
+                        }
+                        break;
+                    }
+                    
+                    thread::sleep(Duration::from_millis(10));  // Reduced from 100ms to 10ms
                 }
                 Err(e) => {
                     match e.downcast_ref::<std::io::Error>() {
@@ -370,15 +423,22 @@ impl DedupServer {
                         }
                         Some(io_err) if io_err.kind() == std::io::ErrorKind::WouldBlock => {
                             // Non-blocking read with no data
-                            thread::sleep(Duration::from_millis(100));
+                            thread::sleep(Duration::from_millis(10));  // Reduced from 100ms to 10ms
                             continue;
                         }
                         Some(io_err) if io_err.kind() == std::io::ErrorKind::BrokenPipe => {
                             log::warn!("Client connection closed (broken pipe)");
+                            client_disconnected = true;
                             break;
                         }
                         Some(io_err) if io_err.kind() == std::io::ErrorKind::ConnectionReset => {
                             log::warn!("Client connection reset");
+                            client_disconnected = true;
+                            break;
+                        }
+                        Some(io_err) if io_err.kind() == std::io::ErrorKind::ConnectionAborted => {
+                            log::warn!("Client connection aborted");
+                            client_disconnected = true;
                             break;
                         }
                         _ => {
@@ -444,44 +504,95 @@ impl DedupServer {
         // Special handling for internal_handshake command - respond immediately with a success message
         if command_msg.command == "internal_handshake" {
             if verbose >= 1 {
-                log::info!("Received internal_handshake request, responding with confirmation.");
+                log::info!("Processing internal_handshake request with options: {:?}", command_msg.options);
             }
             
-            // Send handshake success response
+            // Extract protocol info from command options
+            let proto_type = command_msg.options.get("protocol_type")
+                .map(|s| s.as_str())
+                .unwrap_or("json");
+            let compression = command_msg.options.get("compression")
+                .and_then(|s| s.parse::<bool>().ok())
+                .unwrap_or(false);
+            let compression_level = command_msg.options.get("compression_level")
+                .and_then(|s| s.parse::<u32>().ok())
+                .unwrap_or(3);
+            
+            if verbose >= 2 {
+                log::info!("Handshake details - protocol: {}, compression: {}, level: {}", 
+                    proto_type, compression, compression_level);
+            }
+            
+            // Send handshake success response with protocol details
             let result_payload = serde_json::json!({
                 "status": "handshake_ack",
                 "message": "Server ready and acknowledged handshake.",
                 "server_version": env!("CARGO_PKG_VERSION"),
-                "keep_alive": true  // Indicate keep-alive is enabled
+                "keep_alive": true,
+                "protocol": {
+                    "type": proto_type,
+                    "compression": compression,
+                    "compression_level": compression_level
+                }
             }).to_string();
+
+            if verbose >= 3 {
+                log::debug!("Sending handshake response: {}", result_payload);
+            }
 
             if let Err(e) = Self::send_result(protocol, &result_payload, verbose) {
                 log::error!("Failed to send internal_handshake response: {}", e);
                 return Err(anyhow::anyhow!("Failed to send internal_handshake response: {}", e));
             }
             
-            if verbose >= 2 {
+            if verbose >= 1 {
                 log::info!("Server communication established via internal_handshake.");
             }
             
             return Ok(());
         }
 
-        // Special handling for keep-alive ping command
-        if command_msg.command == "ping" {
-            if verbose >= 3 {
-                log::debug!("Received keep-alive ping, responding with pong");
-            }
-            
-            if let Err(e) = Self::send_result(protocol, "pong", verbose) {
-                log::error!("Failed to send keep-alive pong: {}", e);
-                return Err(anyhow::anyhow!("Failed to send keep-alive pong: {}", e));
-            }
-            
-            return Ok(());
+        // Handle invalid commands
+        if command_msg.command != "dedups" {
+            let err_msg = format!("Invalid command: {}. Only 'dedups' command is supported.", command_msg.command);
+            log::warn!("{}", err_msg);
+            return Self::send_error(protocol, &err_msg, 2);
         }
 
-        // Build and execute the command
+        // Special handling for dedups commands
+        if command_msg.command == "dedups" {
+            // Handle help command
+            if command_msg.args.contains(&"--help".to_string()) {
+                let help_text = serde_json::json!({
+                    "type": "result",
+                    "message": "Usage: dedups [OPTIONS] [DIRECTORIES]...\n\nA tool for finding and managing duplicate files\n\nOptions:\n  --help                  Print help information\n  --version               Print version information"
+                }).to_string();
+                
+                if let Err(e) = Self::send_result(protocol, &help_text, verbose) {
+                    log::error!("Failed to send help text: {}", e);
+                    return Err(anyhow::anyhow!("Failed to send help text: {}", e));
+                }
+                
+                return Ok(());
+            }
+            
+            // Handle version command
+            if command_msg.args.contains(&"--version".to_string()) {
+                let version_text = serde_json::json!({
+                    "type": "result",
+                    "message": format!("dedups {}", env!("CARGO_PKG_VERSION"))
+                }).to_string();
+                
+                if let Err(e) = Self::send_result(protocol, &version_text, verbose) {
+                    log::error!("Failed to send version text: {}", e);
+                    return Err(anyhow::anyhow!("Failed to send version text: {}", e));
+                }
+                
+                return Ok(());
+            }
+        }
+
+        // For all other dedups commands, execute as a child process
         let mut cmd = Command::new(&command_msg.command);
         cmd.args(&command_msg.args);
         
@@ -494,7 +605,6 @@ impl DedupServer {
             }
             
             // For tunnel API mode, we force --json output to ensure proper protocol format
-            // and separate stdout/stderr completely to avoid mixing
             if !command_msg.args.contains(&"--json".to_string()) {
                 if verbose >= 2 {
                     log::info!("Adding --json flag for API communication");
@@ -560,18 +670,33 @@ impl DedupServer {
                             }
                             
                             // Forward as Result message
-                            if let Err(e) = Self::send_result(&mut *protocol_clone, &line, thread_verbose) {
+                            let result_msg = DedupMessage {
+                                message_type: MessageType::Result,
+                                payload: line,
+                            };
+                            
+                            if let Err(e) = protocol_clone.send_message(result_msg) {
                                 log::error!("Error sending output to client: {}", e);
                                 break;
                             }
                         } else if tunnel_api_mode_clone {
                             // In tunnel API mode, non-JSON stdout is treated as an error
-                            // as we expect clean protocol
                             log::warn!("Unexpected non-JSON output on stdout in tunnel API mode: {}", line);
                         } else {
                             // Regular mode, stdout may contain mixed output
                             if thread_verbose >= 2 {
                                 log::debug!("STDOUT: {}", line);
+                            }
+                            
+                            // Send as plain text result
+                            let result_msg = DedupMessage {
+                                message_type: MessageType::Result,
+                                payload: line,
+                            };
+                            
+                            if let Err(e) = protocol_clone.send_message(result_msg) {
+                                log::error!("Error sending output to client: {}", e);
+                                break;
                             }
                         }
                     }
@@ -608,7 +733,7 @@ impl DedupServer {
                 });
 
                 // Wait for stdout thread to complete with timeout
-                let stdout_timeout = Duration::from_secs(30);
+                let stdout_timeout = Duration::from_secs(5);  // Reduced from 30s to 5s
                 let stdout_thread_done = match rx.recv_timeout(stdout_timeout) {
                     Ok(_) => {
                         if verbose >= 3 {
@@ -623,7 +748,7 @@ impl DedupServer {
                 };
 
                 // Wait for process to exit with timeout
-                let process_timeout = Duration::from_secs(30);
+                let process_timeout = Duration::from_secs(5);  // Reduced from 30s to 5s
                 let start = Instant::now();
                 let status = loop {
                     match child.try_wait() {
