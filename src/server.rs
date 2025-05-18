@@ -420,6 +420,7 @@ impl DedupServer {
                                     log::info!("Client sent disconnect message");
                                 }
                                 client_disconnected = true;
+                                break;
                             } else {
                                 log::warn!(
                                     "Received unexpected result message: {}",
@@ -446,6 +447,7 @@ impl DedupServer {
                     // Check keep-alive timeout
                     if keep_alive && last_activity.elapsed() > Duration::from_secs(90) {
                         log::error!("Keep-alive timeout exceeded");
+                        client_disconnected = true;
                         break;
                     }
 
@@ -455,6 +457,7 @@ impl DedupServer {
                             log::error!("No handshake received within timeout of {} seconds, closing connection", 
                                        handshake_timeout.as_secs());
                         }
+                        client_disconnected = true;
                         break;
                     }
 
@@ -466,6 +469,7 @@ impl DedupServer {
                             // Read timeout, check keep-alive
                             if keep_alive && last_activity.elapsed() > Duration::from_secs(90) {
                                 log::error!("Keep-alive timeout exceeded");
+                                client_disconnected = true;
                                 break;
                             }
                             continue;
@@ -492,6 +496,7 @@ impl DedupServer {
                         }
                         _ => {
                             log::error!("Error reading from client: {}", e);
+                            client_disconnected = true;
                             break;
                         }
                     }

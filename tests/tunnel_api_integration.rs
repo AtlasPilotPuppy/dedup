@@ -356,7 +356,7 @@ fn ensure_server_running(child: &mut Child, port: u16) -> Result<ManagedReceiver
 /// Helper: start server with retries
 fn start_server_with_retries(
     verbose: u8,
-    max_retries: u32,
+    _max_retries: u32, // Prefix with underscore to indicate intentionally unused
 ) -> Result<(Child, u16, ManagedReceiver<String>)> {
     let port = find_free_port()?;
 
