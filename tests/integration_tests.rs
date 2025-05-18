@@ -728,20 +728,24 @@ mod integration {
         // Create a dummy channel for the progress updates
         let (tx, _rx) = std::sync::mpsc::channel();
         let source_dedup_options = options.clone();
-        
+
         // Test individual directory deduplication
-        let source_sets = file_utils::find_duplicate_files_with_progress(&source_dedup_options, tx.clone())?;
+        let source_sets =
+            file_utils::find_duplicate_files_with_progress(&source_dedup_options, tx.clone())?;
         assert!(
             !source_sets.is_empty(),
             "Source directory should have at least one duplicate set"
         );
 
         // See if there are cross-directory duplicates
-        let comparison_result = file_utils::compare_directories(&options)?;
+        let comparison_result = file_utils::compare_directories(&options, None)?;
         let cross_dir_duplicates = comparison_result.duplicates;
 
         // Print debug information
-        println!("Cross-directory duplicates count: {}", cross_dir_duplicates.len());
+        println!(
+            "Cross-directory duplicates count: {}",
+            cross_dir_duplicates.len()
+        );
         for set in &cross_dir_duplicates {
             print!("Set with {} files: ", set.files.len());
             for file in &set.files {
@@ -755,14 +759,8 @@ mod integration {
         if !cross_dir_duplicates.is_empty() {
             let mut found_cross_dir_dup = false;
             for set in &cross_dir_duplicates {
-                let has_source_file = set
-                    .files
-                    .iter()
-                    .any(|f| f.path.starts_with(&source_dir));
-                let has_target_file = set
-                    .files
-                    .iter()
-                    .any(|f| f.path.starts_with(&target_dir));
+                let has_source_file = set.files.iter().any(|f| f.path.starts_with(&source_dir));
+                let has_target_file = set.files.iter().any(|f| f.path.starts_with(&target_dir));
 
                 if has_source_file && has_target_file {
                     found_cross_dir_dup = true;
@@ -846,17 +844,17 @@ mod integration {
         );
         assert_eq!(initial_target_files, 1, "Target should have 1 initial file");
 
-            // First step: Deduplicate the source directory
-    let mut source_dedup_options = env.default_options();
-    source_dedup_options.directories = vec![source_dir.clone()];
-    source_dedup_options.delete = true;
-    source_dedup_options.mode = "newest_modified".to_string();
+        // First step: Deduplicate the source directory
+        let mut source_dedup_options = env.default_options();
+        source_dedup_options.directories = vec![source_dir.clone()];
+        source_dedup_options.delete = true;
+        source_dedup_options.mode = "newest_modified".to_string();
 
-    // Get duplicate sets in source
-    // Create a dummy channel for the progress updates
-    let (tx, _rx) = std::sync::mpsc::channel();
-    let source_duplicate_sets =
-        file_utils::find_duplicate_files_with_progress(&source_dedup_options, tx)?;
+        // Get duplicate sets in source
+        // Create a dummy channel for the progress updates
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let source_duplicate_sets =
+            file_utils::find_duplicate_files_with_progress(&source_dedup_options, tx)?;
 
         // Count duplicate sets with at least 2 files
         let actionable_sets = source_duplicate_sets
@@ -898,14 +896,14 @@ mod integration {
             "Source should have 4 files after deduplication"
         );
 
-            // Second step: Copy files to target with deduplication flag
-    let mut copy_options = env.default_options();
-    copy_options.directories = vec![source_dir.clone(), target_dir.clone()];
-    copy_options.target = Some(target_dir.clone());
-    copy_options.deduplicate = true;
+        // Second step: Copy files to target with deduplication flag
+        let mut copy_options = env.default_options();
+        copy_options.directories = vec![source_dir.clone(), target_dir.clone()];
+        copy_options.target = Some(target_dir.clone());
+        copy_options.deduplicate = true;
 
-    // Find missing files in target after considering duplicates
-    let comparison_result = file_utils::compare_directories(&copy_options)?;
+        // Find missing files in target after considering duplicates
+        let comparison_result = file_utils::compare_directories(&copy_options, None)?;
         let missing_files = comparison_result.missing_in_target;
 
         // Print debug info about missing files
@@ -939,9 +937,11 @@ mod integration {
     }
 }
 
+#[cfg(test)]
 mod copy_missing_tests {
     use super::*;
-    use assert_cmd::Command;
+    // use assert_cmd::Command; // This can remain commented if truly unused
+    use std::fs::{self};
     use tempfile::TempDir;
 
     // Helper function to create test directory structure
@@ -988,7 +988,7 @@ mod copy_missing_tests {
         // Print debug information about paths
         println!("Source dir: {:?}", source_dir);
         println!("Dest dir: {:?}", dest_dir);
-        
+
         // Create test options
         let options = Options {
             directories: vec![source_dir.clone()],
@@ -1027,48 +1027,59 @@ mod copy_missing_tests {
         };
 
         // Use the compare_directories function to find missing files
-        let comparison_result = file_utils::compare_directories(&options).unwrap();
-        
+        let comparison_result = file_utils::compare_directories(&options, None).unwrap();
+
         // Debug info about missing files
-        println!("Found {} missing files:", comparison_result.missing_in_target.len());
+        println!(
+            "Found {} missing files:",
+            comparison_result.missing_in_target.len()
+        );
         for f in &comparison_result.missing_in_target {
             println!(" - {:?}", f.path);
         }
-        
+
         // Check that we found the expected missing files
         let missing_files = &comparison_result.missing_in_target;
         assert!(!missing_files.is_empty(), "Should find missing files");
-        
+
         // Manually copy file1.txt to verify it's possible
         let file1_content = fs::read_to_string(source_dir.join("file1.txt")).unwrap();
         let dest_file1 = dest_dir.join("file1.txt");
         fs::write(&dest_file1, file1_content).unwrap();
-        
+
         assert!(dest_file1.exists(), "Manual copy of file1.txt failed");
-        
+
         // Now copy file2.txt using the file_utils function
-        let file2_info = missing_files.iter()
+        let file2_info = missing_files
+            .iter()
             .find(|f| f.path.file_name().unwrap() == "file2.txt")
             .unwrap();
-        
+
         let files_to_copy = vec![file2_info.clone()];
-        
+
         println!("File2 path: {:?}", file2_info.path);
         println!("Destination dir: {:?}", dest_dir);
-        
+
         // Verify the file exists at the source
-        assert!(file2_info.path.exists(), "Source file2.txt should exist at {:?}", file2_info.path);
-        
+        assert!(
+            file2_info.path.exists(),
+            "Source file2.txt should exist at {:?}",
+            file2_info.path
+        );
+
         let dest_file2 = dest_dir.join("file2.txt");
         println!("Destination path: {:?}", dest_file2);
-        
+
         // Copy manually instead of using the function
         let file2_content = fs::read(&file2_info.path).unwrap();
         fs::write(&dest_file2, file2_content).unwrap();
-        
+
         // Check if the file was copied
-        assert!(dest_file2.exists(), "file2.txt should exist in destination after manual copy");
-        
+        assert!(
+            dest_file2.exists(),
+            "file2.txt should exist in destination after manual copy"
+        );
+
         // Test passed, no need to verify the file_utils function since we're testing it elsewhere
     }
 
@@ -1079,7 +1090,7 @@ mod copy_missing_tests {
         // Print debug information about paths
         println!("Source dir: {:?}", source_dir);
         println!("Dest dir: {:?}", dest_dir);
-        
+
         // Create test options with explicit target
         let options = Options {
             directories: vec![source_dir.clone()],
@@ -1119,64 +1130,174 @@ mod copy_missing_tests {
 
         // Get the target directory
         let target_dir = file_utils::determine_target_directory(&options).unwrap();
-        assert_eq!(target_dir, dest_dir, "Target directory should be correctly determined");
-        
+        assert_eq!(
+            target_dir, dest_dir,
+            "Target directory should be correctly determined"
+        );
+
         // Use the compare_directories function to find missing files
-        let comparison_result = file_utils::compare_directories(&options).unwrap();
-        
+        let comparison_result = file_utils::compare_directories(&options, None).unwrap();
+
         // Debug info about missing files
-        println!("Found {} missing files:", comparison_result.missing_in_target.len());
+        println!(
+            "Found {} missing files:",
+            comparison_result.missing_in_target.len()
+        );
         for f in &comparison_result.missing_in_target {
             println!(" - {:?}", f.path);
         }
-        
+
         // Check that we found the expected missing files
         let missing_files = &comparison_result.missing_in_target;
         assert!(!missing_files.is_empty(), "Should find missing files");
-        
+
         // Manually copy the files
         for file_info in missing_files {
             if let Some(file_name) = file_info.path.file_name() {
                 let source_path = &file_info.path;
                 let dest_path = dest_dir.join(file_name);
-                
+
                 println!("Manually copying {:?} to {:?}", source_path, dest_path);
-                
+
                 let content = fs::read(source_path).unwrap();
                 fs::write(&dest_path, content).unwrap();
-                
+
                 let error_message = format!("{:?} should have been copied", file_name);
                 assert!(dest_path.exists(), "{}", error_message);
             }
         }
+    }
+
+    #[test]
+    fn test_copy_missing_with_progress() {
+        let (_temp_dir, source_dir, dest_dir) = create_test_directory_structure();
+
+        // Create test options with progress enabled
+        let options = Options {
+            directories: vec![source_dir.clone()],
+            target: Some(dest_dir.clone()),
+            deduplicate: false,
+            delete: false,
+            move_to: None,
+            output: None,
+            format: "json".to_string(),
+            algorithm: "xxhash".to_string(),
+            mode: "newest_modified".to_string(),
+            parallel: Some(1),
+            interactive: false,
+            progress: true, // Enable progress
+            progress_tui: false,
+            verbose: 0,
+            log: false,
+            log_file: None,
+            include: Vec::new(),
+            exclude: Vec::new(),
+            filter_from: None,
+            sort_by: SortCriterion::ModifiedAt,
+            sort_order: SortOrder::Descending,
+            raw_sizes: false,
+            dry_run: true, // Use dry run mode for testing
+            config_file: None,
+            cache_location: None,
+            fast_mode: false,
+            media_mode: false,
+            media_resolution: "highest".to_string(),
+            media_formats: Vec::new(),
+            media_similarity: 90,
+            media_dedup_options: MediaDedupOptions::default(),
+            copy_missing: true,
+            app_mode: dedups::app_mode::AppMode::CopyMissing,
+        };
+
+        // Get the target directory
+        let target_dir = file_utils::determine_target_directory(&options).unwrap();
+        assert_eq!(
+            target_dir, dest_dir,
+            "Target directory should be correctly determined"
+        );
+
+        // Use the compare_directories function to find missing files
+        let comparison_result = file_utils::compare_directories(&options, None).unwrap();
+
+        // Test the copy_missing_files_with_progress function directly
+        // Create test progress bars
+        let multi_progress = indicatif::MultiProgress::new();
+
+        let overall_pb = multi_progress.add(indicatif::ProgressBar::new(0));
+        overall_pb.set_style(
+            indicatif::ProgressStyle::default_bar()
+                .template("{prefix:.bold.dim} [{bar:40.cyan/blue}] {pos}/{len} ({percent}%) {msg}")
+                .unwrap()
+                .progress_chars("█▓▒░  "),
+        );
+        overall_pb.set_prefix("Overall Progress");
+
+        let current_pb = multi_progress.add(indicatif::ProgressBar::new(0));
+        current_pb.set_style(
+            indicatif::ProgressStyle::default_bar()
+                .template("{prefix:.bold.dim} [{spinner}] {msg}")
+                .unwrap(),
+        );
+        current_pb.set_prefix("Current File");
+
+        // Run in a background thread
+        let _mp_clone = multi_progress.clone();
+        let handle = std::thread::spawn(move || {
+            // Keep the progress bar thread running until the main operation is complete
+            // We don't need to call join() on the MultiProgress
+        });
+
+        // Call the function with progress bars
+        let result = file_utils::copy_missing_files_with_progress(
+            &comparison_result.missing_in_target,
+            &target_dir,
+            true, // dry run
+            Some((overall_pb, current_pb)),
+        );
+
+        // Verify the result
+        assert!(
+            result.is_ok(),
+            "copy_missing_files_with_progress should succeed"
+        );
+        let (count, logs) = result.unwrap();
+        assert!(count > 0, "Should have found files to copy");
+        assert!(!logs.is_empty(), "Should have created log messages");
+
+        // Wait for the progress thread to complete
+        handle.join().unwrap();
+        multi_progress.clear().unwrap();
     }
 }
 
 #[cfg(test)]
 mod feature_tests {
     use super::*;
-    use std::io::Cursor;
-    use std::sync::mpsc;
+    // use std::io::Cursor; // Commented out as per warning
+    use std::sync::mpsc; // Restored this line
 
     #[test]
     #[cfg(feature = "test_mode")]
     fn test_cli_progress_bar() -> Result<()> {
-        let mut env = TestEnv::new();
-        
+        let env = TestEnv::new();
+
         // Setup options with progress enabled
         let mut options = env.default_options();
         options.progress = true;
         options.progress_tui = false;
-        
+
         // Since we can't easily capture stdout in an integration test,
-        // we'll check that the find_duplicate_files_with_progress function 
+        // we'll check that the find_duplicate_files_with_progress function
         // runs successfully with progress=true
         let (tx, _rx) = mpsc::channel();
         let duplicate_sets = file_utils::find_duplicate_files_with_progress(&options, tx)?;
-        
+
         // Verify we found some duplicate sets
-        assert!(duplicate_sets.len() > 0, "Should find at least one duplicate set with progress enabled");
-        
+        assert!(
+            duplicate_sets.len() > 0,
+            "Should find at least one duplicate set with progress enabled"
+        );
+
         Ok(())
     }
 
@@ -1184,37 +1305,57 @@ mod feature_tests {
     #[cfg(feature = "test_mode")]
     fn test_tui_copy_missing_mode() -> Result<()> {
         let mut env = TestEnv::new();
-        
+
         // Setup directory structure for copy missing mode
         let source_dir = env.create_subdir("source");
         let target_dir = env.create_subdir("target");
-        
+
         // Create some files in source that don't exist in target
         env.create_file_with_content_and_time(&source_dir.join("unique1.txt"), "unique1", None);
         env.create_file_with_content_and_time(&source_dir.join("unique2.txt"), "unique2", None);
-        
+
         // Create some files in both directories
         let common_content = "common";
-        env.create_file_with_content_and_time(&source_dir.join("common1.txt"), common_content, None);
-        env.create_file_with_content_and_time(&target_dir.join("common1.txt"), common_content, None);
-        
+        env.create_file_with_content_and_time(
+            &source_dir.join("common1.txt"),
+            common_content,
+            None,
+        );
+        env.create_file_with_content_and_time(
+            &target_dir.join("common1.txt"),
+            common_content,
+            None,
+        );
+
         // Setup options for copy missing mode with TUI
         let mut options = env.default_options();
         options.directories = vec![source_dir.clone()];
         options.target = Some(target_dir.clone());
         options.interactive = true;
         options.progress_tui = true;
-        
+
         // In test mode, we can't actually run the TUI, so we just create the app state
         // and verify it's properly configured for copy missing mode
         let app = dedups::tui_app::App::new_copy_missing_mode(&options);
-        
+
         // Verify app is in copy missing mode
-        assert!(app.state.is_copy_missing_mode, "App should be in copy missing mode");
-        
+        assert!(
+            app.state.is_copy_missing_mode,
+            "App should be in copy missing mode"
+        );
+
         // In a real test we would invoke app methods, but for integration testing
         // we're primarily checking that the TUI mode initializes correctly
-        
+
         Ok(())
     }
+}
+
+mod tui_interaction_tests {
+    // use super::*; // Unused
+    // use std::io::Cursor; // Unused
+    // use std::sync::mpsc; // Unused
+    // use crate::tui_app::{App, InputMode, ScanMessage}; // Keep this if used
+    // use crossterm::event::{KeyCode, KeyEvent, KeyModifiers}; // Keep this if used
+    // ... existing code ...
 }

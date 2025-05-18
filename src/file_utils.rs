@@ -12,11 +12,11 @@ use std::str::FromStr;
 use std::time::SystemTime;
 use walkdir::WalkDir;
 
-use crate::tui_app::ScanMessage;
 use crate::options::Options;
-use std::sync::mpsc::Sender as StdMpscSender;
+use crate::tui_app::ScanMessage;
 use humansize::{format_size, DECIMAL};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use std::sync::mpsc::Sender as StdMpscSender;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortCriterion {
@@ -300,25 +300,29 @@ pub fn find_duplicate_files_with_progress(
     } else {
         None
     };
-    
+
     let discovery_pb = if let Some(mp) = &multi_progress {
         let pb = mp.add(ProgressBar::new(0));
-        pb.set_style(ProgressStyle::default_bar()
-            .template("{prefix:.bold.dim} [{bar:40.cyan/blue}] {pos}/{len} ({percent}%) {msg}")
-            .unwrap()
-            .progress_chars("█▓▒░  "));
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("{prefix:.bold.dim} [{bar:40.cyan/blue}] {pos}/{len} ({percent}%) {msg}")
+                .unwrap()
+                .progress_chars("█▓▒░  "),
+        );
         pb.set_prefix("Stage 1/3: Discovery");
         Some(pb)
     } else {
         None
     };
-    
+
     let hashing_pb = if let Some(mp) = &multi_progress {
         let pb = mp.add(ProgressBar::new(0));
-        pb.set_style(ProgressStyle::default_bar()
-            .template("{prefix:.bold.dim} [{bar:40.green/blue}] {pos}/{len} ({percent}%) {msg}")
-            .unwrap()
-            .progress_chars("█▓▒░  "));
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("{prefix:.bold.dim} [{bar:40.green/blue}] {pos}/{len} ({percent}%) {msg}")
+                .unwrap()
+                .progress_chars("█▓▒░  "),
+        );
         pb.set_prefix("Stage 3/3: Hashing");
         Some(pb)
     } else {
@@ -368,7 +372,10 @@ pub fn find_duplicate_files_with_progress(
     );
 
     if let Some(pb) = &discovery_pb {
-        pb.set_message(format!("Counting files in {}", options.directories[0].display()));
+        pb.set_message(format!(
+            "Counting files in {}",
+            options.directories[0].display()
+        ));
         pb.enable_steady_tick(std::time::Duration::from_millis(100));
     }
 
@@ -467,7 +474,9 @@ pub fn find_duplicate_files_with_progress(
                         1,
                         format!(
                             "Stage 1/3: 📁 Scanning files: {}/{} ({:.1}%) - Current: {}",
-                            files_scanned_count, total_files, percent,
+                            files_scanned_count,
+                            total_files,
+                            percent,
                             path.display().to_string()
                         ),
                     );
@@ -501,10 +510,16 @@ pub fn find_duplicate_files_with_progress(
     let size_group_count = files_by_size.len();
 
     // Collect file bytes sum for average calculation before moving files_by_size
-    let total_bytes: u64 = files_by_size.iter().map(|(size, paths)| size * paths.len() as u64).sum();
-    
+    let total_bytes: u64 = files_by_size
+        .iter()
+        .map(|(size, paths)| size * paths.len() as u64)
+        .sum();
+
     if let Some(pb) = &discovery_pb {
-        pb.finish_with_message(format!("Discovered {} files in {} size groups", file_count, size_group_count));
+        pb.finish_with_message(format!(
+            "Discovered {} files in {} size groups",
+            file_count, size_group_count
+        ));
     }
 
     log::info!(
@@ -570,7 +585,7 @@ pub fn find_duplicate_files_with_progress(
         .build()?;
     log::info!("[ScanThread] Using {} threads for hashing.", num_threads);
 
-    // Calculate estimated hash time based on file count and average hash speed 
+    // Calculate estimated hash time based on file count and average hash speed
     // (rough estimate: 20MB/s per thread for xxhash)
     let avg_file_size_mb = if total_files > 0 && file_count > 0 {
         // Estimate average file size from first discovery pass
@@ -578,8 +593,9 @@ pub fn find_duplicate_files_with_progress(
     } else {
         1.0 // Default assumption: 1MB per file
     };
-    
-    let est_hashing_time_sec = (avg_file_size_mb * potential_files as f64) / (20.0 * num_threads as f64);
+
+    let est_hashing_time_sec =
+        (avg_file_size_mb * potential_files as f64) / (20.0 * num_threads as f64);
     let est_time_formatted = if est_hashing_time_sec < 60.0 {
         format!("{:.1} seconds", est_hashing_time_sec)
     } else if est_hashing_time_sec < 3600.0 {
@@ -615,7 +631,7 @@ pub fn find_duplicate_files_with_progress(
     pool.install(|| {
         potential_duplicates
             .into_par_iter()
-            .for_each_with(local_tx, |thread_local_tx, (size, paths)| {
+            .for_each_with(local_tx, |thread_local_tx, (_size, paths)| {
                 let mut hashes_in_group: HashMap<String, Vec<FileInfo>> = HashMap::new();
 
                 // Thread-local cache hits counter
@@ -650,10 +666,12 @@ pub fn find_duplicate_files_with_progress(
                                         continue;
                                     }
                                 };
+                                let size = metadata.len();
+                                let hash = Some(hash_str.clone());
                                 let file_info = FileInfo {
                                     path: path.clone(),
                                     size,
-                                    hash: Some(hash_str.clone()),
+                                    hash,
                                     modified_at: metadata.modified().ok(),
                                     created_at: metadata.created().ok(),
                                 };
@@ -702,10 +720,10 @@ pub fn find_duplicate_files_with_progress(
                         all_file_infos.extend(file_infos_vec.iter().cloned());
                     }
 
-                    // Count files processed 
+                    // Count files processed
                     files_hashed_count += file_infos_vec.len();
                     files_processed_total += file_infos_vec.len();
-                    
+
                     // Update CLI progress bar
                     if let Some(pb) = &hashing_pb {
                         pb.set_position(files_processed_total as u64);
@@ -747,20 +765,26 @@ pub fn find_duplicate_files_with_progress(
 
         // Calculate hashing speed and ETA
         let elapsed = start_time.elapsed().as_secs_f64();
-        if elapsed >= 2.0 || files_hashed_count > 100 || groups_hashed_count == total_groups_to_hash {
+        if elapsed >= 2.0 || files_hashed_count > 100 || groups_hashed_count == total_groups_to_hash
+        {
             let files_per_second = files_hashed_count as f64 / elapsed;
             file_hashing_speed.push(files_per_second);
-            
+
             // Keep only the last 5 measurements for more responsive updating
             if file_hashing_speed.len() > 5 {
                 file_hashing_speed.remove(0);
             }
-            
+
             // Calculate average speed and ETA
-            let avg_speed = file_hashing_speed.iter().sum::<f64>() / file_hashing_speed.len() as f64;
+            let avg_speed =
+                file_hashing_speed.iter().sum::<f64>() / file_hashing_speed.len() as f64;
             let remaining_files = total_files_to_hash - files_hashed_count;
-            let eta_seconds = if avg_speed > 0.0 { remaining_files as f64 / avg_speed } else { 0.0 };
-            
+            let eta_seconds = if avg_speed > 0.0 {
+                remaining_files as f64 / avg_speed
+            } else {
+                0.0
+            };
+
             // Format ETA
             let eta_formatted = if eta_seconds < 60.0 {
                 format!("{:.0} seconds", eta_seconds)
@@ -773,7 +797,7 @@ pub fn find_duplicate_files_with_progress(
             // Reset for next measurement
             start_time = std::time::Instant::now();
             files_hashed_count = 0;
-        
+
             // Determine update frequency for hash progress
             let should_update = if total_groups_to_hash < 20 {
                 true // Always update for small hash groups
@@ -819,7 +843,7 @@ pub fn find_duplicate_files_with_progress(
     if let Some(pb) = &hashing_pb {
         pb.finish_with_message(format!("Found {} duplicate sets", actual_duplicate_sets));
     }
-    
+
     if let Some(mp) = &multi_progress {
         mp.clear().unwrap();
     }
@@ -1008,8 +1032,10 @@ fn find_similar_media_files_with_progress(
     )?;
 
     // Convert to duplicate sets
-    let duplicate_sets =
-        crate::media_dedup::convert_to_duplicate_sets(&similar_groups, &options.media_dedup_options);
+    let duplicate_sets = crate::media_dedup::convert_to_duplicate_sets(
+        &similar_groups,
+        &options.media_dedup_options,
+    );
 
     // Add media duplicates to regular duplicates
     log::info!(
@@ -1358,7 +1384,10 @@ pub fn determine_target_directory(options: &Options) -> Result<PathBuf> {
             ));
         }
         if !target.is_dir() {
-            return Err(anyhow::anyhow!("Target path {:?} is not a directory", target));
+            return Err(anyhow::anyhow!(
+                "Target path {:?} is not a directory",
+                target
+            ));
         }
         return Ok(target.clone());
     }
@@ -1382,7 +1411,10 @@ pub fn get_source_directories(options: &Options, target: &Path) -> Vec<PathBuf> 
 }
 
 // Compare directories to find missing files and optionally duplicates
-pub fn compare_directories(options: &Options) -> Result<DirectoryComparisonResult> {
+pub fn compare_directories(
+    options: &Options,
+    progress_bars: Option<(&indicatif::ProgressBar, &indicatif::ProgressBar)>,
+) -> Result<DirectoryComparisonResult> {
     let target_dir = determine_target_directory(options)?;
     let source_dirs = get_source_directories(options, &target_dir);
 
@@ -1392,26 +1424,66 @@ pub fn compare_directories(options: &Options) -> Result<DirectoryComparisonResul
         source_dirs
     );
 
+    let (overall_pb, current_op_pb) = match progress_bars {
+        Some((overall, current)) => (Some(overall), Some(current)),
+        None => (None, None),
+    };
+
+    if let Some(pb) = overall_pb {
+        // Total operations: 1 for target scan + N for source scans
+        // If deduplication is active, find_duplicate_files_with_progress will have its own progress.
+        pb.set_length( (1 + source_dirs.len()) as u64 ); 
+        pb.set_position(0);
+        pb.set_message("Starting directory comparison...");
+    }
+    
     // Scan target directory for files
-    let target_files = scan_directory(options, &target_dir)?;
+    if let Some(pb) = current_op_pb.as_ref() {
+        pb.reset();
+        pb.set_message(format!("Scanning target dir: {}", target_dir.display()));
+    }
+    let target_files = scan_directory(options, &target_dir, current_op_pb)?;
     log::info!("Target directory scan complete. Found {} files.", target_files.len());
+    if let Some(pb) = overall_pb {
+        pb.inc(1);
+    }
+    if let Some(pb) = current_op_pb.as_ref() {
+        pb.finish_with_message(format!("Scanned target: {} files", target_files.len()));
+    }
 
     // Create hash map for quick lookup
     let mut target_files_map: HashMap<String, FileInfo> = HashMap::new();
     for file_info in &target_files {
-        // Use the file name as the key (or full path if needed later)
         let file_name = file_info.path.file_name().unwrap().to_string_lossy().to_string();
         target_files_map.insert(file_name, file_info.clone());
     }
 
-    // Find files that are in source but not in target
     let mut missing_files = Vec::new();
     let mut all_duplicate_sets = Vec::new();
 
-    for source_dir in &source_dirs {
+    for (idx, source_dir) in source_dirs.iter().enumerate() {
+        if let Some(pb) = current_op_pb.as_ref() {
+            pb.reset();
+            pb.set_message(format!(
+                "Scanning source dir {}/{}: {}", 
+                idx + 1, 
+                source_dirs.len(), 
+                source_dir.display()
+            ));
+        }
         log::info!("Scanning source directory: {:?}", source_dir);
-        let source_files = scan_directory(options, source_dir)?;
+        let source_files = scan_directory(options, source_dir, current_op_pb)?;
         log::info!("Source directory scan complete. Found {} files.", source_files.len());
+        if let Some(pb) = overall_pb {
+            pb.inc(1);
+        }
+        if let Some(pb) = current_op_pb.as_ref() {
+            pb.finish_with_message(format!(
+                "Scanned source {}: {} files", 
+                source_dir.display(), 
+                source_files.len()
+            ));
+        }
 
         for source_file in source_files {
             // Skip dot files and certain system files
@@ -1419,21 +1491,17 @@ pub fn compare_directories(options: &Options) -> Result<DirectoryComparisonResul
                 Some(name) => name.to_string_lossy().to_string(),
                 None => continue, // Skip files without a valid name
             };
-            
-            if file_name.starts_with('.') || 
-               file_name == "thumbs.db" || 
-               file_name == "desktop.ini" {
+
+            if file_name.starts_with('.') || file_name == "thumbs.db" || file_name == "desktop.ini"
+            {
                 continue;
             }
 
             // Check if file exists in target directory
             let target_path = target_dir.join(&file_name);
-            
+
             if !target_path.exists() {
-                log::debug!(
-                    "File {:?} missing from target directory",
-                    source_file.path
-                );
+                log::debug!("File {:?} missing from target directory", source_file.path);
                 missing_files.push(source_file);
             }
         }
@@ -1492,11 +1560,33 @@ pub fn compare_directories(options: &Options) -> Result<DirectoryComparisonResul
 }
 
 // Scans a single directory and returns FileInfo objects with hashes
-fn scan_directory(options: &Options, directory: &Path) -> Result<Vec<FileInfo>> {
+fn scan_directory(
+    options: &Options,
+    directory: &Path,
+    progress_bar: Option<&indicatif::ProgressBar>,
+) -> Result<Vec<FileInfo>> {
     let filter_rules = FilterRules::new(options)?;
-
     let mut files = Vec::new();
+    
+    let total_files = if progress_bar.is_some() {
+        // Use a sensible default if count_files_in_directory fails, though it should generally succeed.
+        count_files_in_directory(directory, &filter_rules).unwrap_or_else(|e| {
+            log::warn!("Failed to pre-count files in {:?}: {}. Progress bar may not be accurate.", directory, e);
+            0
+        })
+    } else {
+        0
+    };
+
+    if let Some(pb) = progress_bar.as_ref() {
+        pb.set_length(total_files as u64);
+        pb.set_position(0);
+        // Initial message before scanning starts for this directory
+        pb.set_message(format!("Preparing to scan {}", directory.display())); 
+    }
+
     let walker = WalkDir::new(directory).into_iter();
+    let mut scanned_count = 0;
 
     for entry in walker
         .filter_entry(|e| {
@@ -1513,12 +1603,24 @@ fn scan_directory(options: &Options, directory: &Path) -> Result<Vec<FileInfo>> 
     {
         if entry.file_type().is_file() {
             let path = entry.path().to_path_buf();
+            scanned_count += 1;
+            if let Some(pb) = progress_bar.as_ref() {
+                pb.set_position(scanned_count as u64);
+                // Update message less frequently to avoid excessive redraws
+                if scanned_count % 20 == 0 || scanned_count == total_files {
+                    pb.set_message(format!(
+                        "Scanning {} ({}/{}): {}", 
+                        directory.display(),
+                        scanned_count, 
+                        total_files, 
+                        path.file_name().unwrap_or_default().to_string_lossy()
+                    ));
+                }
+            }
             match fs::metadata(&path) {
                 Ok(metadata) => {
                     if metadata.len() > 0 {
                         let size = metadata.len();
-
-                        // Calculate hash
                         let hash = match calculate_hash(&path, &options.algorithm) {
                             Ok(h) => Some(h),
                             Err(e) => {
@@ -1526,7 +1628,6 @@ fn scan_directory(options: &Options, directory: &Path) -> Result<Vec<FileInfo>> 
                                 None
                             }
                         };
-
                         let file_info = FileInfo {
                             path,
                             size,
@@ -1534,7 +1635,6 @@ fn scan_directory(options: &Options, directory: &Path) -> Result<Vec<FileInfo>> 
                             modified_at: metadata.modified().ok(),
                             created_at: metadata.created().ok(),
                         };
-
                         files.push(file_info);
                     }
                 }
@@ -1543,18 +1643,46 @@ fn scan_directory(options: &Options, directory: &Path) -> Result<Vec<FileInfo>> 
         }
     }
 
+    // Final message for this specific scan operation is handled by the caller (compare_directories)
+    // if let Some(pb) = progress_bar.as_ref() {
+    //     pb.finish_with_message(format!("Finished scanning {}", directory.display()));
+    // }
+
     log::info!("Found {} files in directory: {:?}", files.len(), directory);
     Ok(files)
 }
 
-// Copy missing files to target directory
+// Copy missing files to target directory with progress reporting
 pub fn copy_missing_files(
     missing_files: &[FileInfo],
     target_dir: &Path,
     dry_run: bool,
 ) -> Result<(usize, Vec<String>)> {
+    copy_missing_files_with_progress(missing_files, target_dir, dry_run, None)
+}
+
+// Enhanced version with progress reporting capability
+pub fn copy_missing_files_with_progress(
+    missing_files: &[FileInfo],
+    target_dir: &Path,
+    dry_run: bool,
+    progress_bars: Option<(indicatif::ProgressBar, indicatif::ProgressBar)>, 
+) -> Result<(usize, Vec<String>)> {
     let mut count = 0;
     let mut logs = Vec::new();
+    let total_files = missing_files.len();
+    
+    // Overall progress bar length is set by the caller in commands.rs
+    if let Some((overall_pb, current_pb)) = &progress_bars {
+        overall_pb.set_position(0); // Ensure position starts at 0 for this phase
+        // overall_pb.set_length(total_files as u64); // Caller now does this
+        overall_pb.set_message(format!("Copying {} files", total_files));
+        
+        current_pb.reset(); // Reset current op bar
+        current_pb.set_length(1); // Typically for spinner/current file indication
+        current_pb.set_position(0);
+        current_pb.set_message("Preparing to copy files...");
+    }
 
     if !target_dir.exists() {
         if dry_run {
@@ -1589,7 +1717,7 @@ pub fn copy_missing_files(
             target_dir.display()
         ));
 
-        for file in missing_files {
+        for (i, file) in missing_files.iter().enumerate() {
             let relative_path = match file
                 .path
                 .strip_prefix(file.path.parent().unwrap().parent().unwrap())
@@ -1602,6 +1730,12 @@ pub fn copy_missing_files(
             };
 
             let target_path = target_dir.join(relative_path);
+
+            // Update progress
+            if let Some((overall_pb, current_pb)) = &progress_bars {
+                overall_pb.set_position(i as u64 + 1); 
+                current_pb.set_message(format!("Would copy: {} to {}", file.path.file_name().unwrap_or_default().to_string_lossy(), target_dir.display()));
+            }
 
             logs.push(format!(
                 "[DRY RUN] Would copy {} to {}",
@@ -1611,6 +1745,14 @@ pub fn copy_missing_files(
             log::info!("[DRY RUN] Would copy {:?} to {:?}", file.path, target_path);
             count += 1;
         }
+
+        // Complete progress
+        if let Some((overall_pb, current_pb)) = &progress_bars {
+            overall_pb.set_position(total_files as u64);
+            // Message is set by caller in commands.rs upon completion
+            // overall_pb.finish_with_message("[DRY RUN] Copy operations complete"); 
+            current_pb.finish_with_message("");
+        }
     } else {
         logs.push(format!(
             "Copying {} missing files to {}",
@@ -1618,7 +1760,7 @@ pub fn copy_missing_files(
             target_dir.display()
         ));
 
-        for file in missing_files {
+        for (i, file) in missing_files.iter().enumerate() {
             let relative_path = match file
                 .path
                 .strip_prefix(file.path.parent().unwrap().parent().unwrap())
@@ -1631,6 +1773,12 @@ pub fn copy_missing_files(
             };
 
             let target_path = target_dir.join(relative_path);
+
+            // Update progress
+            if let Some((overall_pb, current_pb)) = &progress_bars {
+                overall_pb.set_position(i as u64 + 1); 
+                current_pb.set_message(format!("Copying: {} to {}", file.path.file_name().unwrap_or_default().to_string_lossy(), target_dir.display()));
+            }
 
             // Ensure parent directory exists
             if let Some(parent) = target_path.parent() {
@@ -1662,9 +1810,22 @@ pub fn copy_missing_files(
                     );
                     logs.push(error_msg.clone());
                     log::error!("{}", error_msg);
+
+                    // Update progress for error
+                    if let Some((_, current_pb)) = &progress_bars {
+                        current_pb.set_message(format!("Error: {}", error_msg));
+                    }
                     // Continue with other files
                 }
             }
+        }
+
+        // Complete progress
+        if let Some((overall_pb, current_pb)) = &progress_bars {
+            overall_pb.set_position(total_files as u64);
+            // Message is set by caller in commands.rs upon completion
+            // overall_pb.finish_with_message(format!("Copied {} of {} files", count, total_files)); 
+            current_pb.finish_with_message("");
         }
     }
 

@@ -113,7 +113,7 @@ pub fn run_app(options: &Options) -> Result<()> {
             } else {
                 // Check if we're comparing multiple directories
                 let is_multi_directory = options.directories.len() > 1 || options.target.is_some();
-                
+
                 if is_multi_directory {
                     // Multiple directory mode - handling copying missing files or deduplication
                     handle_multi_directory_mode(options)
@@ -122,7 +122,7 @@ pub fn run_app(options: &Options) -> Result<()> {
                     handle_single_directory_mode(options)
                 }
             }
-        },
+        }
         crate::app_mode::AppMode::CopyMissing => {
             // Handle copy missing mode
             if options.interactive {
@@ -138,23 +138,27 @@ pub fn run_app(options: &Options) -> Result<()> {
 fn run_interactive_mode(options: &Options) -> Result<()> {
     // Always set up file-based logging for TUI mode to avoid console disruption
     // If log_file is specified, use that, otherwise use a default location
-    let log_path = options.log_file.as_ref().map(|p| p.as_path()).unwrap_or_else(|| Path::new("dedups.log"));
-    
+    let log_path = options
+        .log_file
+        .as_ref()
+        .map(|p| p.as_path())
+        .unwrap_or_else(|| Path::new("dedups.log"));
+
     // Make sure logging is set up before any log calls
     if let Err(e) = setup_logger(options.verbose, Some(log_path)) {
         eprintln!("Warning: Failed to set up logging: {}", e);
         // Continue anyway, just without logging
     }
-    
+
     log::info!(
         "Interactive mode selected for directories: {:?}",
         options.directories
     );
-    
+
     // Create a copy of options with progress_tui set to true to ensure proper message passing
     let mut tui_options = options.clone();
     tui_options.progress_tui = true;
-    
+
     // Call the unified TUI function with copy_missing set to false for regular deduplication mode
     tui_app::run_tui_app_for_mode(&tui_options, false)
 }
@@ -176,7 +180,50 @@ fn handle_multi_directory_mode(options: &Options) -> Result<()> {
     println!("Source directories: {:?}", source_dirs);
     println!("Target directory: {:?}", target_dir);
 
-    let comparison_result = crate::file_utils::compare_directories(options)?;
+    // Setup progress bars for CLI mode if requested
+    let multi_progress_option = if options.progress && !options.progress_tui {
+        Some(indicatif::MultiProgress::new())
+    } else {
+        None
+    };
+
+    let comparison_pb_overall = multi_progress_option.as_ref().map(|mp| {
+        let pb = mp.add(indicatif::ProgressBar::new(0));
+        pb.set_style(
+            indicatif::ProgressStyle::default_bar()
+                .template("{prefix:.bold.dim} [{bar:40.cyan/blue}] {pos}/{len} ({percent}%) {msg}")
+                .unwrap()
+                .progress_chars("█▓▒░  "),
+        );
+        pb.set_prefix("Phase 1/2: Comparing Directories");
+        pb
+    });
+
+    let comparison_pb_current_op = multi_progress_option.as_ref().map(|mp| {
+        let pb = mp.add(indicatif::ProgressBar::new(0));
+        pb.set_style(
+            indicatif::ProgressStyle::default_bar()
+                .template("{prefix:.bold.dim} [{spinner}] {msg}")
+                .unwrap(),
+        );
+        pb.set_prefix("Current Operation");
+        pb.enable_steady_tick(std::time::Duration::from_millis(100));
+        pb
+    });
+
+    let progress_tuple = comparison_pb_overall
+        .as_ref()
+        .zip(comparison_pb_current_op.as_ref());
+
+    let comparison_result =
+        crate::file_utils::compare_directories(options, progress_tuple.map(|(o, c)| (o, c)))?;
+
+    if let Some(pb) = comparison_pb_overall.as_ref() {
+        pb.finish_with_message("Directory comparison complete.");
+    }
+    if let Some(pb) = comparison_pb_current_op.as_ref() {
+        pb.finish_with_message(""); // Clear current op
+    }
 
     // Handle missing files
     if !comparison_result.missing_in_target.is_empty() {
@@ -195,13 +242,50 @@ fn handle_multi_directory_mode(options: &Options) -> Result<()> {
             println!("Warning: Move flag is ignored for missing files. They will be copied to the target directory.");
         }
 
-        // Copy missing files to target directory
-        match crate::file_utils::copy_missing_files(
+        // Setup progress for copying
+        let copy_pb_overall = multi_progress_option.as_ref().map(|mp| {
+            let pb = mp.add(indicatif::ProgressBar::new(
+                comparison_result.missing_in_target.len() as u64,
+            ));
+            pb.set_style(
+                indicatif::ProgressStyle::default_bar()
+                    .template("{prefix:.bold.dim} [{bar:40.green/blue}] {pos}/{len} ({percent}%) {msg}")
+                    .unwrap()
+                    .progress_chars("█▓▒░  "),
+            );
+            pb.set_prefix("Phase 2/2: Copying Files");
+            pb
+        });
+
+        let copy_pb_current_op = multi_progress_option.as_ref().map(|mp| {
+            let pb = mp.add(indicatif::ProgressBar::new(0)); // Length will be set per file or just use as spinner
+            pb.set_style(
+                indicatif::ProgressStyle::default_bar()
+                    .template("{prefix:.bold.dim} [{spinner}] {msg}")
+                    .unwrap(),
+            );
+            pb.set_prefix("Current File");
+            pb.enable_steady_tick(std::time::Duration::from_millis(100));
+            pb
+        });
+        
+        let copy_progress_tuple = copy_pb_overall
+            .as_ref()
+            .zip(copy_pb_current_op.as_ref());
+
+        match crate::file_utils::copy_missing_files_with_progress(
             &comparison_result.missing_in_target,
             &target_dir,
             options.dry_run,
+            copy_progress_tuple.map(|(o,c)| (o.clone(), c.clone())) // Clone PBs to pass ownership
         ) {
             Ok((count, logs)) => {
+                if let Some(pb) = copy_pb_overall.as_ref() {
+                    pb.finish_with_message(format!("Copied {} files.", count));
+                }
+                if let Some(pb) = copy_pb_current_op.as_ref() {
+                    pb.finish_with_message(""); // Clear current op
+                }
                 // Display all log messages
                 for log_msg in logs {
                     // Only log to file what hasn't already been logged in the function
@@ -220,12 +304,18 @@ fn handle_multi_directory_mode(options: &Options) -> Result<()> {
                 println!("\n{} {} files to target directory.", action_prefix, count);
             }
             Err(e) => {
+                if let Some(pb) = copy_pb_overall.as_ref() {
+                    pb.abandon_with_message("Copying failed.");
+                }
+                if let Some(pb) = copy_pb_current_op.as_ref() {
+                    pb.abandon_with_message("Error during copy.");
+                }
                 log::error!("Failed to copy files: {}", e);
                 eprintln!("Error copying files: {}", e);
             }
         }
     } else {
-        println!("No missing files found in target directory.");
+        println!("No missing files found. The target directory already contains all files from the source directories.");
     }
 
     // Handle duplicates if deduplication is enabled
@@ -246,6 +336,13 @@ fn handle_multi_directory_mode(options: &Options) -> Result<()> {
         println!("\nThis was a dry run. No files were actually modified.");
         println!("Run without --dry-run to perform actual operations.");
         log::info!("Dry run completed - no files were modified");
+    }
+
+    // Clear multi_progress if it was used
+    if let Some(mp) = multi_progress_option {
+        if let Err(e) = mp.clear() {
+            log::warn!("Failed to clear multi_progress: {}", e);
+        }
     }
 
     Ok(())
@@ -415,23 +512,27 @@ fn handle_duplicate_sets(options: &Options, duplicate_sets: &[DuplicateSet]) -> 
 fn run_copy_missing_interactive_mode(options: &Options) -> Result<()> {
     // Always set up file-based logging for TUI mode to avoid console disruption
     // If log_file is specified, use that, otherwise use a default location
-    let log_path = options.log_file.as_ref().map(|p| p.as_path()).unwrap_or_else(|| Path::new("dedups.log"));
-    
+    let log_path = options
+        .log_file
+        .as_ref()
+        .map(|p| p.as_path())
+        .unwrap_or_else(|| Path::new("dedups.log"));
+
     // Make sure logging is set up before any log calls
     if let Err(e) = setup_logger(options.verbose, Some(log_path)) {
         eprintln!("Warning: Failed to set up logging: {}", e);
         // Continue anyway, just without logging
     }
-    
+
     log::info!(
         "Interactive Copy Missing mode selected for directories: {:?}",
         options.directories
     );
-    
+
     // Create a copy of options with progress_tui set to true to ensure proper message passing
     let mut tui_options = options.clone();
     tui_options.progress_tui = true;
-    
+
     // Call the unified TUI function with copy_missing set to true
     tui_app::run_tui_app_for_mode(&tui_options, true)
 }
@@ -454,8 +555,51 @@ fn handle_copy_missing_mode(options: &Options) -> Result<()> {
     println!("Source directories: {:?}", source_dirs);
     println!("Target directory: {:?}", target_dir);
 
+    // Setup progress bars for CLI mode if requested
+    let multi_progress_option = if options.progress && !options.progress_tui {
+        Some(indicatif::MultiProgress::new())
+    } else {
+        None
+    };
+
+    let comparison_pb_overall = multi_progress_option.as_ref().map(|mp| {
+        let pb = mp.add(indicatif::ProgressBar::new(0));
+        pb.set_style(
+            indicatif::ProgressStyle::default_bar()
+                .template("{prefix:.bold.dim} [{bar:40.cyan/blue}] {pos}/{len} ({percent}%) {msg}")
+                .unwrap()
+                .progress_chars("█▓▒░  "),
+        );
+        pb.set_prefix("Phase 1/2: Finding Missing Files");
+        pb
+    });
+
+    let comparison_pb_current_op = multi_progress_option.as_ref().map(|mp| {
+        let pb = mp.add(indicatif::ProgressBar::new(0));
+        pb.set_style(
+            indicatif::ProgressStyle::default_bar()
+                .template("{prefix:.bold.dim} [{spinner}] {msg}")
+                .unwrap(),
+        );
+        pb.set_prefix("Current Scan Operation");
+        pb.enable_steady_tick(std::time::Duration::from_millis(100));
+        pb
+    });
+
+    let comparison_progress_tuple = comparison_pb_overall
+        .as_ref()
+        .zip(comparison_pb_current_op.as_ref());
+
     // Find missing files that aren't in the target directory
-    let comparison_result = crate::file_utils::compare_directories(options)?;
+    let comparison_result = 
+        crate::file_utils::compare_directories(options, comparison_progress_tuple.map(|(o,c)| (o,c)))?;
+
+    if let Some(pb) = comparison_pb_overall.as_ref() {
+        pb.finish_with_message("Comparison complete.");
+    }
+    if let Some(pb) = comparison_pb_current_op.as_ref() {
+        pb.finish_with_message(""); // Clear current op
+    }
 
     // Handle missing files
     if !comparison_result.missing_in_target.is_empty() {
@@ -464,13 +608,47 @@ fn handle_copy_missing_mode(options: &Options) -> Result<()> {
             comparison_result.missing_in_target.len()
         );
 
-        // Copy missing files to target directory
-        match crate::file_utils::copy_missing_files(
+        // Setup progress bars for CLI mode if requested (reuse multi_progress_option)
+        // if options.progress {
+        let overall_pb_copy = multi_progress_option.as_ref().map(|mp| {
+            let pb = mp.add(indicatif::ProgressBar::new(comparison_result.missing_in_target.len() as u64));
+            pb.set_style(indicatif::ProgressStyle::default_bar()
+                .template("{prefix:.bold.dim} [{bar:40.cyan/blue}] {pos}/{len} ({percent}%) {msg}")
+                .unwrap()
+                .progress_chars("█▓▒░  "));
+            pb.set_prefix("Phase 2/2: Copying Files");
+            pb
+        });
+            
+        let current_pb_copy = multi_progress_option.as_ref().map(|mp| {
+            let pb = mp.add(indicatif::ProgressBar::new(0));
+            pb.set_style(indicatif::ProgressStyle::default_bar()
+                .template("{prefix:.bold.dim} [{spinner}] {msg}")
+                .unwrap());
+            pb.set_prefix("Current File Copy");
+            pb.enable_steady_tick(std::time::Duration::from_millis(100));
+            pb
+        });
+            
+        let copy_progress_tuple = overall_pb_copy
+            .as_ref()
+            .zip(current_pb_copy.as_ref());
+
+        // Copy missing files to target directory with progress
+        match crate::file_utils::copy_missing_files_with_progress(
             &comparison_result.missing_in_target,
             &target_dir,
             options.dry_run,
+            copy_progress_tuple.map(|(o,c)| (o.clone(), c.clone())),
         ) {
             Ok((count, logs)) => {
+                if let Some(pb) = overall_pb_copy.as_ref() {
+                    pb.finish_with_message(format!("Copied {} files.", count));
+                }
+                if let Some(pb) = current_pb_copy.as_ref() {
+                    pb.finish_with_message("");
+                }
+                    
                 // Display all log messages
                 for log_msg in logs {
                     // Only log to file what hasn't already been logged in the function
@@ -489,9 +667,14 @@ fn handle_copy_missing_mode(options: &Options) -> Result<()> {
                 println!("\n{} {} files to target directory.", action_prefix, count);
             }
             Err(e) => {
+                if let Some(pb) = overall_pb_copy.as_ref() {
+                    pb.abandon_with_message("Copying failed.");
+                }
+                if let Some(pb) = current_pb_copy.as_ref() {
+                    pb.abandon_with_message("Error during copy.");
+                }
                 log::error!("Failed to copy files: {}", e);
                 eprintln!("Error copying files: {}", e);
-                return Err(anyhow::anyhow!("Failed to copy files: {}", e));
             }
         }
     } else {
@@ -504,6 +687,13 @@ fn handle_copy_missing_mode(options: &Options) -> Result<()> {
         println!("Run without --dry-run to perform actual operations.");
         log::info!("Dry run completed - no files were modified");
     }
+    
+    // Clear multi_progress if it was used
+    if let Some(mp) = multi_progress_option {
+        if let Err(e) = mp.clear() {
+            log::warn!("Failed to clear multi_progress: {}", e);
+        }
+    }
 
     Ok(())
-} 
+}

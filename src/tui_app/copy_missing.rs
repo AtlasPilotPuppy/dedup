@@ -1,9 +1,6 @@
 use anyhow::Result;
 use crossterm::{
-    event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event as CEvent,
-        KeyEventKind,
-    },
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event as CEvent, KeyEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -14,7 +11,7 @@ use std::io::stdout;
 use std::time::{Duration, Instant};
 
 use crate::options::Options;
-use crate::tui_app::{ActivePanel, ActionType, App, InputMode};
+use crate::tui_app::{ActionType, ActivePanel, App, InputMode};
 
 /// Entry point for the Copy Missing TUI
 pub fn run_copy_missing_tui(options: &Options) -> Result<()> {
@@ -34,7 +31,7 @@ pub fn run_copy_missing_tui(options: &Options) -> Result<()> {
 
     // Create app state for copy missing mode
     let mut app = create_copy_missing_app(options);
-    
+
     // Main loop
     let tick_rate = Duration::from_millis(50);
     let mut last_tick = Instant::now();
@@ -81,7 +78,11 @@ pub fn run_copy_missing_tui(options: &Options) -> Result<()> {
         if let Some(mut terminal) = terminal {
             disable_raw_mode()?;
             terminal.show_cursor()?;
-            execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
+            execute!(
+                terminal.backend_mut(),
+                LeaveAlternateScreen,
+                DisableMouseCapture
+            )?;
         }
     }
 
@@ -92,11 +93,11 @@ pub fn run_copy_missing_tui(options: &Options) -> Result<()> {
 pub fn create_copy_missing_app(options: &Options) -> App {
     // Initialize from the regular app
     let mut app = App::new(options);
-    
+
     // Modify for Copy Missing mode
     app.state.is_copy_missing_mode = true;
     app.state.status_message = Some("Copy Missing Mode - Looking for files to copy...".to_string());
-    
+
     app
 }
 
@@ -143,42 +144,51 @@ pub fn ui_copy_missing(frame: &mut Frame, app: &mut App) {
     // Left Panel: Missing Files from Source
     let left_title = format!(
         "Source Files Missing From Destination ({}/{})",
-        app.state.selected_display_list_index.saturating_add(1).min(app.state.display_list.len()),
+        app.state
+            .selected_display_list_index
+            .saturating_add(1)
+            .min(app.state.display_list.len()),
         app.state.display_list.len()
     );
     let left_block = Block::default()
         .borders(Borders::ALL)
         .title(left_title)
-        .border_style(Style::default().fg(
-            if app.state.active_panel == ActivePanel::Sets { 
-                Color::Yellow 
-            } else { 
-                Color::White 
-            }));
+        .border_style(
+            Style::default().fg(if app.state.active_panel == ActivePanel::Sets {
+                Color::Yellow
+            } else {
+                Color::White
+            }),
+        );
 
     // Middle Panel: Destination Files
     let middle_title = "Destination Files (Browse)";
     let _middle_block = Block::default()
         .borders(Borders::ALL)
         .title(middle_title)
-        .border_style(Style::default().fg(
-            if app.state.active_panel == ActivePanel::Files { 
-                Color::Yellow 
-            } else { 
-                Color::White 
-            }));
+        .border_style(
+            Style::default().fg(if app.state.active_panel == ActivePanel::Files {
+                Color::Yellow
+            } else {
+                Color::White
+            }),
+        );
 
     // Right Panel: Jobs
-    let right_title = format!("Jobs ({}) (Ctrl+E: Execute, x: Remove)", app.state.jobs.len());
+    let right_title = format!(
+        "Jobs ({}) (Ctrl+E: Execute, x: Remove)",
+        app.state.jobs.len()
+    );
     let right_block = Block::default()
         .borders(Borders::ALL)
         .title(right_title)
-        .border_style(Style::default().fg(
-            if app.state.active_panel == ActivePanel::Jobs { 
-                Color::Yellow 
-            } else { 
-                Color::White 
-            }));
+        .border_style(
+            Style::default().fg(if app.state.active_panel == ActivePanel::Jobs {
+                Color::Yellow
+            } else {
+                Color::White
+            }),
+        );
 
     // If loading, show the loading screen
     if app.state.is_loading {
@@ -205,7 +215,6 @@ pub fn ui_copy_missing(frame: &mut Frame, app: &mut App) {
                 )))
             }
             crate::tui_app::DisplayListItem::SetEntry {
-                
                 set_total_size,
                 file_count_in_set,
                 indent,
@@ -233,7 +242,7 @@ pub fn ui_copy_missing(frame: &mut Frame, app: &mut App) {
                 .bg(Color::Blue),
         )
         .highlight_symbol(">> ");
-    
+
     let mut sets_list_state = ListState::default();
     if !app.state.display_list.is_empty() {
         sets_list_state.select(Some(app.state.selected_display_list_index));
@@ -241,74 +250,76 @@ pub fn ui_copy_missing(frame: &mut Frame, app: &mut App) {
     frame.render_stateful_widget(missing_files_list, main_chunks[0], &mut sets_list_state);
 
     // Middle Panel - Currently Selected Set Files
-    let (files_title, file_items) = if let Some(selected_set) =
-        app.current_selected_set_from_display_list()
-    {
-        let title = format!(
-            "Files ({}/{}) (c:copy f:filter)",
-            app.state
-                .selected_file_index_in_set
-                .saturating_add(1)
-                .min(selected_set.files.len()),
-            selected_set.files.len()
-        );
-        let items: Vec<ListItem> = selected_set
-            .files
-            .iter()
-            .map(|file_info| {
-                let mut style = Style::default();
-                let mut prefix = "   ";
-                if let Some(job) = app
-                    .state
-                    .jobs
-                    .iter()
-                    .find(|j| j.file_info.path == file_info.path)
-                {
-                    match job.action {
-                        ActionType::Keep => {
-                            style = style.fg(Color::Green).add_modifier(Modifier::BOLD);
-                            prefix = "[K]";
-                        }
-                        ActionType::Delete => {
-                            style = style.fg(Color::Red).add_modifier(Modifier::CROSSED_OUT);
-                            prefix = "[D]";
-                        }
-                        ActionType::Copy(_) => {
-                            style = style.fg(Color::Cyan);
-                            prefix = "[C]";
-                        }
-                        ActionType::Move(_) => {
-                            style = style.fg(Color::Magenta);
-                            prefix = "[M]";
-                        }
-                        ActionType::Ignore => {
-                            style = style.fg(Color::DarkGray);
-                            prefix = "[I]";
+    let (files_title, file_items) =
+        if let Some(selected_set) = app.current_selected_set_from_display_list() {
+            let title = format!(
+                "Files ({}/{}) (c:copy f:filter)",
+                app.state
+                    .selected_file_index_in_set
+                    .saturating_add(1)
+                    .min(selected_set.files.len()),
+                selected_set.files.len()
+            );
+            let items: Vec<ListItem> = selected_set
+                .files
+                .iter()
+                .map(|file_info| {
+                    let mut style = Style::default();
+                    let mut prefix = "   ";
+                    if let Some(job) = app
+                        .state
+                        .jobs
+                        .iter()
+                        .find(|j| j.file_info.path == file_info.path)
+                    {
+                        match job.action {
+                            ActionType::Keep => {
+                                style = style.fg(Color::Green).add_modifier(Modifier::BOLD);
+                                prefix = "[K]";
+                            }
+                            ActionType::Delete => {
+                                style = style.fg(Color::Red).add_modifier(Modifier::CROSSED_OUT);
+                                prefix = "[D]";
+                            }
+                            ActionType::Copy(_) => {
+                                style = style.fg(Color::Cyan);
+                                prefix = "[C]";
+                            }
+                            ActionType::Move(_) => {
+                                style = style.fg(Color::Magenta);
+                                prefix = "[M]";
+                            }
+                            ActionType::Ignore => {
+                                style = style.fg(Color::DarkGray);
+                                prefix = "[I]";
+                            }
                         }
                     }
-                }
-                ListItem::new(Line::from(vec![
-                    Span::styled(format!("{} ", prefix), style),
-                    Span::styled(file_info.path.display().to_string(), style),
-                ]))
-            })
-            .collect();
-        (title, items)
-    } else {
-        (
-            "Files (0/0)".to_string(),
-            vec![ListItem::new("No files selected or set is empty")],
-        )
-    };
+                    ListItem::new(Line::from(vec![
+                        Span::styled(format!("{} ", prefix), style),
+                        Span::styled(file_info.path.display().to_string(), style),
+                    ]))
+                })
+                .collect();
+            (title, items)
+        } else {
+            (
+                "Files (0/0)".to_string(),
+                vec![ListItem::new("No files selected or set is empty")],
+            )
+        };
 
     let files_list = List::new(file_items)
-        .block(Block::default().borders(Borders::ALL).title(files_title).border_style(
-            if app.state.active_panel == ActivePanel::Files {
-                Style::default().fg(Color::Yellow)
-            } else {
-                Style::default()
-            },
-        ))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(files_title)
+                .border_style(if app.state.active_panel == ActivePanel::Files {
+                    Style::default().fg(Color::Yellow)
+                } else {
+                    Style::default()
+                }),
+        )
         .highlight_style(
             Style::default()
                 .add_modifier(Modifier::BOLD)
@@ -463,7 +474,7 @@ fn show_loading_screen(frame: &mut Frame, app: &mut App, area: Rect) {
 // Helper function to draw progress bar
 fn draw_progress_bar(frame: &mut Frame, app: &mut App, area: Rect) {
     use ratatui::widgets::Gauge;
-    
+
     if app.state.is_processing_jobs {
         let (done, total) = app.state.job_progress;
         let percent = if total > 0 {
@@ -482,19 +493,19 @@ fn draw_progress_bar(frame: &mut Frame, app: &mut App, area: Rect) {
                 percent * 100.0
             ))
             .ratio(percent);
-        
+
         frame.render_widget(gauge, area);
     } else if app.state.is_loading {
         // Extract progress information
         let progress_msg = app.state.loading_message.clone();
         let progress_pct = 0.5; // Default to 50% if we can't determine actual progress
-        
+
         let gauge = Gauge::default()
             .block(Block::default().borders(Borders::ALL).title("Loading"))
             .gauge_style(Style::default().fg(Color::Blue).bg(Color::Black))
             .label(progress_msg)
             .ratio(progress_pct);
-        
+
         frame.render_widget(gauge, area);
     }
 }
@@ -518,7 +529,7 @@ fn draw_log_area(frame: &mut Frame, app: &mut App, area: Rect) {
         .take(log_height)
         .map(|msg| ratatui::text::Line::from(msg.clone()))
         .collect();
-    
+
     let log_block = if app.state.log_focus {
         Block::default()
             .borders(Borders::ALL)
@@ -526,11 +537,11 @@ fn draw_log_area(frame: &mut Frame, app: &mut App, area: Rect) {
     } else {
         Block::default().borders(Borders::ALL).title("Log")
     };
-    
+
     let log_paragraph = ratatui::widgets::Paragraph::new(log_lines)
         .block(log_block)
         .scroll((0, 0));
-    
+
     frame.render_widget(log_paragraph, area);
 }
 
@@ -543,24 +554,55 @@ fn show_cli_progress(app: &App) {
         } else {
             0.0
         };
-        
-        println!("Progress: {}/{} jobs ({:.1}%)", done, total, percent * 100.0);
+
+        // Display a more detailed progress output with two lines
+        println!(
+            "Overall Progress: {}/{} jobs ({:.1}%)",
+            done,
+            total,
+            percent * 100.0
+        );
+        println!("Current Job: {}", app.state.job_processing_message);
     } else if app.state.is_loading {
-        println!("Loading: {}", app.state.loading_message);
+        // Extract progress information
+        let (stage_str, progress_text, percentage, file_counts) =
+            crate::tui_app::parse_progress_from_message(&app.state.loading_message);
+
+        let (current_stage, total_stages) = crate::tui_app::parse_stage_numbers(&stage_str);
+
+        // Show two-stage progress output for consistency with CLI mode
+        if let (Some(current), Some(total)) = (current_stage, total_stages) {
+            let stage_progress = if let Some(pct) = percentage {
+                format!("({:.1}%)", pct)
+            } else if let Some((count, total_count)) = file_counts {
+                format!("({}/{})", count, total_count)
+            } else {
+                "".to_string()
+            };
+
+            println!(
+                "Stage {} of {} {} - {}",
+                current, total, stage_progress, progress_text
+            );
+            println!("Overall Progress: {}", app.state.loading_message);
+        } else {
+            println!("Loading: {}", app.state.loading_message);
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::SystemTime;
-    use crate::file_utils::{FileInfo, DuplicateSet};
+    use crate::file_utils::{DuplicateSet, FileInfo};
+    use crate::tui_app::Job;
     use std::path::PathBuf;
+    use std::time::SystemTime;
 
     // Utility function to create a test App with simulated missing files
     fn create_test_app_with_missing_files() -> App {
-        // Create a basic app 
-        let mut options = Options {
+        // Create a basic app
+        let options = Options {
             directories: vec![PathBuf::from("/source"), PathBuf::from("/dest")],
             copy_missing: true,
             app_mode: crate::app_mode::AppMode::CopyMissing,
@@ -598,7 +640,7 @@ mod tests {
         };
 
         let mut app = create_copy_missing_app(&options);
-        
+
         // Add some simulated missing files
         let missing_files = vec![
             FileInfo {
@@ -627,15 +669,18 @@ mod tests {
         // Group files by parent directory for the display
         let mut files_by_parent = std::collections::HashMap::new();
         for file in &missing_files {
-            let parent = file.path.parent()
+            let parent = file
+                .path
+                .parent()
                 .unwrap_or_else(|| std::path::Path::new(""))
                 .to_path_buf();
-            
-            files_by_parent.entry(parent)
+
+            files_by_parent
+                .entry(parent)
                 .or_insert_with(Vec::new)
                 .push(file.clone());
         }
-        
+
         // Create DuplicateSets for each parent directory
         let mut duplicate_sets = Vec::new();
         for (parent, files) in files_by_parent {
@@ -649,13 +694,13 @@ mod tests {
         }
 
         // Process the sets into grouped view
-        let (grouped_data, display_list) = 
+        let (grouped_data, display_list) =
             App::process_raw_sets_into_grouped_view(duplicate_sets, true);
-        
+
         app.state.is_loading = false;
         app.state.grouped_data = grouped_data;
         app.state.display_list = display_list;
-        
+
         app
     }
 
@@ -701,32 +746,37 @@ mod tests {
 
         // Create the app
         let app = create_copy_missing_app(&options);
-        
+
         // Verify it's in copy missing mode
         assert!(app.state.is_copy_missing_mode);
         assert!(app.state.status_message.is_some());
-        assert!(app.state.status_message.as_ref().unwrap().contains("Copy Missing Mode"));
+        assert!(app
+            .state
+            .status_message
+            .as_ref()
+            .unwrap()
+            .contains("Copy Missing Mode"));
     }
 
     #[test]
     fn test_copy_job_creation() {
         let mut app = create_test_app_with_missing_files();
-        
+
         // Ensure we have at least one set with files
         assert!(!app.state.grouped_data.is_empty());
         if let Some(first_group) = app.state.grouped_data.first() {
             assert!(!first_group.sets.is_empty());
             if let Some(first_set) = first_group.sets.first() {
                 assert!(!first_set.files.is_empty());
-                
+
                 // Select the first file
                 app.state.selected_display_list_index = 1; // Usually the first set after folder
                 app.state.selected_file_index_in_set = 0;
-                
+
                 // Get the file info
                 let selected_file = app.current_selected_file().cloned();
                 assert!(selected_file.is_some());
-                
+
                 if let Some(file_info) = selected_file {
                     // Create a copy job
                     let target_path = PathBuf::from("/dest");
@@ -734,9 +784,9 @@ mod tests {
                         action: ActionType::Copy(target_path.clone()),
                         file_info: file_info.clone(),
                     };
-                    
+
                     app.state.jobs.push(job);
-                    
+
                     // Verify job was added
                     assert_eq!(app.state.jobs.len(), 1);
                     assert!(matches!(app.state.jobs[0].action, ActionType::Copy(_)));
@@ -748,36 +798,39 @@ mod tests {
     #[test]
     fn test_copy_missing_mode_handles_dry_run() {
         let mut app = create_test_app_with_missing_files();
-        
+
         // Enable dry run mode
         app.state.dry_run = true;
-        
+
         // Create a copy job
-        if let Some(first_file) = app.state.grouped_data.first()
+        if let Some(first_file) = app
+            .state
+            .grouped_data
+            .first()
             .and_then(|group| group.sets.first())
-            .and_then(|set| set.files.first()) 
+            .and_then(|set| set.files.first())
         {
             app.state.jobs.push(Job {
                 action: ActionType::Copy(PathBuf::from("/dest")),
                 file_info: first_file.clone(),
             });
         }
-        
+
         // Simulate processing jobs
         if !app.state.jobs.is_empty() {
             app.state.is_processing_jobs = true;
             app.state.job_progress = (0, app.state.jobs.len());
-            
+
             // Check if processing happens in dry run mode
             assert!(app.state.dry_run);
             assert!(app.state.is_processing_jobs);
-            
+
             // The actual job processing would happen here in the app
             // but we're just testing that dry run mode is properly set
-            
+
             // Cleanup
             app.state.is_processing_jobs = false;
             app.state.job_progress = (0, 0);
         }
     }
-} 
+}

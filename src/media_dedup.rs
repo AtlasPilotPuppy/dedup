@@ -754,10 +754,10 @@ pub fn add_media_options_to_cli(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
-    use std::time::SystemTime;
+    
+    
 
-    // Helper to create a test file
+    /* // Helper to create a test file - This function is currently unused.
     fn create_test_file_info(path: &str, size: u64) -> FileInfo {
         FileInfo {
             path: PathBuf::from(path),
@@ -767,6 +767,7 @@ mod tests {
             created_at: Some(SystemTime::now()),
         }
     }
+    */
 
     #[test]
     fn test_ffmpeg_availability() {

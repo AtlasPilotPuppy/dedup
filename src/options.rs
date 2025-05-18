@@ -1,7 +1,7 @@
+use anyhow::Result;
 use clap::Parser;
 use std::path::PathBuf;
 use std::str::FromStr;
-use anyhow::Result;
 
 use crate::app_mode::AppMode;
 use crate::config::DedupConfig;
@@ -373,4 +373,4 @@ impl Options {
             app_mode: app_mode,
         }
     }
-} 
+}
