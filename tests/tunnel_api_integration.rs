@@ -30,7 +30,7 @@ use dedups::protocol::find_available_port;
 const SERVER_START_TIMEOUT: u64 = 10000; // 10 seconds
 const SERVER_STOP_TIMEOUT: u64 = 5000; // 5 seconds
 const DEFAULT_PORT: u16 = 29875; // Default dedups port
-const TEST_TIMEOUT: u64 = 120; // 2 minutes timeout for tests
+const TEST_TIMEOUT: u64 = 30; // 30 seconds timeout for tests
 
 /// Helper: wait until TCP port is listening (or timeout)
 fn wait_for_port(port: u16, timeout_ms: u64) -> bool {
@@ -502,7 +502,7 @@ where
     F: FnOnce() -> Result<T> + Send + 'static,
     T: Send + 'static,
 {
-    let timeout = Duration::from_secs(30); // Increased from 10s to 30s for all tests
+    let timeout = Duration::from_secs(TEST_TIMEOUT);
     let (tx, rx) = mpsc::channel();
 
     // Use a thread scope to ensure all threads complete

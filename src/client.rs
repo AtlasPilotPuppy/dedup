@@ -31,9 +31,9 @@ const DEFAULT_RECEIVE_TIMEOUT: Duration = Duration::from_millis(100);
 /// Maximum time to wait for command response
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 /// Keep-alive interval
-const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(30);
+const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(5);
 /// Keep-alive timeout
-const KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(90);
+const KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Client connection state
 #[derive(Debug, PartialEq)]
@@ -340,26 +340,21 @@ impl DedupClient {
     /// Send a keep-alive ping to the server
     fn send_keep_alive(&mut self) -> Result<()> {
         if let Some(protocol) = self.protocol.as_mut() {
-            let cmd_msg = CommandMessage {
-                command: "ping".to_string(),
-                args: Vec::new(),
-                options: HashMap::new(),
-            };
-
-            let cmd_json = serde_json::to_string(&cmd_msg)
-                .with_context(|| "Failed to serialize ping command")?;
+            if self.verbose >= 3 {
+                log::debug!("Sending keep-alive ping");
+            }
 
             let message = DedupMessage {
-                message_type: MessageType::Command,
-                payload: cmd_json,
+                message_type: MessageType::Result,
+                payload: "pong".to_string(),
             };
 
             protocol
                 .send_message(message)
-                .with_context(|| "Failed to send keep-alive ping")?;
+                .with_context(|| "Failed to send keep-alive pong")?;
 
             if self.verbose >= 3 {
-                log::debug!("Sent keep-alive ping");
+                log::debug!("Sent keep-alive pong");
             }
         }
         Ok(())

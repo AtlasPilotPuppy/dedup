@@ -364,6 +364,7 @@ impl DedupServer {
         // Set up client session start time for tracking
         let session_start = std::time::Instant::now();
         let mut last_activity = std::time::Instant::now();
+        let mut last_ping = std::time::Instant::now();
 
         if verbose >= 2 {
             log::info!("Client connected and ready to receive commands");
@@ -378,7 +379,35 @@ impl DedupServer {
         // Set a flag to detect client disconnection
         let mut client_disconnected = false;
 
+        // Keep-alive settings
+        let keep_alive_interval = Duration::from_secs(5); // Reduced from 30s to 5s
+        let keep_alive_timeout = Duration::from_secs(15); // Reduced from 90s to 15s
+
         while running.load(Ordering::SeqCst) && !client_disconnected {
+            // Send keep-alive ping if needed
+            if keep_alive && last_ping.elapsed() > keep_alive_interval {
+                if verbose >= 3 {
+                    log::debug!("Sending keep-alive ping to client");
+                }
+                let ping_msg = DedupMessage {
+                    message_type: MessageType::Result,
+                    payload: "ping".to_string(),
+                };
+                if let Err(e) = protocol.send_message(ping_msg) {
+                    log::error!("Failed to send keep-alive ping: {}", e);
+                    client_disconnected = true;
+                    break;
+                }
+                last_ping = Instant::now();
+            }
+
+            // Check keep-alive timeout
+            if keep_alive && last_activity.elapsed() > keep_alive_timeout {
+                log::error!("Keep-alive timeout exceeded ({} seconds)", keep_alive_timeout.as_secs());
+                client_disconnected = true;
+                break;
+            }
+
             match protocol.receive_message() {
                 Ok(Some(message)) => {
                     last_activity = std::time::Instant::now();
@@ -411,6 +440,8 @@ impl DedupServer {
                                     &format!("Error handling command: {}", e),
                                     500,
                                 );
+                                client_disconnected = true;
+                                break;
                             }
                         }
                         MessageType::Result => {
@@ -421,6 +452,12 @@ impl DedupServer {
                                 }
                                 client_disconnected = true;
                                 break;
+                            } else if message.payload == "pong" {
+                                // Handle keep-alive pong response
+                                if verbose >= 3 {
+                                    log::debug!("Received keep-alive pong from client");
+                                }
+                                last_activity = Instant::now();
                             } else {
                                 log::warn!(
                                     "Received unexpected result message: {}",
@@ -439,13 +476,15 @@ impl DedupServer {
                                 1,
                             ) {
                                 log::error!("Failed to send error response: {}", e);
+                                client_disconnected = true;
+                                break;
                             }
                         }
                     }
                 }
                 Ok(None) => {
                     // Check keep-alive timeout
-                    if keep_alive && last_activity.elapsed() > Duration::from_secs(90) {
+                    if keep_alive && last_activity.elapsed() > keep_alive_timeout {
                         log::error!("Keep-alive timeout exceeded");
                         client_disconnected = true;
                         break;
@@ -467,7 +506,7 @@ impl DedupServer {
                     match e.downcast_ref::<std::io::Error>() {
                         Some(io_err) if io_err.kind() == std::io::ErrorKind::TimedOut => {
                             // Read timeout, check keep-alive
-                            if keep_alive && last_activity.elapsed() > Duration::from_secs(90) {
+                            if keep_alive && last_activity.elapsed() > keep_alive_timeout {
                                 log::error!("Keep-alive timeout exceeded");
                                 client_disconnected = true;
                                 break;
