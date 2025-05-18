@@ -93,6 +93,7 @@ message DedupOptions {
     bool server_mode = 32;
     uint32 port = 33;
     bool tunnel_api_mode = 37;
+    bool keep_alive = 38;
     
     // Protocol options
     bool use_protobuf = 34;

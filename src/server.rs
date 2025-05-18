@@ -25,7 +25,9 @@ use std::sync::{
 #[cfg(feature = "ssh")]
 use std::thread;
 #[cfg(feature = "ssh")]
-use std::time::Duration;
+use std::time::{Duration, Instant};
+#[cfg(feature = "ssh")]
+use socket2;
 
 /// Server implementation that listens for client commands and executes dedups operations
 #[cfg(feature = "ssh")]
@@ -58,6 +60,7 @@ impl DedupServer {
             default_options.use_protobuf = true;
             default_options.use_compression = true;
             default_options.compression_level = 3;
+            default_options.keep_alive = true; // Enable keep-alive by default
         }
         
         Self {
@@ -124,9 +127,10 @@ impl DedupServer {
                 #[cfg(feature = "proto")]
                 {
                     log::info!(
-                        "Server options: protocol={}, compression={}",
+                        "Server options: protocol={}, compression={}, keep_alive={}",
                         if options.use_protobuf { "protobuf" } else { "json" },
-                        if options.use_compression { "enabled" } else { "disabled" }
+                        if options.use_compression { "enabled" } else { "disabled" },
+                        if options.keep_alive { "enabled" } else { "disabled" }
                     );
                 }
                 #[cfg(not(feature = "proto"))]
@@ -159,12 +163,25 @@ impl DedupServer {
                         log::info!("New client connection from: {}", addr);
                     }
                     
+                    // Clone the stream for error handling
+                    let error_stream = match stream.try_clone() {
+                        Ok(s) => s,
+                        Err(e) => {
+                            log::error!("Failed to clone stream for error handling: {}", e);
+                            continue;
+                        }
+                    };
+                    
                     // Handle client in a new thread
                     let running_clone = running.clone();
                     let options_clone = options.clone();
                     thread::spawn(move || {
                         if let Err(e) = Self::handle_client(stream, running_clone, options_clone, verbose) {
                             log::error!("Error handling client: {}", e);
+                            // Try to send error to client if possible
+                            if let Ok(mut protocol) = create_protocol_handler(error_stream, false, false, 0) {
+                                let _ = Self::send_error(&mut *protocol, &format!("Server error: {}", e), 500);
+                            }
                         }
                     });
                 }
@@ -201,6 +218,23 @@ impl DedupServer {
         options: Arc<Mutex<DedupOptions>>,
         verbose: u8,
     ) -> Result<()> {
+        // Configure socket options for keep-alive
+        let socket = socket2::Socket::from(stream.try_clone()?);
+        socket.set_keepalive(true)
+            .with_context(|| "Failed to set keep-alive")?;
+        
+        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
+        {
+            use socket2::TcpKeepalive;
+            socket.set_tcp_keepalive(&TcpKeepalive::new()
+                .with_time(Duration::from_secs(60))
+                .with_interval(Duration::from_secs(10))
+            ).with_context(|| "Failed to set TCP keep-alive options")?;
+        }
+
+        // Convert back to TcpStream
+        let stream = TcpStream::from(socket);
+
         // Get protocol options from shared state
         let opts = options
             .lock()
@@ -253,6 +287,7 @@ impl DedupServer {
             }
         };
 
+        let keep_alive = opts.keep_alive;
         drop(opts); // Release the lock
 
         let mut protocol = match create_protocol_handler(stream, use_protobuf, use_compression, compression_level) {
@@ -265,6 +300,7 @@ impl DedupServer {
 
         // Set up client session start time for tracking
         let session_start = std::time::Instant::now();
+        let mut last_activity = std::time::Instant::now();
         
         if verbose >= 2 {
             log::info!("Client connected and ready to receive commands");
@@ -273,6 +309,7 @@ impl DedupServer {
         while running.load(Ordering::SeqCst) {
             match protocol.receive_message() {
                 Ok(Some(message)) => {
+                    last_activity = std::time::Instant::now();
                     if verbose >= 3 {
                         log::debug!("Received message type: {:?}", message.message_type);
                     }
@@ -301,21 +338,84 @@ impl DedupServer {
                     }
                 }
                 Ok(None) => {
-                    // EOF, client disconnected
-                    if verbose >= 1 {
-                        let session_duration = session_start.elapsed();
-                        log::info!("Client disconnected after {:.1} seconds", session_duration.as_secs_f64());
+                    // Check for keep-alive timeout
+                    if keep_alive && last_activity.elapsed() > Duration::from_secs(60) {
+                        // Send keep-alive ping
+                        let ping_msg = DedupMessage {
+                            message_type: MessageType::Result,
+                            payload: "ping".to_string(),
+                        };
+                        if let Err(e) = protocol.send_message(ping_msg) {
+                            log::error!("Failed to send keep-alive ping: {}", e);
+                            break;
+                        }
+                        last_activity = std::time::Instant::now();
+                        if verbose >= 3 {
+                            log::debug!("Sent keep-alive ping");
+                        }
                     }
-                    break;
+                    
+                    // Sleep briefly to avoid busy loop
+                    thread::sleep(Duration::from_millis(100));
                 }
                 Err(e) => {
-                    log::error!("Error receiving message: {}", e);
-                    break;
+                    match e.downcast_ref::<std::io::Error>() {
+                        Some(io_err) if io_err.kind() == std::io::ErrorKind::TimedOut => {
+                            // Read timeout, check keep-alive
+                            if keep_alive && last_activity.elapsed() > Duration::from_secs(90) {
+                                log::error!("Keep-alive timeout exceeded");
+                                break;
+                            }
+                            continue;
+                        }
+                        Some(io_err) if io_err.kind() == std::io::ErrorKind::WouldBlock => {
+                            // Non-blocking read with no data
+                            thread::sleep(Duration::from_millis(100));
+                            continue;
+                        }
+                        Some(io_err) if io_err.kind() == std::io::ErrorKind::BrokenPipe => {
+                            log::warn!("Client connection closed (broken pipe)");
+                            break;
+                        }
+                        Some(io_err) if io_err.kind() == std::io::ErrorKind::ConnectionReset => {
+                            log::warn!("Client connection reset");
+                            break;
+                        }
+                        _ => {
+                            log::error!("Error reading from client: {}", e);
+                            break;
+                        }
+                    }
                 }
             }
         }
 
+        if verbose >= 1 {
+            let session_duration = session_start.elapsed();
+            log::info!("Client session ended after {:.1} seconds", session_duration.as_secs_f64());
+        }
+
         Ok(())
+    }
+
+    /// Send a result message to the client
+    fn send_result(protocol: &mut dyn ProtocolHandler, payload: &str, verbose: u8) -> Result<()> {
+        if verbose >= 3 {
+            log::debug!("Sending result to client: {}", payload);
+        }
+        
+        let result_msg = DedupMessage {
+            message_type: MessageType::Result,
+            payload: payload.to_string(),
+        };
+
+        match protocol.send_message(result_msg) {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                log::error!("Failed to send result message to client: {}", e);
+                Err(e)
+            }
+        }
     }
 
     /// Handle a command message
@@ -348,25 +448,34 @@ impl DedupServer {
             }
             
             // Send handshake success response
-            // Include server version or other useful info if available in the future
             let result_payload = serde_json::json!({
                 "status": "handshake_ack",
                 "message": "Server ready and acknowledged handshake.",
-                "server_version": env!("CARGO_PKG_VERSION") // Example: Include server version
+                "server_version": env!("CARGO_PKG_VERSION"),
+                "keep_alive": true  // Indicate keep-alive is enabled
             }).to_string();
 
-            let result_msg = DedupMessage {
-                message_type: MessageType::Result,
-                payload: result_payload,
-            };
-            
-            if let Err(e) = protocol.send_message(result_msg) {
+            if let Err(e) = Self::send_result(protocol, &result_payload, verbose) {
                 log::error!("Failed to send internal_handshake response: {}", e);
                 return Err(anyhow::anyhow!("Failed to send internal_handshake response: {}", e));
             }
             
             if verbose >= 2 {
                 log::info!("Server communication established via internal_handshake.");
+            }
+            
+            return Ok(());
+        }
+
+        // Special handling for keep-alive ping command
+        if command_msg.command == "ping" {
+            if verbose >= 3 {
+                log::debug!("Received keep-alive ping, responding with pong");
+            }
+            
+            if let Err(e) = Self::send_result(protocol, "pong", verbose) {
+                log::error!("Failed to send keep-alive pong: {}", e);
+                return Err(anyhow::anyhow!("Failed to send keep-alive pong: {}", e));
             }
             
             return Ok(());
@@ -432,6 +541,7 @@ impl DedupServer {
                 let tunnel_api_mode_clone = tunnel_api_mode;
                 let thread_verbose = verbose;
                 
+                let (tx, rx) = std::sync::mpsc::channel();
                 let stdout_thread = thread::spawn(move || {
                     if thread_verbose >= 3 {
                         log::debug!("Started stdout processing thread");
@@ -450,12 +560,7 @@ impl DedupServer {
                             }
                             
                             // Forward as Result message
-                            let result_msg = DedupMessage {
-                                message_type: MessageType::Result,
-                                payload: line.clone(),
-                            };
-
-                            if let Err(e) = protocol_clone.send_message(result_msg) {
+                            if let Err(e) = Self::send_result(&mut *protocol_clone, &line, thread_verbose) {
                                 log::error!("Error sending output to client: {}", e);
                                 break;
                             }
@@ -474,6 +579,9 @@ impl DedupServer {
                     if thread_verbose >= 3 {
                         log::debug!("Stdout processing thread completed, processed {} lines", line_count);
                     }
+
+                    // Signal completion
+                    let _ = tx.send(());
                 });
 
                 // Process stderr in a separate thread to avoid blocking
@@ -499,19 +607,40 @@ impl DedupServer {
                     }
                 });
 
-                // Wait for stdout thread to complete
-                if let Err(e) = stdout_thread.join() {
-                    log::error!("Stdout thread panicked: {:?}", e);
-                }
-                
-                // We don't need to wait for stderr thread as it's not critical for protocol
-                
-                // Wait for process to exit
-                let status = match child.wait() {
-                    Ok(s) => s,
-                    Err(e) => {
-                        log::error!("Failed to wait for command process: {}", e);
-                        return Self::send_error(protocol, &format!("Failed to wait for command: {}", e), 500);
+                // Wait for stdout thread to complete with timeout
+                let stdout_timeout = Duration::from_secs(30);
+                let stdout_thread_done = match rx.recv_timeout(stdout_timeout) {
+                    Ok(_) => {
+                        if verbose >= 3 {
+                            log::debug!("Stdout thread completed within timeout");
+                        }
+                        true
+                    }
+                    Err(_) => {
+                        log::warn!("Stdout thread did not complete within timeout");
+                        false
+                    }
+                };
+
+                // Wait for process to exit with timeout
+                let process_timeout = Duration::from_secs(30);
+                let start = Instant::now();
+                let status = loop {
+                    match child.try_wait() {
+                        Ok(Some(status)) => break status,
+                        Ok(None) => {
+                            if start.elapsed() > process_timeout {
+                                // Kill the process if it's taking too long
+                                let _ = child.kill();
+                                return Self::send_error(protocol, "Command timed out", 500);
+                            }
+                            thread::sleep(Duration::from_millis(100));
+                            continue;
+                        }
+                        Err(e) => {
+                            log::error!("Failed to wait for command process: {}", e);
+                            return Self::send_error(protocol, &format!("Failed to wait for command: {}", e), 500);
+                        }
                     }
                 };
                 
@@ -528,6 +657,12 @@ impl DedupServer {
                     Self::send_error(protocol, &err_msg, 2)?;
                 } else if verbose >= 2 {
                     log::info!("Command completed successfully");
+                }
+
+                // Clean up threads
+                if !stdout_thread_done {
+                    // Try to join the thread to avoid leaks
+                    let _ = stdout_thread.join();
                 }
             }
             Err(e) => {

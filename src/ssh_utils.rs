@@ -630,25 +630,31 @@ impl SshProtocol {
     /// Execute dedups command on remote system with support for streaming JSON output
     /// Uses a dedicated socket/tunnel approach for better streaming
     pub fn execute_dedups(&self, args: &[&str], cli: &crate::Cli) -> Result<String> {
-        // Check if we're using JSON output to adjust approach
-        let using_json = args.iter().any(|&a| a == "--json") || cli.json;
+        // Check for protocol conflicts
+        if cli.json && cli.use_protobuf {
+            return Err(anyhow::anyhow!(
+                "Cannot use both JSON and Protobuf protocols. Protobuf is preferred for tunnel mode."
+            ));
+        }
 
-        // If we're using JSON output and SSH tunnel is enabled in config, use tunnel-based approach
-        if using_json && cli.use_ssh_tunnel {
+        // First check if we should use tunnel mode
+        let should_use_tunnel = cli.use_ssh_tunnel && cli.tunnel_api_mode;
+
+        if should_use_tunnel {
             // Check verbosity level for additional logs
-            if cli.verbose >= 3 {
-                log::info!("Using tunnel-based SSH API communication (protocol mode)");
+            if cli.verbose >= 2 {
+                log::info!("Attempting tunnel-based API communication");
             }
 
-            // First verify remote dedups is available
+            // First verify remote dedups is available (do this ONCE)
             let remote_dedups = tokio::runtime::Runtime::new()
                 .unwrap()
                 .block_on(self.remote.check_dedups_installed())?;
 
             match remote_dedups {
                 Some(path) => {
-                    log::info!("Found remote dedups at {}, attempting tunnel mode", path);
-                    match self.execute_dedups_with_tunnel(args, cli) {
+                    log::info!("Found remote dedups at {}, starting server mode", path);
+                    match self.execute_dedups_with_tunnel(args, cli, &path) {
                         Ok(result) => Ok(result),
                         Err(e) => {
                             log::error!("Tunnel mode failed: {}", e);
@@ -658,7 +664,7 @@ impl SshProtocol {
                                     "Media mode requires working tunnel mode communication. Error: {}", e
                                 ));
                             }
-                            log::warn!("Falling back to standard SSH mode (less reliable for JSON streaming)");
+                            log::warn!("Falling back to standard SSH mode with prefixed JSON");
                             self.execute_dedups_standard(args, cli)
                         }
                     }
@@ -674,64 +680,43 @@ impl SshProtocol {
                 }
             }
         } else {
-            // Fall back to standard approach
-            log::info!("Using standard SSH for command execution (no tunneling)");
+            // Standard mode requested
+            log::info!("Using standard SSH mode (JSON with prefix)");
             self.execute_dedups_standard(args, cli)
         }
     }
 
-    /// Execute dedups via an SSH tunnel for better JSON streaming
-    pub fn execute_dedups_with_tunnel(&self, args: &[&str], cli: &crate::Cli) -> Result<String> {
+    /// Execute dedups via an SSH tunnel for API communication
+    pub fn execute_dedups_with_tunnel(&self, args: &[&str], cli: &crate::Cli, remote_dedups_path: &str) -> Result<String> {
         use crate::client::DedupClient;
         use crate::protocol::find_available_port;
         use std::collections::HashMap;
-        use std::io::{BufRead, BufReader};
 
         if cli.verbose >= 2 {
-            log::info!("Executing dedups via SSH tunnel API protocol");
+            log::info!("Setting up tunnel-based API communication");
         }
 
-        // Always enable tunnel API mode for SSH tunnels
-        let tunnel_api_mode = true;
-        
-        // Use the configured port from options or find an available one
+        // Find an available port for the tunnel
         let local_port = if cli.port > 0 {
-            if cli.verbose >= 2 {
-                log::info!("Using configured port {} for API communication", cli.port);
-            }
             cli.port
         } else {
-            let port = find_available_port(10000, 11000)
-                .context("Could not find an available port for SSH tunnel")?;
-            if cli.verbose >= 2 {
-                log::info!("Using dynamically allocated port {} for API communication", port);
-            }
-            port
+            find_available_port(10000, 11000)
+                .context("Could not find an available port for SSH tunnel")?
         };
 
-        // Get the remote dedups path (we know it exists since we checked earlier)
-        let remote_dedups_bin = tokio::runtime::Runtime::new()
-            .unwrap()
-            .block_on(self.remote.check_dedups_installed())?
-            .ok_or_else(|| anyhow::anyhow!("Remote dedups not found"))?;
+        if cli.verbose >= 2 {
+            log::info!("Using port {} for API communication", local_port);
+        }
 
-        log::info!("Setting up SSH tunnel on port {} for API communication", local_port);
-
-        // Forward RUST_LOG if set
-        let rust_log_export = if let Ok(val) = std::env::var("RUST_LOG") {
-            if cli.verbose >= 3 {
-                log::debug!("Forwarding RUST_LOG environment: {}", val);
-            }
-            format!("export RUST_LOG=\"{}\";", val)
-        } else {
-            String::new()
-        };
-
-        // Set up a temporary port forwarding with SSH
+        // Set up the SSH tunnel options
         let port_forwarding = format!("{}:localhost:{}", local_port, local_port);
-        let mut ssh_opts = vec!["-L", &port_forwarding];
         let ssh_options = self.get_ssh_options(cli);
-        ssh_opts.extend(ssh_options.iter().map(|s| s.as_str()));
+        let mut ssh_opts = vec![
+            "-N".to_string(),  // No command execution, just forwarding
+            "-L".to_string(), port_forwarding,
+            "-o".to_string(), "ExitOnForwardFailure=yes".to_string()  // Fail if port forwarding fails
+        ];
+        ssh_opts.extend(ssh_options);
 
         let remote_addr = if let Some(user) = &self.remote.username {
             if let Some(port) = self.remote.port {
@@ -743,343 +728,133 @@ impl SshProtocol {
             self.remote.host.clone()
         };
 
-        // Start the server process on the remote system with designated API mode
-        // Build the server command with verbose flags based on CLI verbosity
+        // Start the tunnel in the background
+        let tunnel_cmd = format!(
+            "ssh {} {} -f",  // -f backgrounds the tunnel
+            ssh_opts.join(" "),
+            remote_addr
+        );
+
+        if cli.verbose >= 2 {
+            log::info!("Starting SSH tunnel: {}", tunnel_cmd);
+        }
+
+        // Start the tunnel
+        let tunnel_status = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&tunnel_cmd)
+            .status()
+            .context("Failed to start SSH tunnel")?;
+
+        if !tunnel_status.success() {
+            return Err(anyhow::anyhow!("Failed to establish SSH tunnel"));
+        }
+
+        // Now start the remote server
         let port_str = local_port.to_string();
-        let mut server_flags = vec!["--server-mode", "--port", &port_str];
-        
-        // Add protocol configuration
-        #[cfg(feature = "proto")]
-        {
-            if cli.use_protobuf {
-                server_flags.push("--use-protobuf");
-                if cli.verbose >= 2 {
-                    log::info!("Using Protobuf for API communication");
-                }
-                
-                if cli.use_compression {
-                    server_flags.push("--use-compression");
-                    if cli.verbose >= 2 {
-                        log::info!("Compression enabled for API communication");
-                    }
-                }
+        let mut server_flags = vec![
+            "--server-mode".to_string(),
+            "--port".to_string(), port_str,
+            "--use-protobuf".to_string(),  // Always use protobuf in tunnel mode
+            "--use-compression".to_string()
+        ];
+
+        // Add verbosity flags
+        if cli.verbose > 0 {
+            for _ in 0..cli.verbose {
+                server_flags.push("-v".to_string());
             }
         }
-        
-        // Add verbosity flags to remote server based on local verbosity
-        if cli.verbose > 0 {
-            server_flags.extend(std::iter::repeat_n("-v", cli.verbose as usize));
+
+        // If we have a directory, pass it
+        if !cli.directories.is_empty() {
+            let dir_str = cli.directories[0].to_string_lossy().into_owned();
+            server_flags.push(dir_str);
         }
 
-        // If the original CLI had a directory, pass it to the remote server
-        let remote_dir_arg = if !cli.directories.is_empty() {
-            format!(" {}", cli.directories[0].to_string_lossy())
-        } else {
-            String::new()
-        };
-
-        // Construct the remote shell command carefully to avoid parse errors
-        let server_cmd_for_remote_shell = format!(
-            r#"export PATH="$HOME/.local/bin:$PATH"; {rust_log_export} if [ -f "$HOME/.bashrc" ]; then source "$HOME/.bashrc"; fi; echo "INFO: Starting dedups server on remote port {port}"; {dedups_bin} {server_flags}{remote_dir_arg}"#,
-            rust_log_export = rust_log_export,
-            port = local_port,
-            dedups_bin = remote_dedups_bin,
-            server_flags = server_flags.join(" "),
-            remote_dir_arg = remote_dir_arg
-        );
-
+        // Construct the server startup command
         let server_cmd = format!(
-            r#"ssh {ssh_options} {remote_addr} bash -c '{shell_command}'"#,
-            ssh_options = ssh_opts.join(" "), // ssh_opts contains the -L for tunnel
-            remote_addr = remote_addr,
-            shell_command = server_cmd_for_remote_shell.replace('\'', "'\\''") // Properly escape single quotes
+            r#"ssh {} {} "export PATH={}:$PATH; {} {} {}""#,
+            self.get_ssh_options(cli).join(" "),
+            remote_addr,
+            std::path::Path::new(remote_dedups_path).parent().unwrap_or(std::path::Path::new("/usr/local/bin")).display(),
+            if let Ok(val) = std::env::var("RUST_LOG") {
+                format!("export RUST_LOG={};", val)
+            } else {
+                String::new()
+            },
+            remote_dedups_path,
+            server_flags.join(" ")
         );
 
-        if cli.verbose >= 1 {
-            log::info!("Starting SSH tunnel and remote server with command: [{}]", server_cmd);
+        if cli.verbose >= 2 {
+            log::info!("Starting remote server: {}", server_cmd);
         }
 
-        // Start the SSH tunnel in background with better piping
-        let mut child = std::process::Command::new("bash")
+        // Start the server
+        let _server_child = std::process::Command::new("sh")
             .arg("-c")
             .arg(&server_cmd)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
-            .context(format!("Failed to start SSH tunnel. Command was: [{}]", server_cmd))?;
+            .context("Failed to start remote server")?;
 
-        // Set up readers for both stdout and stderr to capture server startup messages
-        let stdout = child.stdout.take().expect("Failed to capture stdout");
-        let stderr = child.stderr.take().expect("Failed to capture stderr");
-        
-        let stdout_reader = BufReader::new(stdout);
-        let stderr_reader = BufReader::new(stderr);
-        
-        // Check for server startup messages
-        let mut server_started = false;
-        let mut server_error = None;
-        let mut handshake_received = false;
-        let mut stdout_lines = Vec::new();
-        let mut stderr_lines = Vec::new();
-        
-        // Start a thread to read stdout
-        let stdout_thread = std::thread::spawn(move || {
-            for line in stdout_reader.lines().map_while(Result::ok) {
-                stdout_lines.push(line);
-            }
-            stdout_lines
-        });
-        
-        // Start a thread to read stderr
-        let stderr_thread = std::thread::spawn(move || {
-            for line in stderr_reader.lines().map_while(Result::ok) {
-                stderr_lines.push(line);
-            }
-            stderr_lines
-        });
-        
-        // Give server some time to start
-        let startup_time = if cli.verbose >= 3 { 3000 } else { 2000 };
-        std::thread::sleep(std::time::Duration::from_millis(startup_time));
-            
-        // Check if the server started by attempting a connection
-        for attempt in 1..=5 {
-            if cli.verbose >= 2 {
-                log::info!("Connection attempt {} of 5 to localhost:{}", attempt, local_port);
-            }
-            
-            match std::net::TcpStream::connect(format!("localhost:{}", local_port)) {
-                Ok(_) => {
-                    server_started = true;
-                    if cli.verbose >= 1 {
-                        log::info!("Successfully established TCP connection to server on port {}", local_port);
-                    }
-                    break;
-                }
-                Err(e) => {
-                    if cli.verbose >= 2 {
-                        log::warn!("Connection attempt {} failed: {}", attempt, e);
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(1000));
-                }
-            }
-        }
-        
-        // If server doesn't start, get any output to help diagnose
-        if !server_started {
-            // Join the threads to get their output
-            if let Ok(out_lines) = stdout_thread.join() {
-                if !out_lines.is_empty() && cli.verbose >= 1 {
-                    log::info!("Server stdout: {}", out_lines.join("\n"));
-                }
-            }
-            
-            if let Ok(err_lines) = stderr_thread.join() {
-                if !err_lines.is_empty() {
-                    server_error = Some(err_lines.join("\n"));
-                    log::error!("Server stderr: {}", server_error.as_ref().unwrap());
-                }
-            }
-            
-            // Kill the tunnel process
-            let _ = child.kill();
-            
-            return Err(anyhow::anyhow!(
-                "Failed to establish connection to remote dedups server: {}",
-                server_error.unwrap_or_else(|| "No error message available".to_string())
-            ));
-        }
+        // Wait a moment for the server to start
+        std::thread::sleep(std::time::Duration::from_secs(1));
 
-        // Create options with tunnel settings
-        if cli.verbose >= 3 {
-            log::debug!("Setting up client options for API communication");
-        }
-        
-        let options = crate::options::DedupOptions {
-            use_ssh_tunnel: true,
-            tunnel_api_mode,  // Use shorthand field initialization
-            port: local_port,
-            #[cfg(feature = "proto")]
-            use_protobuf: cli.use_protobuf,
-            #[cfg(feature = "proto")]
-            use_compression: cli.use_compression,
-            #[cfg(feature = "proto")]
-            compression_level: cli.compression_level,
-            ..crate::options::DedupOptions::default()
-        };
+        // Create the client
+        let mut client = DedupClient::with_options(
+            "localhost".to_string(),
+            local_port,
+            crate::options::DedupOptions {
+                use_ssh_tunnel: true,
+                tunnel_api_mode: true,
+                port: local_port,
+                use_protobuf: true,
+                use_compression: true,
+                ..Default::default()
+            }
+        );
 
-        // Connect to the server via the tunnel
-        let mut client = DedupClient::with_options("localhost".to_string(), local_port, options);
-        
-        // Attempt to connect with retry
-        let max_attempts = 5; // Increase retries
+        // Try to connect with retries
         let mut connected = false;
-        
-        if cli.verbose >= 2 {
-            log::info!("Attempting to connect to remote server on localhost:{}", local_port);
-        }
-        
-        for attempt in 1..=max_attempts {
-            if cli.verbose >= 3 {
-                log::debug!("Connection attempt {} of {}", attempt, max_attempts);
-            }
+        for attempt in 1..=5 {
             match client.connect() {
                 Ok(_) => {
-                    if cli.verbose >= 1 {
-                        log::info!("Successfully connected to remote server via SSH tunnel");
-                    }
-                    
-                    // Send a handshake command to verify the connection
-                    let handshake_env = HashMap::new(); // Keep options minimal for handshake
-                    
-                    if cli.verbose >= 2 {
-                        log::info!("Attempting internal handshake with remote server.");
-                    }
-                    match client.execute_command("internal_handshake".to_string(), Vec::new(), handshake_env) {
-                        Ok(response) => {
-                            // Expect a JSON response like {"status":"handshake_ack", ...}
-                            if response.contains("handshake_ack") {
-                                handshake_received = true;
-                                if cli.verbose >= 1 {
-                                    log::info!("Internal handshake successful - server communication established. Response: {}", response.trim());
-                                }
-                            } else {
-                                log::warn!("Internal handshake response received but not recognized: [{}]", response.trim());
-                            }
-                        }
-                        Err(e) => {
-                            log::warn!("Internal handshake command failed: {}", e);
-                        }
-                    }
-                    
                     connected = true;
                     break;
                 }
                 Err(e) => {
-                    if attempt < max_attempts {
-                        if cli.verbose >= 2 {
-                            log::warn!("Failed to connect on attempt {}: {}. Retrying...", attempt, e);
-                        }
-                        // Increase sleep time between retries
-                        std::thread::sleep(std::time::Duration::from_millis(attempt * 500));
-                    } else {
-                        log::error!("Failed to connect after {} attempts: {}", max_attempts, e);
-                        
-                        // Join the threads to get their output
-                        if let Ok(out_lines) = stdout_thread.join() {
-                            if !out_lines.is_empty() && cli.verbose >= 1 {
-                                log::info!("Server stdout: {}", out_lines.join("\n"));
-                            }
-                        }
-                        
-                        if let Ok(err_lines) = stderr_thread.join() {
-                            if !err_lines.is_empty() {
-                                server_error = Some(err_lines.join("\n"));
-                                log::error!("Server stderr: {}", server_error.as_ref().unwrap());
-                            }
-                        }
-                        
-                        // Kill the tunnel process if connection failed
-                        let _ = child.kill();
-                        return Err(anyhow::anyhow!("Failed to establish connection to remote dedups instance: {}", e));
+                    if attempt == 5 {
+                        log::error!("Failed to connect to server: {}", e);
+                        return Err(e);
                     }
+                    std::thread::sleep(std::time::Duration::from_millis(500));
                 }
             }
         }
-        
+
         if !connected {
-            let _ = child.kill();
-            
-            // Join the threads to get their output
-            if let Ok(out_lines) = stdout_thread.join() {
-                if !out_lines.is_empty() && cli.verbose >= 1 {
-                    log::info!("Server stdout: {}", out_lines.join("\n"));
-                }
-            }
-            
-            if let Ok(err_lines) = stderr_thread.join() {
-                if !err_lines.is_empty() {
-                    server_error = Some(err_lines.join("\n"));
-                    log::error!("Server stderr: {}", server_error.as_ref().unwrap());
-                }
-            }
-            
-            return Err(anyhow::anyhow!("Failed to establish connection to remote dedups instance"));
-        }
-        
-        // If we got this far but didn't get a handshake, at least we have a connection
-        if !handshake_received && cli.verbose >= 1 {
-            log::warn!("Connection established but server internal handshake NOT successful/received.");
-            // We'll still try to proceed since we have a connection
+            return Err(anyhow::anyhow!("Failed to connect to remote server"));
         }
 
-        // Convert &[&str] to Vec<String>
-        let args_vec: Vec<String> = args.iter().map(|&s| s.to_string()).collect();
+        // Execute the command
+        let result = client.execute_command(
+            "dedups".to_string(),
+            args.iter().map(|s| s.to_string()).collect(),
+            HashMap::new()
+        )?;
 
-        // Set up environment variables to pass through
-        let mut env_options = HashMap::new();
-        if let Ok(log_val) = std::env::var("RUST_LOG") {
-            env_options.insert("ENV_RUST_LOG".to_string(), log_val);
-        }
-        
-        // Add tunnel mode and verbosity as hints for the remote instance
-        env_options.insert("USE_TUNNEL_API".to_string(), "1".to_string());
-        env_options.insert("VERBOSITY".to_string(), cli.verbose.to_string());
-        
-        // Include handshake status in environment for the actual command
-        if handshake_received {
-            env_options.insert("SERVER_COMMUNICATION_ESTABLISHED".to_string(), "1".to_string());
-        }
-
-        // Execute command and get output
-        if cli.verbose >= 2 {
-            log::info!("Executing command over API tunnel: dedups {}", args_vec.join(" "));
-        }
-        
-        let output = match client.execute_command("dedups".to_string(), args_vec, env_options) {
-            Ok(out) => {
-                if cli.verbose >= 3 {
-                    log::debug!("Command execution completed successfully");
-                    log::debug!("Response size: {} bytes", out.len());
-                }
-                out
-            },
-            Err(e) => {
-                if cli.verbose >= 1 {
-                    log::error!("Command execution failed: {}", e);
-                }
-                // Kill the tunnel process if command failed
-                let _ = child.kill();
-                return Err(e);
-            }
-        };
-
-        // Clean up
-        if cli.verbose >= 3 {
-            log::debug!("Disconnecting from server and shutting down SSH tunnel");
-        }
-        
-        let _ = client.disconnect();
-        let _ = child.kill();
-
-        if cli.verbose >= 3 {
-            log::debug!("API communication completed successfully");
-        }
-        
-        // Add server communication status to output for ssh_api_example.sh to detect
-        if handshake_received {
-            println!("Server communication established");
-        } else if connected {
-            println!("Using fallback mode - server connected but handshake failed");
-        } else {
-            println!("Server communication failed - no connection");
-        }
-
-        Ok(output)
+        Ok(result)
     }
 
-    /// Standard execution method for non-JSON commands
-    fn execute_dedups_standard(&self, args: &[&str], _cli: &crate::Cli) -> Result<String> {
+    /// Standard execution method (fallback) - uses JSON with prefix for reliable parsing
+    fn execute_dedups_standard(&self, args: &[&str], cli: &crate::Cli) -> Result<String> {
+        // Add JSON prefix to help with parsing
+        let mut modified_args = args.to_vec();
+        modified_args.push("--json-prefix");  // This needs to be added to the CLI options
+
         // Build SSH command
         let mut ssh_cmd = vec!["ssh".to_string()];
 

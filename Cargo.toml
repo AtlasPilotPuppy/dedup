@@ -46,6 +46,7 @@ simple_logger = "4.2"
 regex = { version = "1.10" }
 dirs = "5.0"
 itertools = "0.12"
+socket2 = { version = "0.5", features = ["all"] }  # For TCP socket configuration
 
 # Protobuf and compression support
 prost = "0.12"

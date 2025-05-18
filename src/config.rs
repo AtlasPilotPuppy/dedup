@@ -113,6 +113,10 @@ pub struct SshConfig {
     #[serde(default = "default_tunnel_api_mode")]
     pub tunnel_api_mode: bool,
 
+    /// Whether to use keep-alive for connections
+    #[serde(default = "default_keep_alive")]
+    pub keep_alive: bool,
+
     /// Default SSH options
     #[serde(default)]
     pub ssh_options: Vec<String>,
@@ -184,6 +188,11 @@ fn default_tunnel_api_mode() -> bool {
     true
 }
 
+#[cfg(feature = "ssh")]
+fn default_keep_alive() -> bool {
+    true
+}
+
 #[cfg(feature = "proto")]
 fn default_use_protobuf() -> bool {
     true
@@ -208,6 +217,7 @@ impl Default for SshConfig {
             use_sudo: default_use_sudo(),
             use_ssh_tunnel: default_use_ssh_tunnel(),
             tunnel_api_mode: default_tunnel_api_mode(),
+            keep_alive: default_keep_alive(),
             ssh_options: Vec::new(),
             rsync_options: Vec::new(),
         }
@@ -453,6 +463,8 @@ impl DedupConfig {
             port: 0,
             #[cfg(feature = "ssh")]
             tunnel_api_mode: self.ssh.tunnel_api_mode,
+            #[cfg(feature = "ssh")]
+            keep_alive: self.ssh.keep_alive,
 
             // Protocol options
             #[cfg(feature = "proto")]
@@ -501,6 +513,7 @@ impl DedupConfig {
                 use_sudo: options.use_sudo,
                 use_ssh_tunnel: options.use_ssh_tunnel,
                 tunnel_api_mode: options.tunnel_api_mode,
+                keep_alive: true,
             },
 
             // Protocol options

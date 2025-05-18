@@ -1,0 +1,36 @@
+version: '3'
+
+services:
+  ssh-server:
+    build:
+      context: ../..
+      dockerfile: tests/docker/Dockerfile
+    container_name: dedups-ssh-server
+    ports:
+      - "2222:22"
+    environment:
+      - RUST_LOG=debug
+    healthcheck:
+      test: ["CMD", "bash", "-c", "nc -z localhost 22"]
+      interval: 3s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    volumes:
+      - ./ssh_test_data:/test_data
+      - ./scripts:/scripts
+  
+  ssh-client:
+    build:
+      context: ../..
+      dockerfile: tests/docker/Dockerfile
+    container_name: dedups-ssh-client
+    depends_on:
+      ssh-server:
+        condition: service_healthy
+    environment:
+      - RUST_LOG=debug
+    volumes:
+      - ./ssh_test_data:/test_data
+      - ./scripts:/scripts
+    entrypoint: ["/bin/bash", "/scripts/run_tests.sh"] 

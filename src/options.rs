@@ -69,7 +69,9 @@ pub struct DedupOptions {
     #[cfg(feature = "ssh")]
     pub port: u16,
     #[cfg(feature = "ssh")]
-    pub tunnel_api_mode: bool,  // New flag to enable separate tunnel API mode
+    pub tunnel_api_mode: bool,
+    #[cfg(feature = "ssh")]
+    pub keep_alive: bool,
 
     // Protocol options
     #[cfg(feature = "proto")]
@@ -137,6 +139,8 @@ impl Default for DedupOptions {
             port: 29875,  // Default port for API communication
             #[cfg(feature = "ssh")]
             tunnel_api_mode: true,  // Enabled by default to use API-style communication
+            #[cfg(feature = "ssh")]
+            keep_alive: true,  // Enable keep-alive by default
 
             // Protocol options
             #[cfg(feature = "proto")]
@@ -220,6 +224,7 @@ impl DedupOptions {
             server_mode: self.server_mode,
             port: self.port as u32,
             tunnel_api_mode: self.tunnel_api_mode,
+            keep_alive: self.keep_alive,
 
             // Protocol options
             use_protobuf: self.use_protobuf,
@@ -290,6 +295,8 @@ impl DedupOptions {
             port: proto_opts.port as u16,
             #[cfg(feature = "ssh")]
             tunnel_api_mode: proto_opts.tunnel_api_mode,
+            #[cfg(feature = "ssh")]
+            keep_alive: proto_opts.keep_alive,
 
             // Protocol options
             #[cfg(feature = "proto")]

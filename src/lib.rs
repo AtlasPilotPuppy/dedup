@@ -303,6 +303,15 @@ pub struct Cli {
     )]
     pub tunnel_api_mode: bool,
 
+    /// Whether to use keep-alive for connections
+    #[cfg(feature = "ssh")]
+    #[clap(
+        long,
+        default_value_t = true,
+        help = "Use keep-alive for connections to maintain server state"
+    )]
+    pub keep_alive: bool,
+
     /// Run in server mode to listen for commands over a socket/stdin
     #[cfg(feature = "ssh")]
     #[clap(long, help = "Run in server mode on the specified port")]
@@ -319,12 +328,21 @@ pub struct Cli {
 
     /// Use Protobuf for protocol communication (instead of JSON)
     #[cfg(feature = "proto")]
-    #[clap(long, help = "Use Protobuf for network communication", default_value_t = true)]
+    #[clap(
+        long,
+        help = "Use Protobuf for network communication (default in tunnel mode)",
+        default_value_t = true,
+        conflicts_with = "json"
+    )]
     pub use_protobuf: bool,
 
     /// Use ZSTD compression for network communication
     #[cfg(feature = "proto")]
-    #[clap(long, help = "Use ZSTD compression for network communication", default_value_t = true)]
+    #[clap(
+        long,
+        help = "Use ZSTD compression for network communication (default in tunnel mode)",
+        default_value_t = true
+    )]
     pub use_compression: bool,
 
     /// ZSTD compression level (1-22, higher = more compression but slower)
@@ -559,6 +577,8 @@ impl Cli {
             port: self.port,
             #[cfg(feature = "ssh")]
             tunnel_api_mode: self.tunnel_api_mode,
+            #[cfg(feature = "ssh")]
+            keep_alive: self.keep_alive,
 
             // Protocol options
             #[cfg(feature = "proto")]
@@ -629,6 +649,7 @@ impl Cli {
             cli.server_mode = options.server_mode;
             cli.port = options.port;
             cli.tunnel_api_mode = options.tunnel_api_mode;
+            cli.keep_alive = options.keep_alive;
         }
 
         // Protocol options
