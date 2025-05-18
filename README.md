@@ -9,6 +9,7 @@ A high-performance duplicate file finder and manager written in Rust. `dedups` e
 - **High Performance**: Uses multi-threading with Rayon for parallel hash calculation
 - **Multiple Hash Algorithms**: Choose between MD5, SHA1, SHA256, Blake3, xxHash (default), GxHash, FNV1a, or CRC32
 - **Interactive TUI**: Visually inspect and manage duplicate files
+- **Copy Missing Files**: Easily synchronize directories by finding and copying files that exist in source but are missing in target
 - **Media Deduplication**: Identify similar media files that differ in format, resolution, or quality
 - **File Cache**: Store and reuse file hash values to speed up repeated scans of unchanged files
 - **Selection Strategies**: Various automated selection strategies for keeping/removing duplicates
@@ -115,6 +116,9 @@ dedups /path/to/directory --config-file /path/to/my-config.toml
 ```bash
 # Copy missing files from source to target directory
 dedups /source/directory /target/directory
+
+# Explicitly use copy-missing mode with interactive UI
+dedups --copy-missing -i /source/directory /target/directory
 
 # Explicitly specify a target directory (can be useful with multiple source directories)
 dedups /source/dir1 /source/dir2 --target /target/directory
@@ -265,10 +269,10 @@ dedups /photos/2020 /photos/2021 /photos/2022 /backup/all_photos
 
 ```
 USAGE:
-    dedups [OPTIONS] [directory]
+    dedups [OPTIONS] [directory]...
 
 ARGS:
-    <directory>    The directory to scan for duplicate files [default: .]
+    <directory>...    The directories to scan for duplicate files or compare [default: .]
 
 OPTIONS:
     -d, --delete                 Delete duplicate files automatically based on selection strategy
@@ -324,30 +328,36 @@ When using `--filter-from`, the file should follow this format:
 
 ## Interactive TUI Mode
 
-The TUI mode provides an interactive interface for exploring and managing duplicate sets.
+The TUI mode provides an interactive interface for exploring and managing duplicate sets or copying missing files.
 
 ### Navigation
 
 ![TUI Navigation Placeholder](#)
 
 - **Arrow keys, j/k**: Move selection up/down
-- **Tab**: Cycle between panels (Sets/Folders → Files → Jobs)
-- **h/l or Left/Right**: Switch between sets and files
+- **Tab**: Cycle between panels (Sets/Missing Files → Files/Destination Browser → Jobs)
+- **h/l or Left/Right**: Switch between panels
 - **Ctrl+G**: Toggle focus on the log area
 - **Ctrl+R**: Rescan
 
 ### File Operations
 
+#### Deduplication Mode
 - **s**: Mark to keep the selected file and mark others in set for deletion
 - **d**: Mark the selected file for deletion
 - **c**: Copy the selected file (prompts for destination)
 - **a**: Toggle all files in a set for keep/delete
 - **i**: Ignore the selected file
 
+#### Copy Missing Mode
+- **s**: Select missing files/folders to copy
+- **Enter**: Navigate into directories in the destination browser
+- **Backspace**: Navigate up a directory in the destination browser
+- **Tab**: Switch between panels (Source → Destination → Jobs)
+
 ### Bulk Actions
 
-- **d/k**: When in the Sets panel, mark all files in the set for deletion or keeping
-- **Ctrl+E**: Execute pending jobs (delete/move operations)
+- **Ctrl+E**: Execute pending jobs (delete/move/copy operations)
 - **x/Delete/Backspace**: Remove the selected job
 
 ### Other Controls

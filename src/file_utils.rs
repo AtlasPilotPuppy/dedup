@@ -1858,6 +1858,58 @@ pub fn count_files_in_directory(directory: &Path, filter_rules: &FilterRules) ->
     Ok(count)
 }
 
+// New function to wrap compare_directories with progress reporting via ScanMessage channel
+pub fn compare_directories_with_progress(
+    options: &Options,
+    tx_progress: std::sync::mpsc::Sender<crate::tui_app::ScanMessage>,
+) -> Result<DirectoryComparisonResult> {
+    let send_status = |stage: u8, msg: String| {
+        if tx_progress
+            .send(crate::tui_app::ScanMessage::StatusUpdate(stage, msg))
+            .is_err()
+        {
+            log::warn!("[CompareThread] Failed to send status update to TUI (channel closed).");
+        }
+    };
+
+    send_status(1, "Starting directory comparison...".to_string());
+
+    let target_dir = determine_target_directory(options)?;
+    let source_dirs = get_source_directories(options, &target_dir);
+
+    send_status(1, format!("Target directory: {}", target_dir.display()));
+    for (i, source) in source_dirs.iter().enumerate() {
+        send_status(1, format!("Source directory {}: {}", i + 1, source.display()));
+    }
+
+    // Create progress reporting tuple for compare_directories
+    let (overall_tx, _current_tx) = (tx_progress.clone(), tx_progress.clone());
+    
+    // Create closure-based progress callback
+    let _progress_callback = move |stage: &str, progress: f32, message: &str| {
+        let _ = overall_tx.send(crate::tui_app::ScanMessage::StatusUpdate(
+            1, // Stage 1 for scanning
+            format!("{}: {}% - {}", stage, (progress * 100.0) as u32, message),
+        ));
+    };
+
+    send_status(2, "Scanning directories to find missing files...".to_string());
+
+    // Compare directories with custom progress bars for TUI
+    // TODO: Modify compare_directories to accept a callback for progress updates
+    // For now, call the existing function
+    let result = compare_directories(options, None)?;
+
+    // Report completion
+    send_status(3, format!(
+        "Comparison complete. Found {} missing files and {} duplicate sets.",
+        result.missing_in_target.len(),
+        result.duplicates.len()
+    ));
+
+    Ok(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
