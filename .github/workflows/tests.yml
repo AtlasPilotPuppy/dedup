@@ -166,3 +166,30 @@ jobs:
       run: |
         chmod +x test_ssh_tunnel.sh
         ./test_ssh_tunnel.sh 
+
+  tunnel-api-test:
+    name: Tunnel API Integration
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        toolchain: stable
+        override: true
+    
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libssl-dev pkg-config netcat-openbsd
+    
+    - name: Run Tunnel API integration test
+      run: |
+        cargo test --features "ssh,proto" --test tunnel_api_integration -- --ignored
+      env:
+        # Enable the tunnel API test specifically
+        DEDUPS_SSH_TEST: 1
+        # Set larger timeout for CI environment
+        RUST_TEST_THREADS: 1 

@@ -246,6 +246,8 @@ impl TestEnv {
             use_compression: true,
             #[cfg(feature = "proto")]
             compression_level: 3,
+            #[cfg(feature = "ssh")]
+            keep_alive: true,
         }
     }
 }
@@ -1315,6 +1317,8 @@ mod integration {
                 use_compression: true,
                 #[cfg(feature = "proto")]
                 compression_level: 3,
+                #[cfg(feature = "ssh")]
+                keep_alive: true,
             };
             
             println!("CLI options:");
