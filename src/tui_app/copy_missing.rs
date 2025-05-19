@@ -599,19 +599,37 @@ pub fn ui_copy_missing(frame: &mut Frame, app: &mut App) {
                 file_count_in_set,
                 set_total_size,
                 indent,
+                original_group_index,
+                original_set_index_in_group,
                 ..
             } => {
                 let indent_str = if *indent { "  " } else { "" };
-                ListItem::new(Line::from(Span::styled(
-                    format!(
-                        "{}Set {} ({} files, {})",
-                        indent_str,
-                        set_hash_preview,
-                        file_count_in_set,
-                        format_size(*set_total_size, DECIMAL)
-                    ),
-                    Style::default(),
-                )))
+                // If this set has only one file, show the file name instead of 'Set ...'
+                let is_single_file = *file_count_in_set == 1;
+                if is_single_file {
+                    // Get the file name from grouped_data
+                    let file_name = app.state.grouped_data
+                        .get(*original_group_index)
+                        .and_then(|group| group.sets.get(*original_set_index_in_group))
+                        .and_then(|set| set.files.first())
+                        .map(|f| f.path.file_name().unwrap_or_default().to_string_lossy().to_string())
+                        .unwrap_or_else(|| "(unknown)".to_string());
+                    ListItem::new(Line::from(Span::styled(
+                        format!("{}{}", indent_str, file_name),
+                        Style::default(),
+                    )))
+                } else {
+                    ListItem::new(Line::from(Span::styled(
+                        format!(
+                            "{}Set {} ({} files, {})",
+                            indent_str,
+                            set_hash_preview,
+                            file_count_in_set,
+                            format_size(*set_total_size, DECIMAL)
+                        ),
+                        Style::default(),
+                    )))
+                }
             }
         })
         .collect();
