@@ -754,8 +754,6 @@ pub fn add_media_options_to_cli(
 #[cfg(test)]
 mod tests {
     use super::*;
-    
-    
 
     /* // Helper to create a test file - This function is currently unused.
     fn create_test_file_info(path: &str, size: u64) -> FileInfo {

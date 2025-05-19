@@ -1,23 +1,12 @@
 use anyhow::Result;
-use crossterm::{
-    event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event as CEvent, KeyCode, KeyEvent,
-        KeyEventKind, KeyModifiers,
-    },
-    execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
-};
-use humansize::{format_size, DECIMAL};
-use num_cpus; // For displaying actual core count in auto mode
+use crossterm::event::{Event as CEvent, KeyCode, KeyEvent, KeyModifiers};
+// For displaying actual core count in auto mode
 use ratatui::prelude::*;
-use ratatui::widgets::*;
 use std::collections::HashMap; // For grouping
-use std::io::{stdout, Stdout};
 use std::path::{Path, PathBuf}; // Ensure Path is imported here
 use std::str::FromStr;
 use std::sync::mpsc as std_mpsc; // Alias to avoid conflict if crate::mpsc is used elsewhere
 use std::thread as std_thread; // Alias for clarity
-use std::time::{Duration, Instant};
 use tui_input::backend::crossterm::EventHandler; // For tui-input
 use tui_input::Input;
 
@@ -30,7 +19,7 @@ use crate::options::Options; // Using Options instead of Cli
 // Add the copy_missing module
 pub mod copy_missing;
 
-// Add the file_browser module 
+// Add the file_browser module
 pub mod file_browser;
 
 // Application state
@@ -98,8 +87,8 @@ pub struct AppState {
     pub selected_display_list_index: usize,
     pub selected_file_index_in_set: usize,
     pub selected_job_index: usize,
-    pub selected_destination_index: usize,  // New field for destination browser
-    pub destination_path: Option<PathBuf>,  // Current path for destination browsing
+    pub selected_destination_index: usize, // New field for destination browser
+    pub destination_path: Option<PathBuf>, // Current path for destination browsing
     pub jobs: Vec<Job>,
     pub active_panel: ActivePanel,
     pub default_selection_strategy: SelectionStrategy, // Store parsed strategy
@@ -107,10 +96,10 @@ pub struct AppState {
     pub input_mode: InputMode,
     pub current_input: Input,                 // Using tui-input crate
     pub file_for_copy_move: Option<FileInfo>, // Store file when prompting for dest
-    
+
     // File browser - using new module
     pub file_browser: Option<crate::tui_app::file_browser::FileBrowser>,
-    
+
     // Update mode - only copy newer files
     pub update_mode: bool,
 
@@ -184,8 +173,8 @@ impl App {
             selected_display_list_index: 0,
             selected_file_index_in_set: 0,
             selected_job_index: 0,
-            selected_destination_index: 0,  // New field for destination browser
-            destination_path: None,  // Current path for destination browsing
+            selected_destination_index: 0, // New field for destination browser
+            destination_path: None,        // Current path for destination browsing
             jobs: Vec::new(),
             active_panel: ActivePanel::Sets,
             default_selection_strategy: strategy,
@@ -323,7 +312,7 @@ impl App {
         app.state.is_copy_missing_mode = true;
         app.state.status_message =
             Some("Copy Missing Mode - Preparing to scan for files to copy...".to_string());
-            
+
         // Initialize destination to the target directory if specified
         if let Some(target) = &options.target {
             app.state.destination_path = Some(target.clone());
@@ -893,7 +882,7 @@ impl App {
                     // Regular mode - initiate copy action (existing implementation)
                     self.initiate_copy_action();
                 }
-            },
+            }
             KeyCode::Up => match self.state.active_panel {
                 ActivePanel::Sets => self.select_previous_set(),
                 ActivePanel::Files => self.select_previous_file_in_set(),
@@ -1640,7 +1629,7 @@ impl App {
             self.start_job_execution(&options_copy);
             return Ok(());
         }
-        
+
         // Original implementation for regular TUI mode
         if self.state.jobs.is_empty() {
             self.state.status_message = Some("No jobs to process.".to_string());
@@ -1945,90 +1934,98 @@ impl App {
     fn initiate_copy_missing_action(&mut self) {
         if self.state.active_panel == ActivePanel::Sets {
             // Get the selected item from display list
-            if let Some(item) = self.state
+            if let Some(item) = self
+                .state
                 .display_list
                 .get(self.state.selected_display_list_index)
             {
                 match item {
-                    DisplayListItem::SetEntry { 
-                        original_group_index, 
+                    DisplayListItem::SetEntry {
+                        original_group_index,
                         original_set_index_in_group,
-                        .. 
+                        ..
                     } => {
                         // Get the actual file from the grouped data
                         if let Some(group) = self.state.grouped_data.get(*original_group_index) {
                             if let Some(set) = group.sets.get(*original_set_index_in_group) {
-                                if let Some(file) = set.files.first() {  // The first file is the one missing
+                                if let Some(file) = set.files.first() {
+                                    // The first file is the one missing
                                     if let Some(dest_path) = &self.state.destination_path {
                                         // Create a job to copy the file to the destination
                                         self.state.jobs.push(Job {
                                             action: ActionType::Copy(dest_path.clone()),
                                             file_info: file.clone(),
                                         });
-                                        
+
                                         self.state.status_message = Some(format!(
                                             "Added job: Copy {} to {}",
                                             file.path.display(),
                                             dest_path.display()
                                         ));
-                                        
+
                                         // Switch to jobs panel to show the new job
                                         self.state.active_panel = ActivePanel::Jobs;
                                         self.state.selected_job_index = self.state.jobs.len() - 1;
                                     } else {
                                         // No destination selected yet
                                         self.state.status_message = Some(
-                                            "Please select a destination directory first".to_string()
+                                            "Please select a destination directory first"
+                                                .to_string(),
                                         );
                                     }
                                 }
                             }
                         }
-                    },
+                    }
                     DisplayListItem::Folder { .. } => {
                         // Folders cannot be copied directly, must select a file
-                        self.state.status_message = Some(
-                            "Please select a specific file to copy".to_string()
-                        );
+                        self.state.status_message =
+                            Some("Please select a specific file to copy".to_string());
+                    }
                 }
             }
         }
     }
-}
 
     // Add this new method
     pub fn start_job_execution(&mut self, _options: &Options) {
         if self.state.jobs.is_empty() {
             self.state.status_message = Some("No jobs to process.".to_string());
-            self.state.log_messages.push("No jobs to process.".to_string());
+            self.state
+                .log_messages
+                .push("No jobs to process.".to_string());
             return;
         }
 
         // Set the dry_run flag based on app state
         let dry_run_mode = self.state.dry_run;
         if dry_run_mode {
-            self.state.log_messages.push("DRY RUN MODE: Simulating actions without making changes".to_string());
+            self.state
+                .log_messages
+                .push("DRY RUN MODE: Simulating actions without making changes".to_string());
         }
 
         if self.state.update_mode {
-            self.state.log_messages.push("UPDATE MODE: Only copying newer files".to_string());
+            self.state
+                .log_messages
+                .push("UPDATE MODE: Only copying newer files".to_string());
         }
 
         self.state.is_processing_jobs = true;
-        
+
         let status_prefix = match (dry_run_mode, self.state.update_mode) {
             (true, true) => "[DRY RUN][UPDATE MODE]",
             (true, false) => "[DRY RUN]",
             (false, true) => "[UPDATE MODE]",
             (false, false) => "",
         };
-        
+
         self.state.job_processing_message = format!("{} Processing jobs...", status_prefix);
         self.state.status_message = Some(self.state.job_processing_message.clone());
 
         let total_jobs = self.state.jobs.len();
         self.state.job_progress = (0, total_jobs);
-        
+
         // Group jobs by action type
         let mut copy_jobs = Vec::new();
         let mut move_jobs = Vec::new();
@@ -2051,31 +2048,33 @@ impl App {
         // Execute COPY jobs
         if !copy_jobs.is_empty() {
             // Group copy jobs by destination for efficiency
-            let mut by_dest: std::collections::HashMap<&std::path::Path, Vec<&FileInfo>> = std::collections::HashMap::new();
+            let mut by_dest: std::collections::HashMap<&std::path::Path, Vec<&FileInfo>> =
+                std::collections::HashMap::new();
             for (dest, file) in copy_jobs {
                 by_dest.entry(dest.as_path()).or_default().push(file);
             }
 
             for (dest, files) in by_dest {
                 // Update status message
-                self.state.status_message = Some(format!("{} Copying to {}", status_prefix, dest.display()));
-                
+                self.state.status_message =
+                    Some(format!("{} Copying to {}", status_prefix, dest.display()));
+
                 // Convert to owned FileInfo objects
                 let owned_files: Vec<FileInfo> = files.iter().map(|&f| f.clone()).collect();
-                
+
                 if self.state.update_mode {
                     // Use update_mode for copying (only newer files)
                     match crate::update_mode::update_files(&owned_files, dest, dry_run_mode, None) {
                         Ok(result) => {
                             // Add all log messages
                             self.state.log_messages.extend(result.log_messages);
-                            
+
                             // Add any errors
                             for err in result.errors {
                                 self.state.log_messages.push(format!("ERROR: {}", err));
                                 fail_count += 1;
                             }
-                            
+
                             // Count successes
                             success_count += result.copied_files;
                             updated_count += result.updated_files;
@@ -2083,10 +2082,12 @@ impl App {
                         }
                         Err(e) => {
                             fail_count += files.len();
-                            self.state.log_messages.push(format!("ERROR during update: {}", e));
+                            self.state
+                                .log_messages
+                                .push(format!("ERROR during update: {}", e));
                         }
-                }
-            } else {
+                    }
+                } else {
                     // Use regular copy for all files
                     match crate::file_utils::copy_missing_files(&owned_files, dest, dry_run_mode) {
                         Ok((count, logs)) => {
@@ -2095,7 +2096,9 @@ impl App {
                         }
                         Err(e) => {
                             fail_count += files.len();
-                            self.state.log_messages.push(format!("ERROR during copy: {}", e));
+                            self.state
+                                .log_messages
+                                .push(format!("ERROR during copy: {}", e));
                         }
                     }
                 }
@@ -2105,17 +2108,19 @@ impl App {
         // Execute MOVE jobs
         if !move_jobs.is_empty() {
             // Group by destination
-            let mut by_dest: std::collections::HashMap<&std::path::Path, Vec<&FileInfo>> = std::collections::HashMap::new();
+            let mut by_dest: std::collections::HashMap<&std::path::Path, Vec<&FileInfo>> =
+                std::collections::HashMap::new();
             for (dest, file) in move_jobs {
                 by_dest.entry(dest.as_path()).or_default().push(file);
             }
 
             for (dest, files) in by_dest {
-                self.state.status_message = Some(format!("{} Moving to {}", status_prefix, dest.display()));
-                
+                self.state.status_message =
+                    Some(format!("{} Moving to {}", status_prefix, dest.display()));
+
                 // Convert to owned FileInfo objects
                 let owned_files: Vec<FileInfo> = files.iter().map(|&f| f.clone()).collect();
-                
+
                 match crate::file_utils::move_files(&owned_files, dest, dry_run_mode) {
                     Ok((count, logs)) => {
                         success_count += count;
@@ -2123,7 +2128,9 @@ impl App {
                     }
                     Err(e) => {
                         fail_count += files.len();
-                        self.state.log_messages.push(format!("ERROR during move: {}", e));
+                        self.state
+                            .log_messages
+                            .push(format!("ERROR during move: {}", e));
                     }
                 }
             }
@@ -2132,10 +2139,10 @@ impl App {
         // Execute DELETE jobs
         if !delete_jobs.is_empty() {
             self.state.status_message = Some(format!("{} Deleting files", status_prefix));
-            
+
             // Convert to owned FileInfo objects
             let owned_files: Vec<FileInfo> = delete_jobs.iter().map(|&f| f.clone()).collect();
-            
+
             match crate::file_utils::delete_files(&owned_files, dry_run_mode) {
                 Ok((count, logs)) => {
                     success_count += count;
@@ -2143,7 +2150,9 @@ impl App {
                 }
                 Err(e) => {
                     fail_count += delete_jobs.len();
-                    self.state.log_messages.push(format!("ERROR during delete: {}", e));
+                    self.state
+                        .log_messages
+                        .push(format!("ERROR during delete: {}", e));
                 }
             }
         }
@@ -2154,23 +2163,23 @@ impl App {
 
         // Create summary message
         let mut summary = String::new();
-        
+
         if dry_run_mode {
             summary.push_str("[DRY RUN] Would have ");
         }
-        
+
         if self.state.update_mode {
             summary.push_str(&format!(
-                "processed {} jobs: {} copied, {} updated, {} skipped, {} failed", 
+                "processed {} jobs: {} copied, {} updated, {} skipped, {} failed",
                 total_jobs, success_count, updated_count, skipped_count, fail_count
             ));
-                    } else {
+        } else {
             summary.push_str(&format!(
-                "processed {} jobs: {} succeeded, {} failed", 
+                "processed {} jobs: {} succeeded, {} failed",
                 total_jobs, success_count, fail_count
             ));
         }
-        
+
         self.state.job_processing_message = summary.clone();
         self.state.status_message = Some(summary);
         self.state.jobs.clear();

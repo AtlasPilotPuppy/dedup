@@ -7,7 +7,6 @@ use std::sync::mpsc;
 
 use crate::file_utils::{DuplicateSet, SelectionStrategy};
 use crate::options::Options;
-use crate::tui_app;
 
 /// Set up the logger based on verbosity level and log file
 pub fn setup_logger(verbosity: u8, log_file: Option<&Path>) -> Result<()> {
@@ -249,7 +248,9 @@ fn handle_multi_directory_mode(options: &Options) -> Result<()> {
             ));
             pb.set_style(
                 indicatif::ProgressStyle::default_bar()
-                    .template("{prefix:.bold.dim} [{bar:40.green/blue}] {pos}/{len} ({percent}%) {msg}")
+                    .template(
+                        "{prefix:.bold.dim} [{bar:40.green/blue}] {pos}/{len} ({percent}%) {msg}",
+                    )
                     .unwrap()
                     .progress_chars("█▓▒░  "),
             );
@@ -268,16 +269,14 @@ fn handle_multi_directory_mode(options: &Options) -> Result<()> {
             pb.enable_steady_tick(std::time::Duration::from_millis(100));
             pb
         });
-        
-        let copy_progress_tuple = copy_pb_overall
-            .as_ref()
-            .zip(copy_pb_current_op.as_ref());
+
+        let copy_progress_tuple = copy_pb_overall.as_ref().zip(copy_pb_current_op.as_ref());
 
         match crate::file_utils::copy_missing_files_with_progress(
             &comparison_result.missing_in_target,
             &target_dir,
             options.dry_run,
-            copy_progress_tuple.map(|(o,c)| (o.clone(), c.clone())) // Clone PBs to pass ownership
+            copy_progress_tuple.map(|(o, c)| (o.clone(), c.clone())), // Clone PBs to pass ownership
         ) {
             Ok((count, logs)) => {
                 if let Some(pb) = copy_pb_overall.as_ref() {
@@ -591,8 +590,10 @@ fn handle_copy_missing_mode(options: &Options) -> Result<()> {
         .zip(comparison_pb_current_op.as_ref());
 
     // Find missing files that aren't in the target directory
-    let comparison_result = 
-        crate::file_utils::compare_directories(options, comparison_progress_tuple.map(|(o,c)| (o,c)))?;
+    let comparison_result = crate::file_utils::compare_directories(
+        options,
+        comparison_progress_tuple.map(|(o, c)| (o, c)),
+    )?;
 
     if let Some(pb) = comparison_pb_overall.as_ref() {
         pb.finish_with_message("Comparison complete.");
@@ -610,36 +611,39 @@ fn handle_copy_missing_mode(options: &Options) -> Result<()> {
 
         // Setup progress bars for CLI mode if requested (reuse multi_progress_option)
         // if options.progress {
-        let overall_pb_copy = multi_progress_option.as_ref().map(|mp| {
-            let pb = mp.add(indicatif::ProgressBar::new(comparison_result.missing_in_target.len() as u64));
-            pb.set_style(indicatif::ProgressStyle::default_bar()
+        let overall_pb_copy =
+            multi_progress_option.as_ref().map(|mp| {
+                let pb = mp.add(indicatif::ProgressBar::new(
+                    comparison_result.missing_in_target.len() as u64,
+                ));
+                pb.set_style(indicatif::ProgressStyle::default_bar()
                 .template("{prefix:.bold.dim} [{bar:40.cyan/blue}] {pos}/{len} ({percent}%) {msg}")
                 .unwrap()
                 .progress_chars("█▓▒░  "));
-            pb.set_prefix("Phase 2/2: Copying Files");
-            pb
-        });
-            
+                pb.set_prefix("Phase 2/2: Copying Files");
+                pb
+            });
+
         let current_pb_copy = multi_progress_option.as_ref().map(|mp| {
             let pb = mp.add(indicatif::ProgressBar::new(0));
-            pb.set_style(indicatif::ProgressStyle::default_bar()
-                .template("{prefix:.bold.dim} [{spinner}] {msg}")
-                .unwrap());
+            pb.set_style(
+                indicatif::ProgressStyle::default_bar()
+                    .template("{prefix:.bold.dim} [{spinner}] {msg}")
+                    .unwrap(),
+            );
             pb.set_prefix("Current File Copy");
             pb.enable_steady_tick(std::time::Duration::from_millis(100));
             pb
         });
-            
-        let copy_progress_tuple = overall_pb_copy
-            .as_ref()
-            .zip(current_pb_copy.as_ref());
+
+        let copy_progress_tuple = overall_pb_copy.as_ref().zip(current_pb_copy.as_ref());
 
         // Copy missing files to target directory with progress
         match crate::file_utils::copy_missing_files_with_progress(
             &comparison_result.missing_in_target,
             &target_dir,
             options.dry_run,
-            copy_progress_tuple.map(|(o,c)| (o.clone(), c.clone())),
+            copy_progress_tuple.map(|(o, c)| (o.clone(), c.clone())),
         ) {
             Ok((count, logs)) => {
                 if let Some(pb) = overall_pb_copy.as_ref() {
@@ -648,7 +652,7 @@ fn handle_copy_missing_mode(options: &Options) -> Result<()> {
                 if let Some(pb) = current_pb_copy.as_ref() {
                     pb.finish_with_message("");
                 }
-                    
+
                 // Display all log messages
                 for log_msg in logs {
                     // Only log to file what hasn't already been logged in the function
@@ -687,7 +691,7 @@ fn handle_copy_missing_mode(options: &Options) -> Result<()> {
         println!("Run without --dry-run to perform actual operations.");
         log::info!("Dry run completed - no files were modified");
     }
-    
+
     // Clear multi_progress if it was used
     if let Some(mp) = multi_progress_option {
         if let Err(e) = mp.clear() {
@@ -703,6 +707,8 @@ pub fn run_tui_app_for_mode(options: &Options, is_copy_missing: bool) -> Result<
         crate::tui_app::copy_missing::run_copy_missing_tui(options)
     } else {
         // Fallback for now, since the original TUI mode is not accessible
-        Err(anyhow::anyhow!("Regular TUI mode not implemented in this version"))
+        Err(anyhow::anyhow!(
+            "Regular TUI mode not implemented in this version"
+        ))
     }
 }
