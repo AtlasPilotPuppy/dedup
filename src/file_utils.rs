@@ -1459,7 +1459,7 @@ pub fn compare_directories(
     }
 
     let mut missing_files = Vec::new();
-    let mut all_duplicate_sets = Vec::new();
+    let mut all_duplicate_sets: Vec<DuplicateSet> = Vec::new();
 
     for (idx, source_dir) in source_dirs.iter().enumerate() {
         if let Some(pb) = current_op_pb.as_ref() {
@@ -1882,32 +1882,162 @@ pub fn compare_directories_with_progress(
         send_status(1, format!("Source directory {}: {}", i + 1, source.display()));
     }
 
-    // Create progress reporting tuple for compare_directories
-    let (overall_tx, _current_tx) = (tx_progress.clone(), tx_progress.clone());
+    // Scan target directory first
+    send_status(1, format!("Scanning target directory: {}", target_dir.display()));
     
-    // Create closure-based progress callback
-    let _progress_callback = move |stage: &str, progress: f32, message: &str| {
-        let _ = overall_tx.send(crate::tui_app::ScanMessage::StatusUpdate(
-            1, // Stage 1 for scanning
-            format!("{}: {}% - {}", stage, (progress * 100.0) as u32, message),
+    // Count files to provide better progress updates
+    let mut total_files_to_scan = 0;
+    let mut files_scanned = 0;
+    
+    // First count all files in all directories for better progress reporting
+    for dir in source_dirs.iter().chain(std::iter::once(&target_dir)) {
+        match count_files_in_directory(dir, &FilterRules::new(options)?) {
+            Ok(count) => {
+                total_files_to_scan += count;
+                send_status(1, format!("Found {} files in {}", count, dir.display()));
+            },
+            Err(e) => {
+                log::warn!("Failed to count files in {}: {}", dir.display(), e);
+            }
+        }
+    }
+    
+    // Update progress with total file count
+    send_status(1, format!("Will scan {} total files", total_files_to_scan));
+    
+    // Create custom progress callback for scanning
+    let tx_clone = tx_progress.clone();
+    let mut files_scanned = 0;
+    let scan_progress_callback = move |files_processed: usize| {
+        files_scanned += files_processed;
+        let percent = if total_files_to_scan > 0 {
+            (files_scanned as f32 / total_files_to_scan as f32) * 100.0
+        } else {
+            0.0
+        };
+        
+        // Send progress update
+        let _ = tx_clone.send(crate::tui_app::ScanMessage::StatusUpdate(
+            2, // Stage 2 for scanning
+            format!("Scanning files: {}/{} ({:.1}%)", files_scanned, total_files_to_scan, percent),
         ));
     };
 
-    send_status(2, "Scanning directories to find missing files...".to_string());
+    // Scan target directory 
+    send_status(2, format!("Scanning target directory: {}", target_dir.display()));
+    let target_files = scan_directory(options, &target_dir, None)?;
+    let files_in_target = target_files.len();
+    send_status(2, format!("Scanning files: {}/{} ({:.1}%)", 
+        files_in_target, 
+        total_files_to_scan,
+        if total_files_to_scan > 0 {(files_in_target as f32 / total_files_to_scan as f32) * 100.0} else {0.0}
+    ));
 
-    // Compare directories with custom progress bars for TUI
-    // TODO: Modify compare_directories to accept a callback for progress updates
-    // For now, call the existing function
-    let result = compare_directories(options, None)?;
+    // Create hash map for quick lookup
+    let mut target_files_map: HashMap<String, FileInfo> = HashMap::new();
+    for file_info in &target_files {
+        let file_name = file_info.path.file_name().unwrap().to_string_lossy().to_string();
+        target_files_map.insert(file_name, file_info.clone());
+    }
+
+    let mut missing_files = Vec::new();
+    let mut all_duplicate_sets: Vec<DuplicateSet> = Vec::new();
+
+    // Scan each source directory
+    for (i, source_dir) in source_dirs.iter().enumerate() {
+        send_status(2, format!("Scanning source directory {}: {}", i+1, source_dir.display()));
+        
+        // Scan source directory
+        let source_files = scan_directory(options, source_dir, None)?;
+        let files_in_source = source_files.len();
+        let processed_so_far = files_in_target + files_in_source; 
+        send_status(2, format!("Scanning files: {}/{} ({:.1}%)", 
+            processed_so_far, 
+            total_files_to_scan,
+            if total_files_to_scan > 0 {(processed_so_far as f32 / total_files_to_scan as f32) * 100.0} else {0.0}
+        ));
+        
+        log::info!(
+            "Source directory scan complete. Found {} files.",
+            source_files.len()
+        );
+
+        // Process missing files - files in source that aren't in target
+        for file_info in &source_files {
+            let file_name = file_info.path.file_name().unwrap().to_string_lossy().to_string();
+            
+            if !target_files_map.contains_key(&file_name) {
+                missing_files.push(file_info.clone());
+            }
+        }
+        
+        send_status(2, format!("Found {} missing files so far", missing_files.len()));
+        
+        // If deduplication is enabled, find duplicate files across directories
+        if options.deduplicate {
+            send_status(3, "Deduplication enabled, finding duplicates across directories...".to_string());
+            
+            // Process duplicates
+            // TODO: Implement better duplicate detection across directories
+            // For now, just find files with same name and compare their content
+            for source_file in &source_files {
+                let source_name = source_file.path.file_name().unwrap().to_string_lossy().to_string();
+                
+                if let Some(target_file) = target_files_map.get(&source_name) {
+                    // Calculate hashes if needed
+                    let source_hash = match source_file.hash.clone() {
+                        Some(hash) => hash,
+                        None => calculate_hash(&source_file.path, &options.algorithm)?,
+                    };
+                    
+                    let target_hash = match target_file.hash.clone() {
+                        Some(hash) => hash,
+                        None => calculate_hash(&target_file.path, &options.algorithm)?,
+                    };
+                    
+                    // If hashes match, they are duplicates
+                    if source_hash == target_hash {
+                        // Check if we already have a set with this hash
+                        let mut found = false;
+                        for set in &mut all_duplicate_sets {
+                            if set.hash == source_hash {
+                                // Add to existing set
+                                set.files.push(source_file.clone());
+                                found = true;
+                                break;
+                            }
+                        }
+                        
+                        if !found {
+                            // Create a new set
+                            let duplicate_set = DuplicateSet {
+                                hash: source_hash,
+                                size: source_file.size,
+                                files: vec![target_file.clone(), source_file.clone()],
+                            };
+                            all_duplicate_sets.push(duplicate_set);
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     // Report completion
     send_status(3, format!(
-        "Comparison complete. Found {} missing files and {} duplicate sets.",
-        result.missing_in_target.len(),
-        result.duplicates.len()
+        "Comparison complete. Found {} missing files {}.",
+        missing_files.len(),
+        if options.deduplicate {
+            format!("and {} duplicate sets", all_duplicate_sets.len())
+        } else {
+            String::new()
+        }
     ));
 
-    Ok(result)
+    Ok(DirectoryComparisonResult {
+        missing_in_target: missing_files,
+        duplicates: all_duplicate_sets,
+    })
 }
 
 #[cfg(test)]

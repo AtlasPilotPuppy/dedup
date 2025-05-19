@@ -225,6 +225,7 @@ impl TestEnv {
             media_similarity: 90,
             media_dedup_options: MediaDedupOptions::default(),
             copy_missing: false,
+            update_mode: false,
         }
     }
 
@@ -1024,6 +1025,7 @@ mod copy_missing_tests {
             media_dedup_options: MediaDedupOptions::default(),
             copy_missing: true,
             app_mode: dedups::app_mode::AppMode::CopyMissing,
+            update_mode: false,
         };
 
         // Use the compare_directories function to find missing files
@@ -1126,6 +1128,7 @@ mod copy_missing_tests {
             media_dedup_options: MediaDedupOptions::default(),
             copy_missing: true,
             app_mode: dedups::app_mode::AppMode::CopyMissing,
+            update_mode: false,
         };
 
         // Get the target directory
@@ -1207,6 +1210,7 @@ mod copy_missing_tests {
             media_dedup_options: MediaDedupOptions::default(),
             copy_missing: true,
             app_mode: dedups::app_mode::AppMode::CopyMissing,
+            update_mode: false,
         };
 
         // Get the target directory

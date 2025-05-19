@@ -30,6 +30,9 @@ use crate::options::Options; // Using Options instead of Cli
 // Add the copy_missing module
 pub mod copy_missing;
 
+// Add the file_browser module 
+pub mod file_browser;
+
 // Application state
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)] // Added PartialEq, Eq
 pub enum ActionType {
@@ -104,6 +107,12 @@ pub struct AppState {
     pub input_mode: InputMode,
     pub current_input: Input,                 // Using tui-input crate
     pub file_for_copy_move: Option<FileInfo>, // Store file when prompting for dest
+    
+    // File browser - using new module
+    pub file_browser: Option<crate::tui_app::file_browser::FileBrowser>,
+    
+    // Update mode - only copy newer files
+    pub update_mode: bool,
 
     // Fields for TUI loading progress
     pub is_loading: bool,
@@ -206,6 +215,8 @@ impl App {
             job_progress: (0, 0),
             dry_run: options.dry_run,    // Initialize from Options args
             is_copy_missing_mode: false, // Set to false for regular mode
+            file_browser: None,
+            update_mode: false,
         };
 
         // Always perform async scan for TUI
@@ -1622,6 +1633,15 @@ impl App {
     }
 
     fn process_pending_jobs(&mut self) -> Result<()> {
+        // For copy_missing mode, use the new start_job_execution method
+        if self.state.is_copy_missing_mode {
+            // Use a copy instead of a reference to avoid the borrow issue
+            let options_copy = self.options_config.clone();
+            self.start_job_execution(&options_copy);
+            return Ok(());
+        }
+        
+        // Original implementation for regular TUI mode
         if self.state.jobs.is_empty() {
             self.state.status_message = Some("No jobs to process.".to_string());
             self.state
@@ -1970,1230 +1990,190 @@ impl App {
                         self.state.status_message = Some(
                             "Please select a specific file to copy".to_string()
                         );
-                    }
                 }
             }
         }
     }
 }
 
-type TerminalBackend = CrosstermBackend<Stdout>;
-
-pub fn run_tui_app(options: &Options) -> Result<()> {
-    log::info!("Starting TUI with progress_tui={}", options.progress_tui);
-
-    // Terminal initialization
-    enable_raw_mode()?;
-    let mut stdout = stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
-
-    let backend = CrosstermBackend::new(stdout);
-
-    let mut terminal = Terminal::new(backend)?;
-    terminal.hide_cursor()?;
-
-    // Create app state
-    let mut app = App::new(options);
-
-    // Main loop
-    let show_tui_progress = options.progress_tui;
-    log::info!(
-        "Running main loop with show_tui_progress={}",
-        show_tui_progress
-    );
-    let result = run_main_loop(&mut terminal, &mut app, show_tui_progress);
-
-    // Cleanup and restore terminal
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
-    terminal.show_cursor()?;
-
-    // If there was an error, log it and return it
-    if let Err(err) = &result {
-        log::error!("TUI error: {}", err);
-    }
-
-    result
-}
-
-fn run_main_loop(
-    terminal: &mut Terminal<TerminalBackend>,
-    app: &mut App,
-    show_tui_progress: bool,
-) -> Result<()> {
-    let tick_rate = Duration::from_millis(50); // Faster tick rate for better responsiveness
-    let mut last_tick = Instant::now();
-
-    // Handle messages from scan thread immediately for the first frame
-    if show_tui_progress {
-        log::debug!("Initial call to handle_scan_messages");
-        app.handle_scan_messages();
-    }
-
-    loop {
-        // Handle messages from scan thread first
-        if show_tui_progress {
-            // Only check messages if async scan was started
-            log::trace!("Calling handle_scan_messages in loop");
-            app.handle_scan_messages();
+    // Add this new method
+    pub fn start_job_execution(&mut self, _options: &Options) {
+        if self.state.jobs.is_empty() {
+            self.state.status_message = Some("No jobs to process.".to_string());
+            self.state.log_messages.push("No jobs to process.".to_string());
+            return;
         }
 
-        terminal.draw(|f| ui(f, app))?;
-
-        let timeout = tick_rate
-            .checked_sub(last_tick.elapsed())
-            .unwrap_or_else(|| Duration::from_secs(0));
-
-        if crossterm::event::poll(timeout)? {
-            if let CEvent::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
-                    app.on_key(key);
-                }
-            }
+        // Set the dry_run flag based on app state
+        let dry_run_mode = self.state.dry_run;
+        if dry_run_mode {
+            self.state.log_messages.push("DRY RUN MODE: Simulating actions without making changes".to_string());
         }
 
-        // Reset the tick timer even if no event was processed
-        if last_tick.elapsed() >= tick_rate {
-            last_tick = Instant::now();
+        if self.state.update_mode {
+            self.state.log_messages.push("UPDATE MODE: Only copying newer files".to_string());
         }
 
-        if app.should_quit {
-            return Ok(());
-        }
-    }
-}
-
-// Helper function to parse progress information from loading messages
-fn parse_progress_from_message(
-    message: &str,
-) -> (String, String, Option<f64>, Option<(usize, usize)>) {
-    // Extract stage from messages like "📁 [1/3] File Discovery: Found 196200 files..."
-    let stage = if message.contains("[0/3]") {
-        "0/3 Pre-scan".to_string()
-    } else if message.contains("[1/3]") {
-        "1/3 Discovery".to_string()
-    } else if message.contains("[2/3]") {
-        "2/3 Size Analysis".to_string()
-    } else if message.contains("[3/3]") {
-        "3/3 Hashing".to_string()
-    } else if message.contains("media files") {
-        "4/4 Media Analysis".to_string()
-    } else {
-        "Loading".to_string()
-    };
-
-    // Extract file counts and percentages
-    let mut progress_text = message.to_string();
-    let mut file_counts: Option<(usize, usize)> = None;
-
-    // Try to extract file counts for a better display format
-    if let Some(count_start) = message.find("Found ") {
-        if let Some(count_end) = message[count_start..].find(" files") {
-            let file_count_str = &message[count_start + 6..count_start + count_end];
-            progress_text = format!("Found {} files", file_count_str);
-        }
-    }
-
-    // Extract file count in format "123/456 files"
-    if let Some(slash_pos) = message.find("/") {
-        if let Some(files_end) = message[slash_pos..].find(" files") {
-            if let Ok(current) = message[..slash_pos].trim().parse::<usize>() {
-                if let Ok(total) = message[slash_pos + 1..slash_pos + files_end]
-                    .trim()
-                    .parse::<usize>()
-                {
-                    file_counts = Some((current, total));
-                    progress_text = format!("Processed {}/{} files", current, total);
-                }
-            }
-        }
-    }
-
-    // Extract "Hashed 10/20 groups" format
-    if let Some(hashed_start) = message.find("Hashed ") {
-        if let Some(slash_pos) = message[hashed_start..].find("/") {
-            if let Some(groups_end) = message[hashed_start + slash_pos..].find(" groups") {
-                if let Ok(current) = message[hashed_start + 7..hashed_start + slash_pos]
-                    .trim()
-                    .parse::<usize>()
-                {
-                    if let Ok(total) = message
-                        [hashed_start + slash_pos + 1..hashed_start + slash_pos + groups_end]
-                        .trim()
-                        .parse::<usize>()
-                    {
-                        file_counts = Some((current, total));
-                        progress_text = format!("Hashed {}/{} groups", current, total);
-                    }
-                }
-            }
-        }
-    }
-
-    // Extract detailed progress information from the stage
-    if message.contains("duplicate sets") {
-        if let Some(sets_start) = message.find("Found ") {
-            if let Some(sets_end) = message[sets_start..].find(" duplicate sets") {
-                let sets_count = &message[sets_start + 6..sets_start + sets_end];
-                progress_text = format!("Found {} duplicate sets", sets_count);
-            }
-        }
-    }
-
-    // Extract scanning path for better display
-    if message.contains("Scanning:") {
-        progress_text = message.to_string();
-    }
-
-    // Try to extract percentage values from messages containing them
-    let percentage = if let Some(pct_start) = message.find("(") {
-        if let Some(pct_end) = message[pct_start..].find("%)") {
-            let pct_str = &message[pct_start + 1..pct_start + pct_end];
-            pct_str.parse::<f64>().ok().map(|pct| pct.clamp(0.0, 100.0))
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    // Ensure file counts produce valid ratios if they're going to be used for progress bars
-    if let Some((current, total)) = file_counts {
-        if total == 0 {
-            // Avoid division by zero by ensuring total is at least 1
-            let file_counts = Some((current.min(1), 1));
-            return (stage, progress_text, percentage, file_counts);
-        }
-    }
-
-    (stage, progress_text, percentage, file_counts)
-}
-
-fn format_file_size(size: u64, raw_sizes: bool) -> String {
-    if raw_sizes {
-        format!("{} bytes", size)
-    } else {
-        format_size(size, DECIMAL)
-    }
-}
-
-fn ui(frame: &mut Frame, app: &mut App) {
-    // If in copy missing mode, use the specialized UI
-    if app.state.is_copy_missing_mode {
-        copy_missing::ui_copy_missing(frame, app);
-        return;
-    }
-
-    // Regular deduplication mode UI continues below
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3), // Title
-            Constraint::Length(3), // Status
-            Constraint::Min(0),    // Main content
-            Constraint::Length(5), // Log area (fixed height for now)
-            Constraint::Length(1), // Progress bar (if any)
-            Constraint::Length(1), // Help bar (always visible)
-        ])
-        .split(frame.size());
-
-    if app.state.is_loading && app.scan_rx.is_some() {
-        // Show loading screen with two progress bars - one for total progress, one for stage progress
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Percentage(20), // Upper space
-                Constraint::Length(3),      // Title and global progress
-                Constraint::Length(1),      // Spacing
-                Constraint::Length(3),      // Stage-specific progress
-                Constraint::Percentage(20), // Lower space
-            ])
-            .split(frame.size());
-
-        // Extract progress information from loading message
-        let (stage_str, progress_text, percentage, file_counts) =
-            parse_progress_from_message(&app.state.loading_message);
-
-        // Calculate the total progress based on the stage
-        let (current_stage, total_stages) = parse_stage_numbers(&stage_str);
-        let total_progress = if let (Some(current), Some(total), Some(pct)) =
-            (current_stage, total_stages, percentage)
-        {
-            // Overall progress = (completed stages + current stage progress)
-            ((current - 1) as f64 / total as f64) + (pct / 100.0 / total as f64)
-        } else if let (Some(current), Some(total)) = (current_stage, total_stages) {
-            // If no percentage but we have stage numbers, use simple stage-based progress
-            if let Some((count, total_count)) = file_counts {
-                // If we have file counts, use those for more granular progress
-                ((current - 1) as f64 / total as f64)
-                    + ((count as f64 / total_count as f64) / total as f64)
-            } else {
-                // Otherwise just use the stage number
-                (current as f64 - 0.5) / total as f64
-            }
-        } else {
-            // Indeterminate if we can't extract actual values
-            let now = std::time::Instant::now();
-            let secs = now.elapsed().as_secs_f64();
-            (secs % 2.0) / 2.0 // Pulse every 2 seconds
+        self.state.is_processing_jobs = true;
+        
+        let status_prefix = match (dry_run_mode, self.state.update_mode) {
+            (true, true) => "[DRY RUN][UPDATE MODE]",
+            (true, false) => "[DRY RUN]",
+            (false, true) => "[UPDATE MODE]",
+            (false, false) => "",
         };
+        
+        self.state.job_processing_message = format!("{} Processing jobs...", status_prefix);
+        self.state.status_message = Some(self.state.job_processing_message.clone());
 
-        // Top bar: Total progress
-        let total_progress_text =
-            if let (Some(current), Some(total)) = (current_stage, total_stages) {
-                if let Some((count, total_count)) = file_counts {
-                    format!(
-                        "Total Progress: Stage {} of {} - {}/{} ({:.1}% Complete)",
-                        current,
-                        total,
-                        count,
-                        total_count,
-                        total_progress * 100.0
-                    )
-                } else {
-                    format!(
-                        "Total Progress: Stage {} of {} - {:.1}% Complete",
-                        current,
-                        total,
-                        total_progress * 100.0
-                    )
-                }
-            } else {
-                "Processing...".to_string()
-            };
+        let total_jobs = self.state.jobs.len();
+        self.state.job_progress = (0, total_jobs);
+        
+        // Group jobs by action type
+        let mut copy_jobs = Vec::new();
+        let mut move_jobs = Vec::new();
+        let mut delete_jobs = Vec::new();
 
-        let total_progress_gauge = Gauge::default()
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("Overall Progress"),
-            )
-            .gauge_style(Style::default().fg(Color::Cyan).bg(Color::Black))
-            .label(total_progress_text)
-            .ratio(total_progress.clamp(0.0, 1.0));
-
-        frame.render_widget(total_progress_gauge, chunks[1]);
-
-        // Stage-specific progress (bottom bar)
-        // Use extracted percentage if available, otherwise animate or use file counts
-        let stage_progress_value = if let Some(pct) = percentage {
-            pct / 100.0
-        } else if let Some((count, total)) = file_counts {
-            if total > 0 {
-                count as f64 / total as f64
-            } else {
-                0.0
+        for job in &self.state.jobs {
+            match &job.action {
+                ActionType::Copy(dest) => copy_jobs.push((dest, &job.file_info)),
+                ActionType::Move(dest) => move_jobs.push((dest, &job.file_info)),
+                ActionType::Delete => delete_jobs.push(&job.file_info),
+                _ => {} // Ignore other job types
             }
-        } else {
-            // Animate when no percentage available
-            let now = std::time::Instant::now();
-            let secs = now.elapsed().as_secs_f64();
-            (secs % 3.0) / 3.0 // Cycles every 3 seconds (0.0 to 1.0)
-        };
-
-        // Ensure stage_progress_value is always between 0.0 and 1.0
-        let stage_progress_value = stage_progress_value.clamp(0.0, 1.0);
-
-        // Enhance stage description with more detail
-        let stage_details = match stage_str.as_str() {
-            "0/3 Pre-scan" => "Counting files for accurate progress tracking",
-            "1/3 Discovery" => "Scanning filesystem and grouping files by size",
-            "2/3 Size Analysis" => "Analyzing file groups with identical sizes",
-            "3/3 Hashing" => "Computing hash values to identify duplicates",
-            "4/4 Media Analysis" => "Analyzing media files for similarities",
-            _ => "",
-        };
-
-        let stage_gauge = Gauge::default()
-            .block(Block::default().borders(Borders::ALL).title(Span::styled(
-                format!("{} - {}", stage_str, stage_details),
-                Style::default().add_modifier(Modifier::BOLD),
-            )))
-            .gauge_style(Style::default().fg(Color::White).bg(Color::Black))
-            .label(progress_text)
-            .ratio(stage_progress_value);
-
-        frame.render_widget(stage_gauge, chunks[3]);
-    } else if app.state.input_mode == InputMode::Settings {
-        // Basic placeholder for settings UI
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .margin(2)
-            .constraints([
-                Constraint::Length(3), // Title
-                Constraint::Min(10),   // Settings options
-                Constraint::Length(1), // Hint
-            ])
-            .split(frame.size());
-
-        let title = Paragraph::new("--- Settings Menu ---")
-            .alignment(Alignment::Center)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("Settings (Ctrl+S to enter/Esc to exit)"),
-            );
-        frame.render_widget(title, chunks[0]);
-
-        let mut strategy_style = Style::default();
-        let mut algo_style = Style::default();
-        let mut parallel_style = Style::default();
-        let mut sort_criterion_style = Style::default();
-        let mut sort_order_style = Style::default();
-        let mut media_mode_style = Style::default();
-        let mut media_resolution_style = Style::default();
-        let mut media_format_style = Style::default();
-        let mut media_similarity_style = Style::default();
-
-        match app.state.selected_setting_category_index {
-            0 => {
-                strategy_style = strategy_style
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD)
-            }
-            1 => algo_style = algo_style.fg(Color::Yellow).add_modifier(Modifier::BOLD),
-            2 => {
-                parallel_style = parallel_style
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD)
-            }
-            3 => {
-                sort_criterion_style = sort_criterion_style
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD)
-            }
-            4 => {
-                sort_order_style = sort_order_style
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD)
-            }
-            5 => {
-                media_mode_style = media_mode_style
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD)
-            }
-            6 => {
-                media_resolution_style = media_resolution_style
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD)
-            }
-            7 => {
-                media_format_style = media_format_style
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD)
-            }
-            8 => {
-                media_similarity_style = media_similarity_style
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD)
-            }
-            _ => {}
         }
 
-        let settings_text = vec![
-            Line::from(Span::styled(format!("1. File Selection Strategy: {:?}", app.state.default_selection_strategy), strategy_style)),
-            Line::from(Span::styled("   (n:newest, o:oldest, s:shortest, l:longest)".to_string(), strategy_style)),
-            Line::from(Span::raw("")),
-            Line::from(Span::styled(format!("2. Hashing Algorithm: {}", app.state.current_algorithm), algo_style)),
-            Line::from(Span::styled("   (m:md5, a:sha256, b:blake3, x:xxhash, g:gxhash, f:fnv1a, c:crc32)".to_string(), algo_style)),
-            Line::from(Span::raw("")),
-            Line::from(Span::styled(format!("3. Parallel Cores: {}",
-                app.state.current_parallel.map_or_else(
-                    || format!("Auto ({} cores)", num_cpus::get()),
-                    |c| c.to_string()
-                )
-            ), parallel_style)),
-            Line::from(Span::styled("   (0 for auto, 1-N, +/-, requires rescan)".to_string(), parallel_style)),
-            Line::from(Span::raw("")),
-            Line::from(Span::styled(format!("4. Sort Files By: {:?}", app.state.current_sort_criterion), sort_criterion_style)),
-            Line::from(Span::styled("   (f:name, z:size, c:created, m:modified, p:path length)".to_string(), sort_criterion_style)),
-            Line::from(Span::raw("")),
-            Line::from(Span::styled(format!("5. Sort Order: {:?}", app.state.current_sort_order), sort_order_style)),
-            Line::from(Span::styled("   (a:ascending, d:descending)".to_string(), sort_order_style)),
-            Line::from(Span::raw("")),
+        let mut success_count = 0;
+        let mut updated_count = 0;
+        let mut skipped_count = 0;
+        let mut fail_count = 0;
 
-            // Media deduplication options
-            Line::from(Span::styled("--- Media Deduplication ---", Style::default().add_modifier(Modifier::BOLD))),
-            Line::from(Span::raw("")),
-            Line::from(Span::styled(format!("6. Media Mode: {}",
-                if app.state.media_mode {
-                    if crate::media_dedup::is_ffmpeg_available() {
-                        "Enabled"
-                    } else {
-                        "Enabled (ffmpeg not found, limited functionality)"
-                    }
-                } else {
-                    "Disabled"
-                }
-            ), media_mode_style)),
-            Line::from(Span::styled("   (e:toggle, requires rescan)".to_string(), media_mode_style)),
-            Line::from(Span::raw("")),
-            Line::from(Span::styled(format!("7. Media Resolution Preference: {}", app.state.media_resolution), media_resolution_style)),
-            Line::from(Span::styled("   (h:highest, l:lowest, c:custom, requires rescan)".to_string(), media_resolution_style)),
-            Line::from(Span::raw("")),
-            Line::from(Span::styled(format!("8. Media Format Preference: {}",
-                app.state.media_formats.iter().take(3).cloned().collect::<Vec<_>>().join(" > ")), media_format_style)),
-            Line::from(Span::styled("   (r:raw first, p:png first, j:jpg first, requires rescan)".to_string(), media_format_style)),
-            Line::from(Span::raw("")),
-            Line::from(Span::styled(format!("9. Media Similarity Threshold: {}%", app.state.media_similarity), media_similarity_style)),
-            Line::from(Span::styled("   (1:95% strict, 2:90% default, 3:85% relaxed, 4:75% very relaxed, requires rescan)".to_string(), media_similarity_style)),
-            Line::from(Span::raw("")),
-            Line::from(Span::raw(if app.state.rescan_needed && app.state.sort_settings_changed {
-                "[!] Algorithm/Parallelism/Media and Sort settings changed. Ctrl+R to rescan, Sort applied on Esc."
-            } else if app.state.rescan_needed {
-                "[!] Algorithm/Parallelism/Media settings changed. Press Ctrl+R to rescan."
-            } else if app.state.sort_settings_changed {
-                "[!] Sort settings changed. Applied on exiting settings (Esc)."
-            } else {
-                "No pending setting changes."
-            })),
-        ];
-        let settings_paragraph = Paragraph::new(settings_text)
-            .block(Block::default().borders(Borders::ALL).title("Options"))
-            .wrap(Wrap { trim: true });
-        frame.render_widget(settings_paragraph, chunks[1]);
+        // Execute COPY jobs
+        if !copy_jobs.is_empty() {
+            // Group copy jobs by destination for efficiency
+            let mut by_dest: std::collections::HashMap<&std::path::Path, Vec<&FileInfo>> = std::collections::HashMap::new();
+            for (dest, file) in copy_jobs {
+                by_dest.entry(dest.as_path()).or_default().push(file);
+            }
 
-        let hint = Paragraph::new("Esc: Exit Settings | Use indicated keys to change values.")
-            .alignment(Alignment::Center);
-        frame.render_widget(hint, chunks[2]);
-    } else if app.state.input_mode == InputMode::Help {
-        let help_chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .margin(1)
-            .constraints([
-                Constraint::Length(3), // Title
-                Constraint::Min(0),    // Content
-                Constraint::Length(1), // Footer
-            ])
-            .split(frame.size());
-
-        let title = Paragraph::new("--- Dedup TUI Help ---")
-            .alignment(Alignment::Center)
-            .block(Block::default().borders(Borders::ALL).title("Help Screen"));
-        frame.render_widget(title, help_chunks[0]);
-
-        let help_text_lines = vec![
-            Line::from(Span::styled("General Navigation:", Style::default().add_modifier(Modifier::BOLD))),
-            Line::from("  q          : Quit application"),
-            Line::from("  Tab        : Cycle focus between Panels (Sets/Folders -> Files -> Jobs)"),
-            Line::from("  h          : Show this Help screen (Esc to close)"),
-            Line::from("  Ctrl+R     : Trigger a rescan with current settings"),
-            Line::from("  Ctrl+S     : Open Settings menu (Esc to close)"),
-            Line::from("  Ctrl+E     : Execute all pending jobs"),
-            Line::from("  Ctrl+D     : Toggle Dry Run mode (simulates actions without making changes)"),
-            Line::from(""),
-            Line::from(Span::styled("Sets/Folders Panel (Left):", Style::default().add_modifier(Modifier::BOLD))),
-            Line::from("  Up/k       : Select previous folder/set"),
-            Line::from("  Down/j     : Select next folder/set"),
-            Line::from("  Enter/l    : Focus Files panel for selected set / Expand/Collapse folder (TODO)"),
-            Line::from("  d          : Mark all but one file (per strategy) in selected set for deletion"),
-            // Line::from("  Ctrl+A : Select all files in all sets for action (TODO)"),
-            // Line::from("  /        : Filter sets by regex (TODO)"),
-            Line::from(""),
-            Line::from(Span::styled("Files Panel (Middle):", Style::default().add_modifier(Modifier::BOLD))),
-            Line::from("  Up/k       : Select previous file in set"),
-            Line::from("  Down/j     : Select next file in set"),
-            Line::from("  Left/h     : Focus Sets/Folders panel"),
-            Line::from("  s          : Mark selected file to be KEPT (others in set marked for DELETE)"),
-            Line::from("  d          : Mark selected file for DELETE"),
-            Line::from("  c          : Mark selected file for COPY (prompts for destination)"),
-            Line::from("  i          : Mark selected file to be IGNORED (won't be deleted/moved/copied)"),
-            Line::from(""),
-            Line::from(Span::styled("Jobs Panel (Right):", Style::default().add_modifier(Modifier::BOLD))),
-            Line::from("  Up/k       : Select previous job"),
-            Line::from("  Down/j     : Select next job"),
-            Line::from("  x/Del/Bsp  : Remove selected job"),
-            Line::from(""),
-            Line::from(Span::styled("Settings Menu (Ctrl+S to access):", Style::default().add_modifier(Modifier::BOLD))),
-            Line::from("  Up/Down    : Navigate setting categories"),
-            Line::from("  Strategy   : n (Newest), o (Oldest), s (Shortest Path), l (Longest Path)"),
-            Line::from("  Algorithm  : m (md5), a (sha256), b (blake3), x (xxhash), g (gxhash), f (fnv1a), c (crc32) - requires rescan"),
-            Line::from("  Parallelism: 0 (Auto), 1-9, + (Increment), - (Decrement) - requires rescan"),
-            Line::from("  Sorting    : (TODO: Sort By, Sort Order)"),
-            Line::from("  Esc        : Exit settings menu"),
-            Line::from(""),
-            Line::from(Span::styled("Input Prompts (e.g., Copy Destination):", Style::default().add_modifier(Modifier::BOLD))),
-            Line::from("  Enter      : Confirm input"),
-            Line::from("  Esc        : Cancel input"),
-        ];
-
-        let help_paragraph = Paragraph::new(help_text_lines)
-            .block(Block::default().borders(Borders::ALL).title("Keybindings"))
-            .wrap(Wrap { trim: true });
-        frame.render_widget(help_paragraph, help_chunks[1]);
-
-        let footer = Paragraph::new("Press 'Esc' to close Help.").alignment(Alignment::Center);
-        frame.render_widget(footer, help_chunks[2]);
-    } else {
-        // Main UI (3 panels + status bar)
-        let main_chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Percentage(35), // Sets/Folders panel
-                Constraint::Percentage(35), // Files panel
-                Constraint::Percentage(30), // Jobs panel
-            ])
-            .split(chunks[2]);
-
-        // Helper to create a block with a title and border, highlighting if active
-        let create_block = |title_string: String, is_active: bool| {
-            let base_style = if is_active {
-                Style::default().fg(Color::Yellow)
-            } else {
-                Style::default().fg(Color::White)
-            };
-            Block::default()
-                .borders(Borders::ALL)
-                .title(Span::styled(title_string, base_style))
-                .border_style(base_style)
-        };
-
-        // Left Panel: Duplicate Sets (actually folders and sets)
-        let sets_panel_title_string = format!(
-            "Parent Folders / Duplicate Sets ({}/{}) (Tab to navigate)",
-            app.state
-                .selected_display_list_index
-                .saturating_add(1)
-                .min(app.state.display_list.len()),
-            app.state.display_list.len()
-        );
-        let sets_block = create_block(
-            sets_panel_title_string,
-            app.state.active_panel == ActivePanel::Sets
-                && app.state.input_mode == InputMode::Normal,
-        );
-
-        let list_items: Vec<ListItem> = app
-            .state
-            .display_list
-            .iter()
-            .map(|item| match item {
-                DisplayListItem::Folder {
-                    path,
-                    is_expanded,
-                    set_count,
-                    ..
-                } => {
-                    let prefix = if *is_expanded { "[-]" } else { "[+]" };
-                    ListItem::new(Line::from(Span::styled(
-                        format!("{} {} ({} sets)", prefix, path.display(), set_count),
-                        Style::default().add_modifier(Modifier::BOLD),
-                    )))
-                }
-                DisplayListItem::SetEntry {
-                    set_hash_preview,
-                    set_total_size,
-                    file_count_in_set,
-                    indent,
-                    ..
-                } => {
-                    let indent_str = if *indent { "  " } else { "" };
-                    ListItem::new(Line::from(Span::styled(
-                        format!(
-                            "{}Hash: {}... ({} files, {})",
-                            indent_str,
-                            set_hash_preview,
-                            file_count_in_set,
-                            format_file_size(*set_total_size, app.options_config.raw_sizes)
-                        ),
-                        Style::default(),
-                    )))
-                }
-            })
-            .collect();
-
-        let sets_list = List::new(list_items)
-            .block(sets_block)
-            .highlight_style(
-                Style::default()
-                    .add_modifier(Modifier::BOLD)
-                    .bg(Color::Blue),
-            )
-            .highlight_symbol(">> ");
-        let mut sets_list_state = ListState::default();
-        if !app.state.display_list.is_empty() {
-            sets_list_state.select(Some(app.state.selected_display_list_index));
-        }
-        frame.render_stateful_widget(sets_list, main_chunks[0], &mut sets_list_state);
-
-        // Middle Panel: Files in Selected Set
-        let (files_panel_title_string, file_items) = if let Some(selected_set) =
-            app.current_selected_set_from_display_list()
-        {
-            let title = format!(
-                "Files ({}/{}) (s:keep d:del c:copy i:ign h:back)",
-                app.state
-                    .selected_file_index_in_set
-                    .saturating_add(1)
-                    .min(selected_set.files.len()),
-                selected_set.files.len()
-            );
-            let items: Vec<ListItem> = selected_set
-                .files
-                .iter()
-                .map(|file_info| {
-                    let mut style = Style::default();
-                    let mut prefix = "   ";
-                    if let Some(job) = app
-                        .state
-                        .jobs
-                        .iter()
-                        .find(|j| j.file_info.path == file_info.path)
-                    {
-                        match job.action {
-                            ActionType::Keep => {
-                                style = style.fg(Color::Green).add_modifier(Modifier::BOLD);
-                                prefix = "[K]";
+            for (dest, files) in by_dest {
+                // Update status message
+                self.state.status_message = Some(format!("{} Copying to {}", status_prefix, dest.display()));
+                
+                // Convert to owned FileInfo objects
+                let owned_files: Vec<FileInfo> = files.iter().map(|&f| f.clone()).collect();
+                
+                if self.state.update_mode {
+                    // Use update_mode for copying (only newer files)
+                    match crate::update_mode::update_files(&owned_files, dest, dry_run_mode, None) {
+                        Ok(result) => {
+                            // Add all log messages
+                            self.state.log_messages.extend(result.log_messages);
+                            
+                            // Add any errors
+                            for err in result.errors {
+                                self.state.log_messages.push(format!("ERROR: {}", err));
+                                fail_count += 1;
                             }
-                            ActionType::Delete => {
-                                style = style.fg(Color::Red).add_modifier(Modifier::CROSSED_OUT);
-                                prefix = "[D]";
-                            }
-                            ActionType::Copy(_) => {
-                                style = style.fg(Color::Cyan);
-                                prefix = "[C]";
-                            }
-                            ActionType::Move(_) => {
-                                style = style.fg(Color::Magenta);
-                                prefix = "[M]";
-                            }
-                            ActionType::Ignore => {
-                                style = style.fg(Color::DarkGray);
-                                prefix = "[I]";
-                            }
+                            
+                            // Count successes
+                            success_count += result.copied_files;
+                            updated_count += result.updated_files;
+                            skipped_count += result.skipped_files;
                         }
-                    } else if let Ok((default_kept, _)) = file_utils::determine_action_targets(
-                        selected_set,
-                        app.state.default_selection_strategy,
-                    ) {
-                        if default_kept.path == file_info.path {
-                            style = style.fg(Color::Green);
-                            prefix = "[k]";
+                        Err(e) => {
+                            fail_count += files.len();
+                            self.state.log_messages.push(format!("ERROR during update: {}", e));
+                        }
+                }
+            } else {
+                    // Use regular copy for all files
+                    match crate::file_utils::copy_missing_files(&owned_files, dest, dry_run_mode) {
+                        Ok((count, logs)) => {
+                            success_count += count;
+                            self.state.log_messages.extend(logs);
+                        }
+                        Err(e) => {
+                            fail_count += files.len();
+                            self.state.log_messages.push(format!("ERROR during copy: {}", e));
                         }
                     }
-                    ListItem::new(Line::from(vec![
-                        Span::styled(format!("{} ", prefix), style),
-                        Span::styled(file_info.path.display().to_string(), style),
-                    ]))
-                })
-                .collect();
-            (title, items)
-        } else {
-            (
-                "Files (0/0)".to_string(),
-                vec![ListItem::new("No set selected or set is empty")],
-            )
-        };
-        let files_block = create_block(
-            files_panel_title_string,
-            app.state.active_panel == ActivePanel::Files
-                && app.state.input_mode == InputMode::Normal,
-        );
-        let files_list = List::new(file_items)
-            .block(files_block)
-            .highlight_style(
-                Style::default()
-                    .add_modifier(Modifier::BOLD)
-                    .bg(Color::DarkGray),
-            )
-            .highlight_symbol("> ");
-
-        let mut files_list_state = ListState::default();
-        if app
-            .current_selected_set_from_display_list()
-            .is_some_and(|s| !s.files.is_empty())
-        {
-            files_list_state.select(Some(app.state.selected_file_index_in_set));
-        }
-        frame.render_stateful_widget(files_list, main_chunks[1], &mut files_list_state);
-
-        // Right Panel: Jobs
-        let jobs_panel_title_string =
-            format!("Jobs ({}) (Ctrl+E: Exec, x:del)", app.state.jobs.len());
-        let jobs_block = create_block(
-            jobs_panel_title_string,
-            app.state.active_panel == ActivePanel::Jobs
-                && app.state.input_mode == InputMode::Normal,
-        );
-        let job_items: Vec<ListItem> = app
-            .state
-            .jobs
-            .iter()
-            .map(|job| {
-                let action_str = match &job.action {
-                    ActionType::Keep => "KEEP".to_string(),
-                    ActionType::Delete => "DELETE".to_string(),
-                    ActionType::Move(dest) => format!("MOVE to {}", dest.display()),
-                    ActionType::Copy(dest) => format!("COPY to {}", dest.display()),
-                    ActionType::Ignore => "IGNORE".to_string(),
-                };
-                let content = Line::from(Span::raw(format!(
-                    "{} - {:?}",
-                    action_str,
-                    job.file_info.path.file_name().unwrap_or_default()
-                )));
-                ListItem::new(content)
-            })
-            .collect();
-        let jobs_list_widget = List::new(job_items)
-            .block(jobs_block)
-            .highlight_style(
-                Style::default()
-                    .add_modifier(Modifier::BOLD)
-                    .bg(Color::Magenta),
-            )
-            .highlight_symbol(">> ");
-        let mut jobs_list_state = ListState::default();
-        if !app.state.jobs.is_empty() {
-            jobs_list_state.select(Some(app.state.selected_job_index));
-        }
-        frame.render_stateful_widget(jobs_list_widget, main_chunks[2], &mut jobs_list_state);
-
-        // Status Bar / Input Area
-        match app.state.input_mode {
-            InputMode::Normal => {
-                // Show custom status message if available, otherwise show controls
-                let mut status_text = app.state.status_message.as_deref().unwrap_or(
-                    "q/Ctrl+C:quit | Tab:cycle | Arrows/jk:nav | a:toggle s:keep d:del c:copy i:ign | Ctrl+E:exec | Ctrl+R:rescan | Ctrl+S:settings | x:del job"
-                ).to_string();
-
-                // Add dry run indicator if enabled
-                if app.state.dry_run {
-                    status_text = format!("[DRY RUN MODE] {} (Ctrl+D: Toggle)", status_text);
-                } else {
-                    status_text = format!("{} (Ctrl+D: Dry Run)", status_text);
                 }
-
-                let status_style = if app.state.dry_run {
-                    // Use yellow for dry run mode to make it more obvious
-                    Style::default().fg(Color::Yellow)
-                } else {
-                    Style::default().fg(Color::LightCyan)
-                };
-
-                let status_bar = Paragraph::new(status_text)
-                    .style(status_style)
-                    .alignment(Alignment::Left);
-                frame.render_widget(status_bar, chunks[3]);
-            }
-            InputMode::CopyDestination => {
-                let input_chunks = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([Constraint::Length(1), Constraint::Length(1)])
-                    .split(chunks[3]);
-                let prompt_text = app
-                    .state
-                    .status_message
-                    .as_deref()
-                    .unwrap_or("Enter destination path for copy (Enter:confirm, Esc:cancel):");
-                let prompt_p = Paragraph::new(prompt_text).fg(Color::Yellow);
-                frame.render_widget(prompt_p, input_chunks[0]);
-                let input_field = Paragraph::new(app.state.current_input.value())
-                    .block(
-                        Block::default()
-                            .borders(Borders::TOP)
-                            .title("Path")
-                            .border_style(Style::default().fg(Color::Yellow)),
-                    )
-                    .fg(Color::White);
-                frame.render_widget(input_field, input_chunks[1]);
-                frame.set_cursor(
-                    input_chunks[1].x + app.state.current_input.visual_cursor() as u16 + 1,
-                    input_chunks[1].y + 1,
-                );
-            }
-            InputMode::Settings => {
-                // The Settings mode has its own full-screen UI, so no specific status bar here.
-            }
-            InputMode::Help => {
-                // The Help mode has its own full-screen UI, so no specific status bar here.
             }
         }
 
-        // Draw progress bar (if any) just above the help bar
-        use ratatui::widgets::Gauge;
-        if app.state.is_processing_jobs {
-            let (done, total) = app.state.job_progress;
-            let percent = if total > 0 {
-                done as f64 / total as f64
-            } else {
-                0.0
-            };
+        // Execute MOVE jobs
+        if !move_jobs.is_empty() {
+            // Group by destination
+            let mut by_dest: std::collections::HashMap<&std::path::Path, Vec<&FileInfo>> = std::collections::HashMap::new();
+            for (dest, file) in move_jobs {
+                by_dest.entry(dest.as_path()).or_default().push(file);
+            }
 
-            // Create a progress display area for job processing
-            let progress_layout = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Length(1), // Top bar
-                    Constraint::Length(1), // Bottom bar
-                ])
-                .split(chunks[4]);
+            for (dest, files) in by_dest {
+                self.state.status_message = Some(format!("{} Moving to {}", status_prefix, dest.display()));
+                
+                // Convert to owned FileInfo objects
+                let owned_files: Vec<FileInfo> = files.iter().map(|&f| f.clone()).collect();
+                
+                match crate::file_utils::move_files(&owned_files, dest, dry_run_mode) {
+                    Ok((count, logs)) => {
+                        success_count += count;
+                        self.state.log_messages.extend(logs);
+                    }
+                    Err(e) => {
+                        fail_count += files.len();
+                        self.state.log_messages.push(format!("ERROR during move: {}", e));
+                    }
+                }
+            }
+        }
 
-            // Top gauge shows overall progress
-            let top_gauge = Gauge::default()
-                .block(Block::default().borders(Borders::NONE).title(""))
-                .gauge_style(Style::default().fg(Color::Cyan).bg(Color::Black))
-                .label(format!(
-                    "Overall: {}/{} jobs ({:.1}%)",
-                    done,
-                    total,
-                    percent * 100.0
-                ))
-                .ratio(percent.clamp(0.0, 1.0));
+        // Execute DELETE jobs
+        if !delete_jobs.is_empty() {
+            self.state.status_message = Some(format!("{} Deleting files", status_prefix));
+            
+            // Convert to owned FileInfo objects
+            let owned_files: Vec<FileInfo> = delete_jobs.iter().map(|&f| f.clone()).collect();
+            
+            match crate::file_utils::delete_files(&owned_files, dry_run_mode) {
+                Ok((count, logs)) => {
+                    success_count += count;
+                    self.state.log_messages.extend(logs);
+                }
+                Err(e) => {
+                    fail_count += delete_jobs.len();
+                    self.state.log_messages.push(format!("ERROR during delete: {}", e));
+                }
+            }
+        }
 
-            // Bottom gauge shows per-job details
-            let bottom_gauge = Gauge::default()
-                .block(Block::default().borders(Borders::NONE).title(""))
-                .gauge_style(Style::default().fg(Color::Green).bg(Color::Black))
-                .label(format!(
-                    "Current job: {}/{} - {}",
-                    done, total, app.state.job_processing_message
-                ))
-                .ratio(
-                    (if done < total {
-                        (done as f64 + 0.5) / total.max(1) as f64
+        // Update progress
+        self.state.job_progress.0 = total_jobs;
+        self.state.is_processing_jobs = false;
+
+        // Create summary message
+        let mut summary = String::new();
+        
+        if dry_run_mode {
+            summary.push_str("[DRY RUN] Would have ");
+        }
+        
+        if self.state.update_mode {
+            summary.push_str(&format!(
+                "processed {} jobs: {} copied, {} updated, {} skipped, {} failed", 
+                total_jobs, success_count, updated_count, skipped_count, fail_count
+            ));
                     } else {
-                        1.0
-                    })
-                    .clamp(0.0, 1.0),
-                );
-
-            frame.render_widget(top_gauge, progress_layout[0]);
-            frame.render_widget(bottom_gauge, progress_layout[1]);
-        } else if app.state.is_loading {
-            // Extract progress information from the loading message
-            let (stage_str, progress_text, percentage, file_counts) =
-                parse_progress_from_message(&app.state.loading_message);
-
-            // Calculate total progress across stages
-            let (current_stage, total_stages) = parse_stage_numbers(&stage_str);
-            let total_progress = if let (Some(current), Some(total), Some(pct)) =
-                (current_stage, total_stages, percentage)
-            {
-                // Ensure the calculated progress is between 0.0 and 1.0
-                ((current.saturating_sub(1) as f64 / total.max(1) as f64)
-                    + (pct / 100.0 / total.max(1) as f64))
-                    .clamp(0.0, 1.0)
-            } else if let (Some(current), Some(total)) = (current_stage, total_stages) {
-                // If no percentage but we have stage numbers, use simple stage-based progress
-                if let Some((count, total_count)) = file_counts {
-                    // If we have file counts, use those for more granular progress
-                    ((current.saturating_sub(1) as f64 / total.max(1) as f64)
-                        + ((count as f64 / total_count as f64) / total.max(1) as f64))
-                        .clamp(0.0, 1.0)
-                } else {
-                    // Otherwise just use the stage number
-                    ((current as f64 - 0.5) / total.max(1) as f64).clamp(0.0, 1.0)
-                }
-            } else {
-                // Indeterminate if we can't extract actual values
-                let now = std::time::Instant::now();
-                let secs = now.elapsed().as_secs_f64();
-                (secs % 2.0) / 2.0 // Pulse every 2 seconds, always between 0.0 and 1.0
-            };
-
-            // Create a progress display area with two progress bars
-            let progress_layout = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Length(1), // Top bar for overall progress
-                    Constraint::Length(1), // Bottom bar for stage progress
-                ])
-                .split(chunks[4]);
-
-            // Top gauge shows overall progress across all stages
-            let top_gauge = Gauge::default()
-                .block(Block::default().borders(Borders::NONE).title(""))
-                .gauge_style(Style::default().fg(Color::Cyan).bg(Color::Black))
-                .label(
-                    if let (Some(current), Some(total)) = (current_stage, total_stages) {
-                        format!(
-                            "Total Progress: Stage {} of {} ({:.1}%)",
-                            current,
-                            total,
-                            total_progress * 100.0
-                        )
-                    } else {
-                        "Processing...".to_string()
-                    },
-                )
-                .ratio(total_progress.clamp(0.0, 1.0));
-
-            // Bottom gauge shows progress for current stage
-            let stage_progress_value = if let Some(pct) = percentage {
-                // Ensure the percentage is between 0 and 100, then convert to ratio between 0.0 and 1.0
-                pct.clamp(0.0, 100.0) / 100.0
-            } else if let Some((current, total)) = file_counts {
-                if total > 0 {
-                    // Clamp the ratio between 0.0 and 1.0
-                    (current as f64 / total as f64).clamp(0.0, 1.0)
-                } else {
-                    0.0
-                }
-            } else if let Some(counts) = extract_scan_counts(&app.state.loading_message) {
-                if counts.1 > 0 {
-                    (counts.0 as f64 / counts.1 as f64).clamp(0.0, 1.0)
-                } else {
-                    0.0
-                }
-            } else {
-                // Animate when no percentage available - ensure it's between 0.0 and 1.0
-                let now = std::time::Instant::now();
-                let secs = now.elapsed().as_secs_f64();
-                (secs % 3.0) / 3.0 // Cycles every 3 seconds (0.0 to 1.0)
-            };
-
-            // If in pre-scan stage, show a simpler progress indicator
-            let bottom_gauge = if stage_str.contains("Pre-scan") {
-                Gauge::default()
-                    .block(Block::default().borders(Borders::NONE).title(""))
-                    .gauge_style(Style::default().fg(Color::White).bg(Color::Black))
-                    .label(progress_text)
-                    .ratio(stage_progress_value.clamp(0.0, 1.0))
-            } else {
-                Gauge::default()
-                    .block(Block::default().borders(Borders::NONE).title(""))
-                    .gauge_style(Style::default().fg(Color::White).bg(Color::Black))
-                    .label(progress_text)
-                    .ratio(stage_progress_value.clamp(0.0, 1.0))
-            };
-
-            frame.render_widget(top_gauge, progress_layout[0]);
-            frame.render_widget(bottom_gauge, progress_layout[1]);
-        } else if !app.state.jobs.is_empty() && app.state.input_mode == InputMode::Normal {
-            let total = app.state.jobs.len();
-            let completed = 0; // You can track completed jobs if you add a field
-            let percent = if total > 0 {
-                completed as f64 / total as f64
-            } else {
-                0.0
-            };
-            let gauge = Gauge::default()
-                .block(Block::default().borders(Borders::ALL).title("Job Progress"))
-                .gauge_style(Style::default().fg(Color::White).bg(Color::Black))
-                .label(format!(
-                    "Pending jobs: {} | Ctrl+E: Execute, x: Remove job",
-                    total
-                ))
-                .ratio(percent.clamp(0.0, 1.0));
-            frame.render_widget(gauge, chunks[4]);
-        } else {
-            // Draw an empty block if no progress
-            let empty = Block::default();
-            frame.render_widget(empty, chunks[4]);
+            summary.push_str(&format!(
+                "processed {} jobs: {} succeeded, {} failed", 
+                total_jobs, success_count, fail_count
+            ));
         }
-
-        // Draw help bar at the very bottom
-        let help =
-            "h: Help | ↑/↓: Navigate | Space: Toggle | a: Toggle Keep/Delete | q/Ctrl+C: Quit";
-        let help_bar = ratatui::widgets::Paragraph::new(help)
-            .style(Style::default().fg(Color::DarkGray))
-            .alignment(Alignment::Center);
-        frame.render_widget(help_bar, chunks[5]);
-
-        // Draw log area (scrollable)
-        let log_height = 5;
-        let log_len = app.state.log_messages.len();
-        let scroll = app.state.log_scroll.min(log_len.saturating_sub(log_height));
-        let log_lines: Vec<ratatui::text::Line> = app
-            .state
-            .log_messages
-            .iter()
-            .filter(|msg| {
-                app.state
-                    .log_filter
-                    .as_ref()
-                    .is_none_or(|f| msg.contains(f))
-            })
-            .skip(scroll)
-            .take(log_height)
-            .map(|msg| ratatui::text::Line::from(msg.clone()))
-            .collect();
-        let log_block = if app.state.log_focus {
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Log (FOCUSED)")
-        } else {
-            Block::default().borders(Borders::ALL).title("Log")
-        };
-        let log_paragraph = ratatui::widgets::Paragraph::new(log_lines)
-            .block(log_block)
-            .scroll((0, 0));
-        frame.render_widget(log_paragraph, chunks[3]);
+        
+        self.state.job_processing_message = summary.clone();
+        self.state.status_message = Some(summary);
+        self.state.jobs.clear();
+        self.state.selected_job_index = 0;
     }
-}
-
-// Helper function to extract scan counts from loading messages
-// Returns (current_count, total_count) if available
-fn extract_scan_counts(message: &str) -> Option<(usize, usize)> {
-    // Look for patterns like "Found 123/456 files" or "Scanned 123/456 files"
-    if let Some(idx) = message.find('/') {
-        let before = &message[..idx];
-        let after = &message[idx + 1..];
-
-        // Extract current count from before the slash
-        let current = before
-            .chars()
-            .rev()
-            .take_while(|c| c.is_ascii_digit())
-            .collect::<String>()
-            .chars()
-            .rev()
-            .collect::<String>()
-            .parse::<usize>()
-            .ok()?;
-
-        // Extract total count from after the slash
-        let total = after
-            .chars()
-            .take_while(|c| c.is_ascii_digit())
-            .collect::<String>()
-            .parse::<usize>()
-            .ok()?;
-
-        if total > 0 {
-            return Some((current, total));
-        }
-    }
-
-    None
-}
-
-// Helper function to parse stage numbers from a stage string like "1/3 Discovery"
-fn parse_stage_numbers(stage_str: &str) -> (Option<usize>, Option<usize>) {
-    // Look for patterns like "1/3" or "0/3"
-    if let Some(idx) = stage_str.find('/') {
-        if idx > 0 && idx + 1 < stage_str.len() {
-            let current_str = &stage_str[..idx];
-            let rest = &stage_str[idx + 1..];
-
-            // Extract current stage number
-            let current = current_str
-                .chars()
-                .rev()
-                .take_while(|c| c.is_ascii_digit())
-                .collect::<String>()
-                .chars()
-                .rev()
-                .collect::<String>()
-                .parse::<usize>()
-                .ok();
-
-            // Extract total stages number
-            let total = if let Some(space_idx) = rest.find(' ') {
-                let total_str = &rest[..space_idx];
-                total_str.parse::<usize>().ok()
-            } else {
-                rest.parse::<usize>().ok()
-            };
-
-            return (current, total);
-        }
-    }
-
-    // Default if we couldn't parse the stage numbers
-    (None, None)
-}
-
-// Add this new extract_detailed_progress function to get more metrics
-#[allow(dead_code)]
-fn extract_detailed_metrics(message: &str) -> HashMap<String, String> {
-    let mut metrics = HashMap::new();
-
-    // Extract file counts
-    if let Some(count_pos) = message.find("Found ") {
-        if let Some(files_pos) = message[count_pos..].find(" files") {
-            if let Ok(count) = message[count_pos + 6..count_pos + files_pos]
-                .trim()
-                .parse::<usize>()
-            {
-                metrics.insert("files_found".to_string(), count.to_string());
-            }
-        }
-    }
-
-    // Extract size groups
-    if let Some(size_pos) = message.find("size groups") {
-        let start_pos = message[..size_pos].rfind(" ").unwrap_or(0);
-        if let Ok(groups) = message[start_pos + 1..size_pos - 1].trim().parse::<usize>() {
-            metrics.insert("size_groups".to_string(), groups.to_string());
-        }
-    }
-
-    // Extract duplicate sets
-    if let Some(dup_pos) = message.find("duplicate sets") {
-        let start_pos = message[..dup_pos].rfind(" ").unwrap_or(0);
-        if let Ok(sets) = message[start_pos + 1..dup_pos - 1].trim().parse::<usize>() {
-            metrics.insert("duplicate_sets".to_string(), sets.to_string());
-        }
-    }
-
-    // Extract cache hits
-    if let Some(cache_pos) = message.find("from cache") {
-        let start_pos = message[..cache_pos].rfind("(").unwrap_or(0);
-        if let Ok(hits) = message[start_pos + 1..cache_pos - 1]
-            .trim()
-            .parse::<usize>()
-        {
-            metrics.insert("cache_hits".to_string(), hits.to_string());
-        }
-    }
-
-    metrics
-}
-
-/// Entry point for the Copy Missing TUI mode
-pub fn run_copy_missing_tui(options: &Options) -> Result<()> {
-    // Just call our unified function with copy_missing set to true
-    run_tui_app_for_mode(options, true)
-}
-
-/// Run the TUI app with support for both deduplication and copy missing modes
-pub fn run_tui_app_for_mode(options: &Options, is_copy_missing: bool) -> Result<()> {
-    // Terminal initialization
-    enable_raw_mode()?;
-    let mut stdout = stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
-
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
-    terminal.hide_cursor()?;
-
-    // Create app state based on mode
-    let mut app = if is_copy_missing {
-        log::info!("Creating app in Copy Missing mode");
-        // Use the copy_missing module's specialized constructor
-        copy_missing::create_copy_missing_app(options)
-    } else {
-        log::info!("Creating app in Deduplication mode");
-        App::new(options)
-    };
-
-    // Main loop
-    let show_tui_progress = options.progress_tui;
-    log::info!(
-        "Running main loop with show_tui_progress={}",
-        show_tui_progress
-    );
-    let result = run_main_loop(&mut terminal, &mut app, show_tui_progress);
-
-    // Cleanup and restore terminal
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
-    terminal.show_cursor()?;
-
-    // If there was an error, log it and return it
-    if let Err(err) = &result {
-        log::error!("TUI error: {}", err);
-    }
-
-    result
 }

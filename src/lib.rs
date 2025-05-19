@@ -32,6 +32,9 @@ pub mod commands;
 // Add the new app_mode module
 pub mod app_mode;
 
+// Add our new modules
+pub mod update_mode;
+
 // The old Cli struct is being replaced by Options, so we no longer need to use it directly
 
 use clap::Parser;
@@ -82,6 +85,14 @@ pub struct Cli {
         help = "Move duplicate files to a specified directory"
     )]
     pub move_to: Option<PathBuf>,
+
+    /// Copy only newer files from source to target (similar to rsync --update).
+    #[clap(
+        short = 'u',
+        long,
+        help = "Update mode - only copy files that are newer on the source"
+    )]
+    pub update_mode: bool,
 
     /// Write actions and errors to a log file.
     #[clap(short, long, help = "Enable logging to a file (default: dedups.log)")]

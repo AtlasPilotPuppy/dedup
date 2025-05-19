@@ -48,6 +48,14 @@ pub struct Options {
     )]
     pub move_to: Option<PathBuf>,
 
+    /// Copy only newer files from source to target (similar to rsync --update).
+    #[clap(
+        short = 'u',
+        long,
+        help = "Update mode - only copy files that are newer on the source"
+    )]
+    pub update_mode: bool,
+
     /// Write actions and errors to a log file.
     #[clap(short, long, help = "Enable logging to a file (default: dedups.log)")]
     pub log: bool,
@@ -344,6 +352,7 @@ impl Options {
             copy_missing: cli.copy_missing,
             delete: cli.delete,
             move_to: cli.move_to.clone(),
+            update_mode: cli.update_mode,
             log: cli.log,
             log_file: cli.log_file.clone(),
             output: cli.output.clone(),

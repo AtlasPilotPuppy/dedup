@@ -160,7 +160,7 @@ fn run_interactive_mode(options: &Options) -> Result<()> {
     tui_options.progress_tui = true;
 
     // Call the unified TUI function with copy_missing set to false for regular deduplication mode
-    tui_app::run_tui_app_for_mode(&tui_options, false)
+    run_tui_app_for_mode(&tui_options, false)
 }
 
 /// Handle multiple directory mode - comparing directories and copying/deduplicating
@@ -534,7 +534,7 @@ fn run_copy_missing_interactive_mode(options: &Options) -> Result<()> {
     tui_options.progress_tui = true;
 
     // Call the unified TUI function with copy_missing set to true
-    tui_app::run_tui_app_for_mode(&tui_options, true)
+    run_tui_app_for_mode(&tui_options, true)
 }
 
 /// Handle Copy Missing mode operations without TUI
@@ -696,4 +696,13 @@ fn handle_copy_missing_mode(options: &Options) -> Result<()> {
     }
 
     Ok(())
+}
+
+pub fn run_tui_app_for_mode(options: &Options, is_copy_missing: bool) -> Result<()> {
+    if is_copy_missing {
+        crate::tui_app::copy_missing::run_copy_missing_tui(options)
+    } else {
+        // Fallback for now, since the original TUI mode is not accessible
+        Err(anyhow::anyhow!("Regular TUI mode not implemented in this version"))
+    }
 }

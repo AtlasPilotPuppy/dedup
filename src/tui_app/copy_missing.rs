@@ -1,6 +1,6 @@
 use anyhow::Result;
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event as CEvent, KeyEventKind},
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event as CEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -8,10 +8,14 @@ use humansize::{format_size, DECIMAL};
 use ratatui::prelude::*;
 use ratatui::widgets::*;
 use std::io::stdout;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use crate::file_utils::SortCriterion;
 use crate::options::Options;
-use crate::tui_app::{ActionType, ActivePanel, App, InputMode, ScanMessage};
+use crate::tui_app::{ActionType, ActivePanel, App, InputMode, ScanMessage, Job};
+use crate::tui_app::file_browser::FileBrowser;
+use tui_input::backend::crossterm::EventHandler;
 
 /// Entry point for the Copy Missing TUI
 pub fn run_copy_missing_tui(options: &Options) -> Result<()> {
@@ -48,7 +52,7 @@ pub fn run_copy_missing_tui(options: &Options) -> Result<()> {
         if crossterm::event::poll(timeout)? {
             if let CEvent::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
-                    app.on_key(key);
+                    handle_key_event(&mut app, key, options);
 
                     // Check for quit flag
                     if app.should_quit {
@@ -76,6 +80,201 @@ pub fn run_copy_missing_tui(options: &Options) -> Result<()> {
     Ok(())
 }
 
+/// Handle key events for the copy missing mode
+fn handle_key_event(app: &mut App, key: KeyEvent, options: &Options) {
+    match app.state.input_mode {
+        InputMode::Normal => {
+            match (key.code, key.modifiers) {
+                // Quit
+                (KeyCode::Char('q'), KeyModifiers::NONE) => app.should_quit = true,
+                (KeyCode::Esc, KeyModifiers::NONE) => app.should_quit = true,
+                (KeyCode::Char('c'), KeyModifiers::CONTROL) => app.should_quit = true,
+                
+                // Panel navigation
+                (KeyCode::Tab, KeyModifiers::NONE) => app.cycle_active_panel(),
+
+                // Context-aware navigation
+                (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
+                    match app.state.active_panel {
+                        ActivePanel::Sets => app.select_previous_set(),
+                        ActivePanel::Files => {
+                            if let Some(file_browser) = &mut app.state.file_browser {
+                                file_browser.select_prev();
+                            }
+                        },
+                        ActivePanel::Jobs => app.select_previous_job(),
+                    }
+                },
+                (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
+                    match app.state.active_panel {
+                        ActivePanel::Sets => app.select_next_set(),
+                        ActivePanel::Files => {
+                            if let Some(file_browser) = &mut app.state.file_browser {
+                                file_browser.select_next();
+                            }
+                        },
+                        ActivePanel::Jobs => app.select_next_job(),
+                    }
+                },
+                (KeyCode::Left, _) | (KeyCode::Char('h'), KeyModifiers::NONE) => {
+                    // Cycle panel focus to the left
+                    app.state.active_panel = match app.state.active_panel {
+                        ActivePanel::Sets => ActivePanel::Jobs,
+                        ActivePanel::Files => ActivePanel::Sets,
+                        ActivePanel::Jobs => ActivePanel::Files,
+                    };
+                },
+                (KeyCode::Right, _) | (KeyCode::Char('l'), KeyModifiers::NONE) => {
+                    // Cycle panel focus to the right
+                    app.state.active_panel = match app.state.active_panel {
+                        ActivePanel::Sets => ActivePanel::Files,
+                        ActivePanel::Files => ActivePanel::Jobs,
+                        ActivePanel::Jobs => ActivePanel::Sets,
+                    };
+                },
+                (KeyCode::Enter, KeyModifiers::NONE) => {
+                    if app.state.active_panel == ActivePanel::Files {
+                        if let Some(file_browser) = &mut app.state.file_browser {
+                            if let Some(entry) = file_browser.selected_entry() {
+                                if entry.is_dir() {
+                                    file_browser.change_directory(entry.path.clone());
+                                }
+                            }
+                        }
+                    }
+                },
+                // Refresh directories
+                (KeyCode::Char('r'), KeyModifiers::CONTROL) | (KeyCode::F(5), KeyModifiers::NONE) => {
+                    if let Some(file_browser) = &mut app.state.file_browser {
+                        file_browser.refresh();
+                    }
+                },
+                // Add 'C' key for copy operation
+                (KeyCode::Char('c'), KeyModifiers::NONE) => {
+                    if app.state.active_panel == ActivePanel::Sets {
+                        // Get the selected file from the source list
+                        if let Some(current_item) = app.current_selected_file().cloned() {
+                            // If we have a destination path, queue the copy job directly
+                            if let Some(dest_path) = &app.state.destination_path {
+                                let dest_clone = dest_path.clone();
+                                app.state.jobs.push(Job {
+                                    action: ActionType::Copy(dest_clone),
+                                    file_info: current_item.clone(),
+                                });
+                                app.state.status_message = Some(format!("Queued {} for copy to {}", 
+                                    current_item.path.display(), dest_path.display()));
+                            } else {
+                                app.state.status_message = Some("No destination selected. Please select a destination directory first.".into());
+                            }
+                        } else {
+                            app.state.status_message = Some("No file selected to copy.".into());
+                        }
+                    }
+                },
+                // Select/copy files (keep for backward compatibility)
+                (KeyCode::Char('s'), KeyModifiers::NONE) => {
+                    if app.state.active_panel == ActivePanel::Sets {
+                        // Use the destination browser's selected path, or a default
+                        if let Some(browser) = &app.state.file_browser {
+                            if let Some(selected_path) = browser.get_selected_path() {
+                                if let Some(current_item) = app.current_selected_file() {
+                                    app.state.jobs.push(Job {
+                                        action: ActionType::Copy(selected_path),
+                                        file_info: current_item.clone(),
+                                    });
+                                }
+                            }
+                        }
+                        app.state.status_message = Some("File(s) queued for copy".into());
+                    }
+                },
+                // Execute queued jobs
+                (KeyCode::Char('e'), KeyModifiers::CONTROL) => {
+                    if !app.state.jobs.is_empty() {
+                        app.start_job_execution(options);
+                    }
+                },
+                // Toggle dry run mode
+                (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
+                    app.state.dry_run = !app.state.dry_run;
+                    let msg = if app.state.dry_run {
+                        "Dry run mode ENABLED - no files will be modified"
+                    } else {
+                        "Dry run mode DISABLED - files will be modified when executed"
+                    };
+                    app.state.status_message = Some(msg.into());
+                },
+                // Change file browser sorting
+                (KeyCode::Char('n'), KeyModifiers::NONE) => {
+                    if let Some(file_browser) = &mut app.state.file_browser {
+                        file_browser.set_sort_criterion(SortCriterion::FileName);
+                        app.state.status_message = Some("Sorted by filename".into());
+                    }
+                },
+                (KeyCode::Char('m'), KeyModifiers::NONE) => {
+                    if let Some(file_browser) = &mut app.state.file_browser {
+                        file_browser.set_sort_criterion(SortCriterion::ModifiedAt);
+                        app.state.status_message = Some("Sorted by modification time".into());
+                    }
+                },
+                (KeyCode::Char('z'), KeyModifiers::NONE) => {
+                    if let Some(file_browser) = &mut app.state.file_browser {
+                        file_browser.set_sort_criterion(SortCriterion::FileSize);
+                        app.state.status_message = Some("Sorted by file size".into());
+                    }
+                },
+                // Toggle folders first
+                (KeyCode::Char('f'), KeyModifiers::NONE) => {
+                    if let Some(file_browser) = &mut app.state.file_browser {
+                        file_browser.toggle_folders_first();
+                        let msg = if file_browser.folders_first {
+                            "Folders will be listed first"
+                        } else {
+                            "Sorting with files and folders mixed"
+                        };
+                        app.state.status_message = Some(msg.into());
+                    }
+                },
+                // Switch between update mode and regular copy
+                (KeyCode::Char('u'), KeyModifiers::NONE) => {
+                    app.state.update_mode = !app.state.update_mode;
+                    let msg = if app.state.update_mode {
+                        "Update mode ENABLED - only newer files will be copied"
+                    } else {
+                        "Update mode DISABLED - all files will be copied"
+                    };
+                    app.state.status_message = Some(msg.into());
+                },
+                _ => {}
+            }
+        },
+        InputMode::CopyDestination => {
+            match key.code {
+                KeyCode::Esc => {
+                    app.state.input_mode = InputMode::Normal;
+                    app.state.status_message = Some("Copy destination canceled".into());
+                },
+                KeyCode::Enter => {
+                    let dest_path = app.state.current_input.value().to_string();
+                    if !dest_path.is_empty() {
+                        let path = PathBuf::from(&dest_path);
+                        app.state.destination_path = Some(path.clone());
+                        // Initialize the file browser for the destination path
+                        app.state.file_browser = Some(FileBrowser::new(Some(path)));
+                        app.state.status_message = Some(format!("Destination set to: {}", dest_path));
+                    }
+                    app.state.input_mode = InputMode::Normal;
+                },
+                _ => {
+                    // Handle input field text editing
+                    let _ = app.state.current_input.handle_event(&CEvent::Key(key));
+                }
+            }
+        },
+        _ => {}
+    }
+}
+
 /// Create a specialized app instance for Copy Missing mode
 pub fn create_copy_missing_app(options: &Options) -> App {
     // Initialize from the regular app
@@ -83,6 +282,20 @@ pub fn create_copy_missing_app(options: &Options) -> App {
 
     // Set additional state for copy-missing specific functionality
     app.state.status_message = Some("Copy Missing Mode - Scanning for files to copy...".to_string());
+    
+    // Initialize file browser if there's a target directory
+    if let Some(target_dir) = &options.target {
+        app.state.destination_path = Some(target_dir.clone());
+        app.state.file_browser = Some(FileBrowser::new(Some(target_dir.clone())));
+    } else if !options.directories.is_empty() {
+        // Use the last directory as the destination if no specific target was provided
+        let target_dir = options.directories.last().unwrap().clone();
+        app.state.destination_path = Some(target_dir.clone());
+        app.state.file_browser = Some(FileBrowser::new(Some(target_dir)));
+    }
+    
+    // Set update mode from command line options
+    app.state.update_mode = options.update_mode;
 
     app
 }
@@ -112,17 +325,27 @@ pub fn start_copy_missing_scan(app: &mut App, options: &Options) {
                     log::error!("Failed to send completion message");
                 }
                 
-                // Return () to match the expected JoinHandle<()> type
-                ()
+                // Convert missing files to duplicate sets format for compatibility
+                let sets = result.missing_in_target.into_iter()
+                    .map(|file| {
+                        crate::file_utils::DuplicateSet {
+                            hash: file.path.to_string_lossy().to_string(), // Use path as hash for unique identification
+                            size: file.size,
+                            files: vec![file],
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                
+                // Send the actual results to be processed
+                if tx.send(ScanMessage::Completed(Ok(sets))).is_err() {
+                    log::error!("Failed to send scan results");
+                }
             },
             Err(e) => {
                 // Send error message
                 if tx.send(ScanMessage::Error(e.to_string())).is_err() {
                     log::error!("Failed to send error message");
                 }
-                
-                // Return () to match the expected JoinHandle<()> type
-                ()
             }
         }
     });
@@ -137,29 +360,78 @@ pub fn handle_copy_missing_scan_messages(app: &mut App) {
     if let Some(ref rx) = app.scan_rx {
         while let Ok(msg) = rx.try_recv() {
             match msg {
-                ScanMessage::StatusUpdate(stage, message) => {
-                    app.state.loading_message = message.clone();
-                    log::debug!("[CopyMissing] Stage {}: {}", stage, message);
-                },
-                ScanMessage::Error(error) => {
-                    app.state.is_loading = false;
-                    app.state.loading_message = format!("Error: {}", error);
-                    app.state.log_messages.push(format!("ERROR: {}", error));
-                    log::error!("[CopyMissing] {}", error);
-                },
-                ScanMessage::Completed(result) => {
-                    if let Ok(sets) = result {
-                        // Process duplicate sets - this is default implementation, doesn't handle missing files
-                        let (grouped_data, display_list) = App::process_raw_sets_into_grouped_view(sets, true);
-                        app.state.grouped_data = grouped_data;
-                        app.state.display_list = display_list;
-                        app.state.is_loading = false;
-                        app.state.loading_message = "Scan complete.".to_string();
-                        app.state.status_message = Some(format!(
-                            "Found {} duplicate sets. Select files to process.",
-                            app.state.grouped_data.iter().map(|g| g.sets.len()).sum::<usize>()
-                        ));
+                ScanMessage::StatusUpdate(stage, msg) => {
+                    let stage_prefix = match stage {
+                        0 => "⏳ [0/3] ", // Pre-scan stage
+                        1 => "📁 [1/3] ",
+                        2 => "🔍 [2/3] ",
+                        3 => "🔄 [3/3] ",
+                        _ => "",
+                    };
+                    
+                    app.state.loading_message = format!("{}{}", stage_prefix, msg);
+                    // Log important messages
+                    if stage == 3 || msg.contains("complete") || msg.contains("error") {
+                        log::info!("Scan status: {}{}", stage_prefix, msg);
+                    } else {
+                        log::debug!("Scan status: {}{}", stage_prefix, msg);
                     }
+                }
+                ScanMessage::Completed(result) => {
+                    match result {
+                        Ok(sets) => {
+                            // Process the raw sets into our grouped view
+                            let (grouped_data, display_list) =
+                                App::process_raw_sets_into_grouped_view(sets, true);
+                            
+                            log::info!("Scan completed. Found {} groups with missing files", grouped_data.len());
+                            
+                            // Additional logging for debugging
+                            let total_files = grouped_data.iter()
+                                .map(|g| g.sets.iter().map(|s| s.files.len()).sum::<usize>())
+                                .sum::<usize>();
+                            
+                            log::info!("Total missing files found: {}", total_files);
+                            
+                            if grouped_data.is_empty() {
+                                log::warn!("No missing files found. Check your source and target directories.");
+                                app.state.status_message = Some("No missing files found. All files from source exist in target.".to_string());
+                            } else {
+                                // Group data by parent folder
+                                for group in &grouped_data {
+                                    log::info!("Folder: {} - contains {} sets", 
+                                        group.path.display(), group.sets.len());
+                                    
+                                    let files_in_group = group.sets.iter()
+                                        .map(|s| s.files.len())
+                                        .sum::<usize>();
+                                    
+                                    log::info!("  Total files in group: {}", files_in_group);
+                                }
+                            }
+                            
+                            app.state.grouped_data = grouped_data;
+                            app.state.display_list = display_list;
+                            app.state.is_loading = false;
+                            
+                            // Update the status message
+                            log::info!("Copy missing scan complete");
+                            app.state.status_message = Some(format!(
+                                "Scan complete! Found {} missing files to copy.",
+                                total_files
+                            ));
+                        }
+                        Err(e) => {
+                            app.state.is_loading = false;
+                            app.state.status_message = Some(format!("Scan error: {}", e));
+                            log::error!("Copy missing scan error: {}", e);
+                        }
+                    }
+                }
+                ScanMessage::Error(e) => {
+                    app.state.is_loading = false;
+                    app.state.status_message = Some(format!("Error: {}", e));
+                    log::error!("Copy missing scan error: {}", e);
                 }
             }
         }
@@ -230,7 +502,13 @@ pub fn ui_copy_missing(frame: &mut Frame, app: &mut App) {
         );
 
     // Middle Panel: Destination Browser
-    let middle_title = "Destination Browser";
+    let mode_info = if app.state.update_mode {
+        " (Update Mode)"
+    } else {
+        ""
+    };
+    
+    let middle_title = format!("Destination Browser{}", mode_info);
     let middle_block = Block::default()
         .borders(Borders::ALL)
         .title(middle_title)
@@ -337,64 +615,34 @@ pub fn ui_copy_missing(frame: &mut Frame, app: &mut App) {
     }
     frame.render_stateful_widget(missing_files_list, main_chunks[0], &mut sets_list_state);
 
-    // Middle Panel - Destination Browser
-    // Create the destination items list
-    let destination_items: Vec<ListItem> = if let Some(dest_path) = &app.state.destination_path {
-        // Get directory entries from the destination directory
-        let entries = match std::fs::read_dir(dest_path) {
-            Ok(entries) => entries
-                .filter_map(Result::ok)
-                .map(|entry| {
-                    let path = entry.path();
-                    let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
-                    let is_dir = path.is_dir();
-                    let prefix = if is_dir { "[Dir] " } else { "[File] " };
-                    
-                    // Format file size if it's a file
-                    let size_str = if !is_dir {
-                        if let Ok(metadata) = std::fs::metadata(&path) {
-                            format!(" ({})", format_size(metadata.len(), DECIMAL))
-                        } else {
-                            String::new()
-                        }
-                    } else {
-                        String::new()
-                    };
-                    
-                    ListItem::new(format!("{}{}{}", prefix, name, size_str))
-                })
-                .collect::<Vec<_>>(),
-            Err(_) => vec![ListItem::new("Error reading destination directory")],
-        };
+    // Middle Panel - Destination Browser using FileBrowser
+    if let Some(file_browser) = &app.state.file_browser {
+        // Create browser widget
+        let mut browser_widget = file_browser.widget();
         
-        if entries.is_empty() {
-            vec![ListItem::new("(Empty directory)")]
-        } else {
-            entries
+        // Update the block to match our theme
+        browser_widget = browser_widget
+            .block(middle_block);
+        
+        // Render with state
+        let mut browser_state = ListState::default();
+        if !file_browser.entries.is_empty() {
+            browser_state.select(Some(file_browser.selected_index));
         }
+        
+        frame.render_stateful_widget(browser_widget, main_chunks[1], &mut browser_state);
     } else {
-        vec![
+        // Fallback if no file browser is available
+        let no_browser_msg = vec![
             ListItem::new("No destination directory selected."),
             ListItem::new("Press 'C' to select a destination for copy.")
-        ]
-    };
-
-    // Save whether the list is empty for later use
-    let is_dest_list_empty = destination_items.is_empty();
-
-    // Create the list widget with the items
-    let destination_list = List::new(destination_items)
-        .block(middle_block)
-        .highlight_style(Style::default().bg(Color::DarkGray))
-        .highlight_symbol(">> ");
-    
-    // Create state for the list
-    let mut dest_list_state = ListState::default();
-    if !is_dest_list_empty {
-        dest_list_state.select(Some(app.state.selected_destination_index));
+        ];
+        
+        let fallback_list = List::new(no_browser_msg)
+            .block(middle_block);
+            
+        frame.render_widget(fallback_list, main_chunks[1]);
     }
-    
-    frame.render_stateful_widget(destination_list, main_chunks[1], &mut dest_list_state);
 
     // Right Panel: Jobs
     let job_items: Vec<ListItem> = app
@@ -406,7 +654,13 @@ pub fn ui_copy_missing(frame: &mut Frame, app: &mut App) {
                 ActionType::Keep => "KEEP".to_string(),
                 ActionType::Delete => "DELETE".to_string(),
                 ActionType::Move(dest) => format!("MOVE to {}", dest.display()),
-                ActionType::Copy(dest) => format!("COPY to {}", dest.display()),
+                ActionType::Copy(dest) => {
+                    if app.state.update_mode {
+                        format!("UPDATE to {}", dest.display())
+                    } else {
+                        format!("COPY to {}", dest.display())
+                    }
+                },
                 ActionType::Ignore => "IGNORE".to_string(),
             };
             let content = Line::from(Span::raw(format!(
@@ -447,10 +701,20 @@ pub fn ui_copy_missing(frame: &mut Frame, app: &mut App) {
             } else {
                 status_text = format!("{} (Ctrl+D: Dry Run)", status_text);
             }
+            
+            // Add update mode indicator
+            if app.state.update_mode {
+                status_text = format!("[UPDATE MODE] {} (u: Toggle)", status_text);
+            } else {
+                status_text = format!("{} (u: Update Mode)", status_text);
+            }
 
             let status_style = if app.state.dry_run {
                 // Use yellow for dry run mode to make it more obvious
                 Style::default().fg(Color::Yellow)
+            } else if app.state.update_mode {
+                // Use green for update mode
+                Style::default().fg(Color::Green)
             } else {
                 Style::default().fg(Color::LightCyan)
             };
@@ -501,7 +765,7 @@ pub fn ui_copy_missing(frame: &mut Frame, app: &mut App) {
     }
 
     // Draw help bar at the very bottom
-    let help = "Tab: Switch Panel | Space: Toggle Expand | C: Copy Selected File | Ctrl+E: Execute Copy | Ctrl+D: Dry Run Toggle";
+    let help = "Tab: Switch Panel | Space: Toggle Expand | C: Copy Selected File | Ctrl+E: Execute Copy | Ctrl+D: Dry Run | u: Update Mode";
     let help_bar = ratatui::widgets::Paragraph::new(help)
         .style(Style::default().fg(Color::DarkGray))
         .alignment(Alignment::Center);
@@ -556,12 +820,25 @@ fn draw_progress_bar(frame: &mut Frame, app: &mut App, area: Rect) {
 
         frame.render_widget(gauge, area);
     } else if app.state.is_loading {
-        // Extract progress information
+        // Extract progress information from the loading message
         let progress_msg = app.state.loading_message.clone();
-        let progress_pct = 0.5; // Default to 50% if we can't determine actual progress
+        
+        // Try to parse a percentage from the message if available
+        let progress_pct = if progress_msg.contains('%') {
+            let parts: Vec<&str> = progress_msg.split('(').collect();
+            if parts.len() > 1 {
+                let percent_part = parts[1].split(')').next().unwrap_or("0%");
+                let percent_str = percent_part.trim_end_matches('%').trim();
+                percent_str.parse::<f64>().unwrap_or(50.0) / 100.0
+            } else {
+                0.5 // Default to 50%
+            }
+        } else {
+            0.5 // Default to 50% if no percentage in message
+        };
 
         let gauge = Gauge::default()
-            .block(Block::default().borders(Borders::ALL).title("Loading"))
+            .block(Block::default().borders(Borders::ALL).title("Scanning Progress"))
             .gauge_style(Style::default().fg(Color::Blue).bg(Color::Black))
             .label(progress_msg)
             .ratio(progress_pct);
@@ -623,6 +900,7 @@ mod tests {
             deduplicate: false,
             delete: false,
             move_to: None,
+            update_mode: false,
             log: false,
             log_file: None,
             output: None,
@@ -668,6 +946,7 @@ mod tests {
             deduplicate: false,
             delete: false,
             move_to: None,
+            update_mode: false,
             log: false,
             log_file: None,
             output: None,
