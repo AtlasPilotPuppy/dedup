@@ -477,7 +477,7 @@ pub fn find_duplicate_files_with_progress(
                             files_scanned_count,
                             total_files,
                             percent,
-                            path.display().to_string()
+                            path.display()
                         ),
                     );
                 } else {
@@ -487,7 +487,7 @@ pub fn find_duplicate_files_with_progress(
                         format!(
                             "Stage 1/3: 📁 Found {} files... (Current: {})",
                             files_scanned_count,
-                            path.display().to_string()
+                            path.display()
                         ),
                     );
                 }
@@ -1916,7 +1916,7 @@ pub fn compare_directories_with_progress(
 
     // Count files to provide better progress updates
     let mut total_files_to_scan = 0;
-    let files_scanned = 0;
+    let _files_scanned = 0;
 
     // First count all files in all directories for better progress reporting
     for dir in source_dirs.iter().chain(std::iter::once(&target_dir)) {
@@ -1937,7 +1937,7 @@ pub fn compare_directories_with_progress(
     // Create custom progress callback for scanning
     let tx_clone = tx_progress.clone();
     let mut files_scanned = 0;
-    let scan_progress_callback = move |files_processed: usize| {
+    let _scan_progress_callback = move |files_processed: usize| {
         files_scanned += files_processed;
         let percent = if total_files_to_scan > 0 {
             (files_scanned as f32 / total_files_to_scan as f32) * 100.0

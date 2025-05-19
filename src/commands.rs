@@ -52,11 +52,10 @@ pub fn run_app(options: &Options) -> Result<()> {
         // No need to set up logging here
     } else if options.log || options.log_file.is_some() {
         // User enabled logging
-        let log_path = if let Some(path) = &options.log_file {
-            path.as_path()
-        } else {
-            Path::new("dedups.log")
-        };
+        let log_path = options
+            .log_file
+            .as_deref()
+            .unwrap_or_else(|| Path::new("dedups.log"));
         setup_logger(options.verbose, Some(log_path))?;
     } else if options.progress {
         // CLI progress display - use terminal logger
@@ -139,8 +138,7 @@ fn run_interactive_mode(options: &Options) -> Result<()> {
     // If log_file is specified, use that, otherwise use a default location
     let log_path = options
         .log_file
-        .as_ref()
-        .map(|p| p.as_path())
+        .as_deref()
         .unwrap_or_else(|| Path::new("dedups.log"));
 
     // Make sure logging is set up before any log calls
@@ -214,8 +212,7 @@ fn handle_multi_directory_mode(options: &Options) -> Result<()> {
         .as_ref()
         .zip(comparison_pb_current_op.as_ref());
 
-    let comparison_result =
-        crate::file_utils::compare_directories(options, progress_tuple.map(|(o, c)| (o, c)))?;
+    let comparison_result = crate::file_utils::compare_directories(options, progress_tuple)?;
 
     if let Some(pb) = comparison_pb_overall.as_ref() {
         pb.finish_with_message("Directory comparison complete.");
@@ -276,7 +273,7 @@ fn handle_multi_directory_mode(options: &Options) -> Result<()> {
             &comparison_result.missing_in_target,
             &target_dir,
             options.dry_run,
-            copy_progress_tuple.map(|(o, c)| (o.clone(), c.clone())), // Clone PBs to pass ownership
+            copy_progress_tuple.map(|(o, c)| (o.clone(), c.clone())),
         ) {
             Ok((count, logs)) => {
                 if let Some(pb) = copy_pb_overall.as_ref() {
@@ -513,8 +510,7 @@ fn run_copy_missing_interactive_mode(options: &Options) -> Result<()> {
     // If log_file is specified, use that, otherwise use a default location
     let log_path = options
         .log_file
-        .as_ref()
-        .map(|p| p.as_path())
+        .as_deref()
         .unwrap_or_else(|| Path::new("dedups.log"));
 
     // Make sure logging is set up before any log calls
@@ -590,10 +586,8 @@ fn handle_copy_missing_mode(options: &Options) -> Result<()> {
         .zip(comparison_pb_current_op.as_ref());
 
     // Find missing files that aren't in the target directory
-    let comparison_result = crate::file_utils::compare_directories(
-        options,
-        comparison_progress_tuple.map(|(o, c)| (o, c)),
-    )?;
+    let comparison_result =
+        crate::file_utils::compare_directories(options, comparison_progress_tuple)?;
 
     if let Some(pb) = comparison_pb_overall.as_ref() {
         pb.finish_with_message("Comparison complete.");

@@ -1,19 +1,14 @@
 // use anyhow::Result; // This import seems unused
 
 // Define operating modes for the application
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AppMode {
     // Standard deduplication mode - find and manage duplicate files
+    #[default]
     Deduplication,
 
     // Copy missing mode - compare directories and copy missing files
     CopyMissing,
-}
-
-impl Default for AppMode {
-    fn default() -> Self {
-        AppMode::Deduplication
-    }
 }
 
 #[cfg(test)]

@@ -1,7 +1,6 @@
 use anyhow::Result;
 use crossterm::event::{Event as CEvent, KeyCode, KeyEvent, KeyModifiers};
 // For displaying actual core count in auto mode
-use ratatui::prelude::*;
 use std::collections::HashMap; // For grouping
 use std::path::{Path, PathBuf}; // Ensure Path is imported here
 use std::str::FromStr;

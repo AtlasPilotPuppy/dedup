@@ -379,7 +379,7 @@ impl Options {
             media_formats: cli.media_formats.clone(),
             media_similarity: cli.media_similarity,
             media_dedup_options: cli.media_dedup_options.clone(),
-            app_mode: app_mode,
+            app_mode,
         }
     }
 }
