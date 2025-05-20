@@ -8,6 +8,7 @@ use std::sync::mpsc as std_mpsc; // Alias to avoid conflict if crate::mpsc is us
 use std::thread as std_thread; // Alias for clarity
 use tui_input::backend::crossterm::EventHandler; // For tui-input
 use tui_input::Input;
+use std::collections::HashSet;
 
 use crate::file_utils::{
     self, delete_files, move_files, DuplicateSet, FileInfo, SelectionStrategy, SortCriterion,
@@ -135,6 +136,7 @@ pub struct AppState {
 
     pub dry_run: bool, // Indicates if actions should be performed in dry run mode
     pub is_copy_missing_mode: bool, // Set to true for copy missing mode
+    pub selected_left_panel: HashSet<PathBuf>, // Track selected files/sets in the left panel
 }
 
 // Channel for messages from scan thread to TUI thread
@@ -205,6 +207,7 @@ impl App {
             is_copy_missing_mode: false, // Set to false for regular mode
             file_browser: None,
             update_mode: false,
+            selected_left_panel: HashSet::new(),
         };
 
         // Always perform async scan for TUI

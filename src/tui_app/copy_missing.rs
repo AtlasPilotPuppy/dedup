@@ -14,7 +14,6 @@ use std::io::stdout;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use crate::file_utils::SortCriterion;
 use crate::options::Options;
 use crate::tui_app::file_browser::FileBrowser;
 use crate::tui_app::{ActionType, ActivePanel, App, InputMode, Job, ScanMessage};
@@ -211,23 +210,40 @@ fn handle_key_event(app: &mut App, key: KeyEvent, options: &Options) {
                     };
                     app.state.status_message = Some(msg.into());
                 }
-                // Change file browser sorting
+                // Sorting shortcuts for left panel
                 (KeyCode::Char('n'), KeyModifiers::NONE) => {
-                    if let Some(file_browser) = &mut app.state.file_browser {
-                        file_browser.set_sort_criterion(SortCriterion::FileName);
-                        app.state.status_message = Some("Sorted by filename".into());
-                    }
-                }
-                (KeyCode::Char('m'), KeyModifiers::NONE) => {
-                    if let Some(file_browser) = &mut app.state.file_browser {
-                        file_browser.set_sort_criterion(SortCriterion::ModifiedAt);
-                        app.state.status_message = Some("Sorted by modification time".into());
+                    if app.state.active_panel == crate::tui_app::ActivePanel::Sets {
+                        app.state.current_sort_criterion = crate::file_utils::SortCriterion::FileName;
+                        app.state.display_list = crate::tui_app::App::build_display_list_from_grouped_data(&app.state.grouped_data);
+                        app.state.status_message = Some("Sorted by name".into());
                     }
                 }
                 (KeyCode::Char('z'), KeyModifiers::NONE) => {
-                    if let Some(file_browser) = &mut app.state.file_browser {
-                        file_browser.set_sort_criterion(SortCriterion::FileSize);
-                        app.state.status_message = Some("Sorted by file size".into());
+                    if app.state.active_panel == crate::tui_app::ActivePanel::Sets {
+                        app.state.current_sort_criterion = crate::file_utils::SortCriterion::FileSize;
+                        app.state.display_list = crate::tui_app::App::build_display_list_from_grouped_data(&app.state.grouped_data);
+                        app.state.status_message = Some("Sorted by size".into());
+                    }
+                }
+                (KeyCode::Char('m'), KeyModifiers::NONE) => {
+                    if app.state.active_panel == crate::tui_app::ActivePanel::Sets {
+                        app.state.current_sort_criterion = crate::file_utils::SortCriterion::ModifiedAt;
+                        app.state.display_list = crate::tui_app::App::build_display_list_from_grouped_data(&app.state.grouped_data);
+                        app.state.status_message = Some("Sorted by modified time".into());
+                    }
+                }
+                (KeyCode::Char('c'), KeyModifiers::NONE) => {
+                    if app.state.active_panel == crate::tui_app::ActivePanel::Sets {
+                        app.state.current_sort_criterion = crate::file_utils::SortCriterion::CreatedAt;
+                        app.state.display_list = crate::tui_app::App::build_display_list_from_grouped_data(&app.state.grouped_data);
+                        app.state.status_message = Some("Sorted by created time".into());
+                    }
+                }
+                (KeyCode::Char('d'), KeyModifiers::NONE) => {
+                    if app.state.active_panel == crate::tui_app::ActivePanel::Sets {
+                        app.state.current_sort_criterion = crate::file_utils::SortCriterion::PathLength;
+                        app.state.display_list = crate::tui_app::App::build_display_list_from_grouped_data(&app.state.grouped_data);
+                        app.state.status_message = Some("Sorted by duplicates (path length)".into());
                     }
                 }
                 // Toggle folders first
@@ -251,6 +267,79 @@ fn handle_key_event(app: &mut App, key: KeyEvent, options: &Options) {
                         "Update mode DISABLED - all files will be copied"
                     };
                     app.state.status_message = Some(msg.into());
+                }
+                // Toggle selection for the highlighted file/set
+                (KeyCode::Char(' '), KeyModifiers::NONE) | (KeyCode::Enter, KeyModifiers::NONE) => {
+                    if app.state.active_panel == crate::tui_app::ActivePanel::Sets {
+                        if let Some(selected_item) = app.state.display_list.get(app.state.selected_display_list_index) {
+                            // Get the file path for single files, or all file paths for a set
+                            match selected_item {
+                                crate::tui_app::DisplayListItem::SetEntry { original_group_index, original_set_index_in_group, file_count_in_set, .. } => {
+                                    let paths: Vec<PathBuf> = if *file_count_in_set == 1 {
+                                        // Single file
+                                        app.state.grouped_data
+                                            .get(*original_group_index)
+                                            .and_then(|group| group.sets.get(*original_set_index_in_group))
+                                            .and_then(|set| set.files.first())
+                                            .map(|f| vec![f.path.clone()])
+                                            .unwrap_or_default()
+                                    } else {
+                                        // All files in set
+                                        app.state.grouped_data
+                                            .get(*original_group_index)
+                                            .and_then(|group| group.sets.get(*original_set_index_in_group))
+                                            .map(|set| set.files.iter().map(|f| f.path.clone()).collect())
+                                            .unwrap_or_default()
+                                    };
+                                    for path in paths {
+                                        if !app.state.selected_left_panel.remove(&path) {
+                                            app.state.selected_left_panel.insert(path);
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                // Select all/unselect all
+                (KeyCode::Char('a'), KeyModifiers::NONE) => {
+                    if app.state.active_panel == crate::tui_app::ActivePanel::Sets {
+                        let mut all_paths = Vec::new();
+                        for item in &app.state.display_list {
+                            if let crate::tui_app::DisplayListItem::SetEntry { original_group_index, original_set_index_in_group, file_count_in_set, .. } = item {
+                                let paths: Vec<PathBuf> = if *file_count_in_set == 1 {
+                                    app.state.grouped_data
+                                        .get(*original_group_index)
+                                        .and_then(|group| group.sets.get(*original_set_index_in_group))
+                                        .and_then(|set| set.files.first())
+                                        .map(|f| vec![f.path.clone()])
+                                        .unwrap_or_default()
+                                } else {
+                                    app.state.grouped_data
+                                        .get(*original_group_index)
+                                        .and_then(|group| group.sets.get(*original_set_index_in_group))
+                                        .map(|set| set.files.iter().map(|f| f.path.clone()).collect())
+                                        .unwrap_or_default()
+                                };
+                                all_paths.extend(paths);
+                            }
+                        }
+                        let all_selected = all_paths.iter().all(|p| app.state.selected_left_panel.contains(p));
+                        if all_selected {
+                            for p in all_paths { app.state.selected_left_panel.remove(&p); }
+                        } else {
+                            for p in all_paths { app.state.selected_left_panel.insert(p); }
+                        }
+                    }
+                }
+                // Show help screen
+                (KeyCode::Char('h'), KeyModifiers::NONE) | (KeyCode::Char('H'), KeyModifiers::NONE) => {
+                    if app.state.input_mode == crate::tui_app::InputMode::Help {
+                        app.state.input_mode = crate::tui_app::InputMode::Normal;
+                    } else {
+                        app.state.input_mode = crate::tui_app::InputMode::Help;
+                    }
                 }
                 _ => {}
             }
@@ -279,7 +368,17 @@ fn handle_key_event(app: &mut App, key: KeyEvent, options: &Options) {
                 }
             }
         }
-        _ => {}
+        InputMode::Help => {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('h') | KeyCode::Char('H') => {
+                    app.state.input_mode = crate::tui_app::InputMode::Normal;
+                }
+                _ => {}
+            }
+        }
+        _ => {
+            // Handle other input modes (Settings, Help, etc.) if necessary
+        }
     }
 }
 
@@ -604,25 +703,38 @@ pub fn ui_copy_missing(frame: &mut Frame, app: &mut App) {
                 ..
             } => {
                 let indent_str = if *indent { "  " } else { "" };
-                // If this set has only one file, show the file name instead of 'Set ...'
                 let is_single_file = *file_count_in_set == 1;
                 if is_single_file {
-                    // Get the file name from grouped_data
-                    let file_name = app.state.grouped_data
+                    let file_path = app.state.grouped_data
                         .get(*original_group_index)
                         .and_then(|group| group.sets.get(*original_set_index_in_group))
                         .and_then(|set| set.files.first())
-                        .map(|f| f.path.file_name().unwrap_or_default().to_string_lossy().to_string())
+                        .map(|f| f.path.clone());
+                    let file_name = file_path
+                        .as_ref()
+                        .and_then(|p| p.file_name())
+                        .map(|n| n.to_string_lossy().to_string())
                         .unwrap_or_else(|| "(unknown)".to_string());
+                    let selected = file_path.map(|p| app.state.selected_left_panel.contains(&p)).unwrap_or(false);
+                    let sel_box = if selected { "[x]" } else { "[ ]" };
                     ListItem::new(Line::from(Span::styled(
-                        format!("{}{}", indent_str, file_name),
+                        format!("{}{} {}", indent_str, sel_box, file_name),
                         Style::default(),
                     )))
                 } else {
+                    // For sets, show as selected if all files in set are selected
+                    let file_paths: Vec<PathBuf> = app.state.grouped_data
+                        .get(*original_group_index)
+                        .and_then(|group| group.sets.get(*original_set_index_in_group))
+                        .map(|set| set.files.iter().map(|f| f.path.clone()).collect())
+                        .unwrap_or_default();
+                    let all_selected = !file_paths.is_empty() && file_paths.iter().all(|p| app.state.selected_left_panel.contains(p));
+                    let sel_box = if all_selected { "[x]" } else { "[ ]" };
                     ListItem::new(Line::from(Span::styled(
                         format!(
-                            "{}Set {} ({} files, {})",
+                            "{}{} Set {} ({} files, {})",
                             indent_str,
+                            sel_box,
                             set_hash_preview,
                             file_count_in_set,
                             format_size(*set_total_size, DECIMAL)
@@ -785,6 +897,25 @@ pub fn ui_copy_missing(frame: &mut Frame, app: &mut App) {
                 input_chunks[1].x + app.state.current_input.visual_cursor() as u16 + 1,
                 input_chunks[1].y + 1,
             );
+        }
+        InputMode::Help => {
+            // Render a help screen at the bottom
+            let help_text = "Help - Key Bindings\n\n\
+Tab: Switch Panel\n\
+Space/Enter: Select/Unselect file or set\n\
+a: Select/Unselect all\n\
+n: Sort by name\n\
+z: Sort by size\n\
+m: Sort by modified\n\
+c: Sort by created\n\
+d: Sort by duplicates\n\
+H: Toggle help\n\
+q/Esc/Ctrl+C: Quit\n";
+            let help_widget = ratatui::widgets::Paragraph::new(help_text)
+                .style(Style::default().fg(Color::Yellow))
+                .alignment(Alignment::Left)
+                .block(Block::default().borders(Borders::ALL).title("Help"));
+            frame.render_widget(help_widget, chunks[3]);
         }
         _ => {
             // Handle other input modes (Settings, Help, etc.) if necessary
