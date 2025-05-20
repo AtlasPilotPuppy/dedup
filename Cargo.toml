@@ -27,8 +27,9 @@ fnv = "1.0"        # For FNV-1a implementation
 crc32fast = "1.3"  # For CRC-32 implementation
 hex = "0.4"        # For hex encoding
 rayon = "~1.10.0"
-ratatui = { version = "~0.26.0", features = ["crossterm"] }
-crossterm = "0.27"
+ratatui = { version = "~0.29.0", features = ["crossterm"] }
+crossterm = "0.28"
+ratatui-explorer = "0.2"  # File explorer for ratatui
 thiserror = "1.0"
 log = "0.4"
 simplelog = "~0.12.1"

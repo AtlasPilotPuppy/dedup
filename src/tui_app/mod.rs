@@ -1,14 +1,14 @@
 use anyhow::Result;
-use crossterm::event::{Event as CEvent, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 // For displaying actual core count in auto mode
 use std::collections::HashMap; // For grouping
 use std::path::{Path, PathBuf}; // Ensure Path is imported here
 use std::str::FromStr;
 use std::sync::mpsc as std_mpsc; // Alias to avoid conflict if crate::mpsc is used elsewhere
 use std::thread as std_thread; // Alias for clarity
-use tui_input::backend::crossterm::EventHandler; // For tui-input
 use tui_input::Input;
 use std::collections::HashSet;
+ // For input handling
 
 use crate::file_utils::{
     self, delete_files, move_files, DuplicateSet, FileInfo, SelectionStrategy, SortCriterion,
@@ -21,6 +21,9 @@ pub mod copy_missing;
 
 // Add the file_browser module
 pub mod file_browser;
+
+// Add the explorer_browser module
+pub mod explorer_browser;
 
 // Application state
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)] // Added PartialEq, Eq
@@ -99,6 +102,9 @@ pub struct AppState {
 
     // File browser - using new module
     pub file_browser: Option<crate::tui_app::file_browser::FileBrowser>,
+    
+    // Enhanced explorer - using ratatui-explorer
+    pub enhanced_explorer: Option<crate::tui_app::explorer_browser::EnhancedExplorer>,
 
     // Update mode - only copy newer files
     pub update_mode: bool,
@@ -137,6 +143,7 @@ pub struct AppState {
     pub dry_run: bool, // Indicates if actions should be performed in dry run mode
     pub is_copy_missing_mode: bool, // Set to true for copy missing mode
     pub selected_left_panel: HashSet<PathBuf>, // Track selected files/sets in the left panel
+    pub last_job_completion_check: Option<bool> // Track if jobs were processing in the last check
 }
 
 // Channel for messages from scan thread to TUI thread
@@ -208,6 +215,8 @@ impl App {
             file_browser: None,
             update_mode: false,
             selected_left_panel: HashSet::new(),
+            enhanced_explorer: None,
+            last_job_completion_check: None,
         };
 
         // Always perform async scan for TUI
@@ -1276,12 +1285,17 @@ impl App {
                 self.state.file_for_copy_move = None;
                 self.state.status_message = Some("Copy action cancelled.".to_string());
             }
-            _ => {
-                // Pass the event to tui-input handler
-                self.state
-                    .current_input
-                    .handle_event(&CEvent::Key(key_event));
+            // Handle simple cases directly, as tui-input's API for cursor manipulation is limited
+            KeyCode::Char(c) => {
+                self.state.current_input = tui_input::Input::from(self.state.current_input.value().to_string() + &c.to_string());
             }
+            KeyCode::Backspace => {
+                let value = self.state.current_input.value().to_string();
+                if !value.is_empty() {
+                    self.state.current_input = tui_input::Input::from(&value[..value.len()-1]);
+                }
+            }
+            _ => {} // Ignore other keys for simplicity
         }
     }
 

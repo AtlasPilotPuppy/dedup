@@ -15,9 +15,9 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crate::options::Options;
+use crate::tui_app::explorer_browser::EnhancedExplorer;
 use crate::tui_app::file_browser::FileBrowser;
 use crate::tui_app::{ActionType, ActivePanel, App, InputMode, Job, ScanMessage};
-use tui_input::backend::crossterm::EventHandler;
 
 /// Entry point for the Copy Missing TUI
 pub fn run_copy_missing_tui(options: &Options) -> Result<()> {
@@ -100,7 +100,12 @@ fn handle_key_event(app: &mut App, key: KeyEvent, options: &Options) {
                     match app.state.active_panel {
                         ActivePanel::Sets => app.select_previous_set(),
                         ActivePanel::Files => {
-                            if let Some(file_browser) = &mut app.state.file_browser {
+                            if let Some(explorer) = &mut app.state.enhanced_explorer {
+                                if explorer.select_prev().is_err() {
+                                    app.state.status_message = Some("Error navigating in file explorer".to_string());
+                                }
+                            } else if let Some(file_browser) = &mut app.state.file_browser {
+                                // Fallback to old browser
                                 file_browser.select_prev();
                             }
                         }
@@ -111,7 +116,12 @@ fn handle_key_event(app: &mut App, key: KeyEvent, options: &Options) {
                     match app.state.active_panel {
                         ActivePanel::Sets => app.select_next_set(),
                         ActivePanel::Files => {
-                            if let Some(file_browser) = &mut app.state.file_browser {
+                            if let Some(explorer) = &mut app.state.enhanced_explorer {
+                                if explorer.select_next().is_err() {
+                                    app.state.status_message = Some("Error navigating in file explorer".to_string());
+                                }
+                            } else if let Some(file_browser) = &mut app.state.file_browser {
+                                // Fallback to old browser
                                 file_browser.select_next();
                             }
                         }
@@ -136,19 +146,44 @@ fn handle_key_event(app: &mut App, key: KeyEvent, options: &Options) {
                 }
                 (KeyCode::Enter, KeyModifiers::NONE) => {
                     if app.state.active_panel == ActivePanel::Files {
-                        if let Some(file_browser) = &mut app.state.file_browser {
+                        // Try with enhanced explorer first
+                        if let Some(explorer) = &mut app.state.enhanced_explorer {
+                            if explorer.is_selected_dir() {
+                                if let Some(path) = explorer.selected_path() {
+                                    if explorer.change_directory(path.clone()).is_err() {
+                                        app.state.status_message = Some(format!("Could not enter directory: {}", path.display()));
+                                    }
+                                }
+                            }
+                        // Fallback to the old file browser
+                        } else if let Some(file_browser) = &mut app.state.file_browser {
                             if let Some(entry) = file_browser.selected_entry() {
                                 if entry.is_dir() {
                                     file_browser.change_directory(entry.path.clone());
                                 }
                             }
                         }
+                    } else if app.state.active_panel == ActivePanel::Sets {
+                        // Toggle folder expansion when Enter is pressed in the sets panel
+                        if let Some(crate::tui_app::DisplayListItem::Folder { is_expanded, .. }) = 
+                            app.state.display_list.get_mut(app.state.selected_display_list_index) {
+                            *is_expanded = !*is_expanded;
+                            app.state.status_message = Some(if *is_expanded { 
+                                "Folder expanded".to_string() 
+                            } else { 
+                                "Folder collapsed".to_string() 
+                            });
+                        }
                     }
                 }
                 // Refresh directories
                 (KeyCode::Char('r'), KeyModifiers::CONTROL)
                 | (KeyCode::F(5), KeyModifiers::NONE) => {
-                    if let Some(file_browser) = &mut app.state.file_browser {
+                    if let Some(explorer) = &mut app.state.enhanced_explorer {
+                        if explorer.refresh().is_err() {
+                            app.state.status_message = Some("Error refreshing directory".to_string());
+                        }
+                    } else if let Some(file_browser) = &mut app.state.file_browser {
                         file_browser.refresh();
                     }
                 }
@@ -180,18 +215,28 @@ fn handle_key_event(app: &mut App, key: KeyEvent, options: &Options) {
                 // Select/copy files (keep for backward compatibility)
                 (KeyCode::Char('s'), KeyModifiers::NONE) => {
                     if app.state.active_panel == ActivePanel::Sets {
-                        // Use the destination browser's selected path, or a default
-                        if let Some(browser) = &app.state.file_browser {
-                            if let Some(selected_path) = browser.get_selected_path() {
-                                if let Some(current_item) = app.current_selected_file() {
-                                    app.state.jobs.push(Job {
-                                        action: ActionType::Copy(selected_path),
-                                        file_info: current_item.clone(),
-                                    });
-                                }
+                        // Try to get the selected path from the enhanced explorer first
+                        let selected_path = if let Some(explorer) = &app.state.enhanced_explorer {
+                            explorer.selected_path()
+                        } 
+                        // Fallback to old file browser
+                        else if let Some(browser) = &app.state.file_browser {
+                            browser.get_selected_path()
+                        } else {
+                            None
+                        };
+                        
+                        if let Some(selected_path) = selected_path {
+                            if let Some(current_item) = app.current_selected_file() {
+                                app.state.jobs.push(Job {
+                                    action: ActionType::Copy(selected_path),
+                                    file_info: current_item.clone(),
+                                });
+                                app.state.status_message = Some("File queued for copy".into());
                             }
+                        } else {
+                            app.state.status_message = Some("No destination selected. Please select a destination directory first.".into());
                         }
-                        app.state.status_message = Some("File(s) queued for copy".into());
                     }
                 }
                 // Execute queued jobs (Ctrl+E)
@@ -270,7 +315,14 @@ fn handle_key_event(app: &mut App, key: KeyEvent, options: &Options) {
                 }
                 // Toggle folders first
                 (KeyCode::Char('f'), KeyModifiers::NONE) => {
-                    if let Some(file_browser) = &mut app.state.file_browser {
+                    if let Some(explorer) = &mut app.state.enhanced_explorer {
+                        if explorer.toggle_folders_first().is_err() {
+                            app.state.status_message = Some("Error toggling folders first setting".to_string());
+                        } else {
+                            let msg = "Folder display settings updated";
+                            app.state.status_message = Some(msg.into());
+                        }
+                    } else if let Some(file_browser) = &mut app.state.file_browser {
                         file_browser.toggle_folders_first();
                         let msg = if file_browser.folders_first {
                             "Folders will be listed first"
@@ -278,6 +330,13 @@ fn handle_key_event(app: &mut App, key: KeyEvent, options: &Options) {
                             "Sorting with files and folders mixed"
                         };
                         app.state.status_message = Some(msg.into());
+                    }
+                }
+                // Toggle file details panel
+                (KeyCode::Char('i'), KeyModifiers::NONE) => {
+                    if let Some(explorer) = &mut app.state.enhanced_explorer {
+                        explorer.toggle_details();
+                        app.state.status_message = Some("Toggled file details panel".into());
                     }
                 }
                 // Switch between update mode and regular copy
@@ -290,10 +349,22 @@ fn handle_key_event(app: &mut App, key: KeyEvent, options: &Options) {
                     };
                     app.state.status_message = Some(msg.into());
                 }
-                // Toggle selection for the highlighted file/set
+                // Toggle selection for the highlighted file/set or expand/collapse folder
                 (KeyCode::Char(' '), KeyModifiers::NONE) => {
                     if app.state.active_panel == crate::tui_app::ActivePanel::Sets {
-                        if let Some(crate::tui_app::DisplayListItem::SetEntry { original_group_index, original_set_index_in_group, file_count_in_set, .. }) = app.state.display_list.get(app.state.selected_display_list_index) {
+                        // Check if this is a folder entry first
+                        if let Some(crate::tui_app::DisplayListItem::Folder { is_expanded, .. }) = 
+                            app.state.display_list.get_mut(app.state.selected_display_list_index) {
+                            // Toggle folder expansion
+                            *is_expanded = !*is_expanded;
+                            app.state.status_message = Some(if *is_expanded { 
+                                "Folder expanded".to_string() 
+                            } else { 
+                                "Folder collapsed".to_string() 
+                            });
+                        } 
+                        // Otherwise handle file/set selection
+                        else if let Some(crate::tui_app::DisplayListItem::SetEntry { original_group_index, original_set_index_in_group, file_count_in_set, .. }) = app.state.display_list.get(app.state.selected_display_list_index) {
                             let paths: Vec<PathBuf> = if *file_count_in_set == 1 {
                                 app.state.grouped_data
                                     .get(*original_group_index)
@@ -333,6 +404,32 @@ fn handle_key_event(app: &mut App, key: KeyEvent, options: &Options) {
                                 }
                             }
                         }
+                    }
+                }
+                
+                // Expand all folders
+                (KeyCode::Char('e'), KeyModifiers::NONE) => {
+                    if app.state.active_panel == crate::tui_app::ActivePanel::Sets {
+                        // Expand all folders
+                        for item in &mut app.state.display_list {
+                            if let crate::tui_app::DisplayListItem::Folder { is_expanded, .. } = item {
+                                *is_expanded = true;
+                            }
+                        }
+                        app.state.status_message = Some("All folders expanded".to_string());
+                    }
+                }
+                
+                // Collapse all folders 
+                (KeyCode::Char('c'), KeyModifiers::NONE) => {
+                    if app.state.active_panel == crate::tui_app::ActivePanel::Sets {
+                        // Collapse all folders
+                        for item in &mut app.state.display_list {
+                            if let crate::tui_app::DisplayListItem::Folder { is_expanded, .. } = item {
+                                *is_expanded = false;
+                            }
+                        }
+                        app.state.status_message = Some("All folders collapsed".to_string());
                     }
                 }
                 // Select all/unselect all
@@ -393,40 +490,22 @@ fn handle_key_event(app: &mut App, key: KeyEvent, options: &Options) {
                 (KeyCode::Char('h'), KeyModifiers::NONE) => {
                     if app.state.input_mode == crate::tui_app::InputMode::Help {
                         app.state.input_mode = crate::tui_app::InputMode::Normal;
+                        app.state.status_message = Some("Exited help screen".to_string());
                     } else {
                         app.state.input_mode = crate::tui_app::InputMode::Help;
+                        app.state.status_message = Some("Showing help. Press 'h' or 'Esc' to exit.".to_string());
                     }
                 }
                 _ => {}
             }
         }
         InputMode::CopyDestination => {
-            match key.code {
-                KeyCode::Esc => {
-                    app.state.input_mode = InputMode::Normal;
-                    app.state.status_message = Some("Copy destination canceled".into());
-                }
-                KeyCode::Enter => {
-                    let dest_path = app.state.current_input.value().to_string();
-                    if !dest_path.is_empty() {
-                        let path = PathBuf::from(&dest_path);
-                        app.state.destination_path = Some(path.clone());
-                        // Initialize the file browser for the destination path
-                        app.state.file_browser = Some(FileBrowser::new(Some(path)));
-                        app.state.status_message =
-                            Some(format!("Destination set to: {}", dest_path));
-                    }
-                    app.state.input_mode = InputMode::Normal;
-                }
-                _ => {
-                    // Handle input field text editing
-                    let _ = app.state.current_input.handle_event(&CEvent::Key(key));
-                }
-            }
+            handle_copy_dest_input_key(app, key);
         }
         InputMode::Help => {
-            if key.code == KeyCode::Esc {
+            if key.code == KeyCode::Esc || (key.code == KeyCode::Char('h') && key.modifiers == KeyModifiers::NONE) {
                 app.state.input_mode = crate::tui_app::InputMode::Normal;
+                app.state.status_message = Some("Exited help screen".to_string());
             }
         }
         _ => {
@@ -444,15 +523,35 @@ pub fn create_copy_missing_app(options: &Options) -> App {
     app.state.status_message =
         Some("Copy Missing Mode - Scanning for files to copy...".to_string());
 
-    // Initialize file browser if there's a target directory
+    // Initialize enhanced explorer if there's a target directory
     if let Some(target_dir) = &options.target {
         app.state.destination_path = Some(target_dir.clone());
-        app.state.file_browser = Some(FileBrowser::new(Some(target_dir.clone())));
+        
+        // Create enhanced explorer for better file browsing
+        if let Ok(explorer) = EnhancedExplorer::new(
+            Some(target_dir.clone()),
+            &format!("Destination: {}", target_dir.display())
+        ) {
+            app.state.enhanced_explorer = Some(explorer);
+        } else {
+            // Fallback to old file browser if enhanced explorer fails
+            app.state.file_browser = Some(FileBrowser::new(Some(target_dir.clone())));
+        }
     } else if !options.directories.is_empty() {
         // Use the last directory as the destination if no specific target was provided
         let target_dir = options.directories.last().unwrap().clone();
         app.state.destination_path = Some(target_dir.clone());
-        app.state.file_browser = Some(FileBrowser::new(Some(target_dir)));
+        
+        // Create enhanced explorer for better file browsing
+        if let Ok(explorer) = EnhancedExplorer::new(
+            Some(target_dir.clone()),
+            &format!("Destination: {}", target_dir.display())
+        ) {
+            app.state.enhanced_explorer = Some(explorer);
+        } else {
+            // Fallback to old file browser if enhanced explorer fails
+            app.state.file_browser = Some(FileBrowser::new(Some(target_dir)));
+        }
     }
 
     // Set update mode from command line options
@@ -618,6 +717,32 @@ pub fn handle_copy_missing_scan_messages(app: &mut App) {
 
     // If the app has scan results for missing files, process them here
     app.handle_scan_messages();
+    
+    // Check if job processing has just completed, and refresh the destination explorer if needed
+    if app.state.last_job_completion_check.is_none() {
+        // Initialize the flag if it doesn't exist yet
+        app.state.last_job_completion_check = Some(app.state.is_processing_jobs);
+    }
+    
+    // If the processing state has changed from true to false, refresh the explorer
+    if let Some(was_processing) = app.state.last_job_completion_check {
+        if was_processing && !app.state.is_processing_jobs {
+            // Jobs have just finished, refresh the destination panel
+            if let Some(explorer) = &mut app.state.enhanced_explorer {
+                if explorer.refresh().is_err() {
+                    app.state.status_message = Some("Error refreshing destination directory after job completion".to_string());
+                } else {
+                    app.state.status_message = Some("Job(s) completed and destination refreshed".to_string());
+                }
+            } else if let Some(file_browser) = &mut app.state.file_browser {
+                file_browser.refresh();
+                app.state.status_message = Some("Job(s) completed and destination refreshed".to_string());
+            }
+        }
+        
+        // Update the flag for next check
+        app.state.last_job_completion_check = Some(app.state.is_processing_jobs);
+    }
 }
 
 /// Special UI layout for Copy Missing mode
@@ -758,22 +883,34 @@ pub fn ui_copy_missing(frame: &mut Frame, app: &mut App) {
                 let indent_str = if *indent { "  " } else { "" };
                 let is_single_file = *file_count_in_set == 1;
                 if is_single_file {
-                    let file_path = app.state.grouped_data
+                    let file_info = app.state.grouped_data
                         .get(*original_group_index)
                         .and_then(|group| group.sets.get(*original_set_index_in_group))
-                        .and_then(|set| set.files.first())
-                        .map(|f| f.path.clone());
+                        .and_then(|set| set.files.first());
+                    
+                    let file_path = file_info.map(|f| f.path.clone());
                     let file_name = file_path
                         .as_ref()
                         .and_then(|p| p.file_name())
                         .map(|n| n.to_string_lossy().to_string())
                         .unwrap_or_else(|| "(unknown)".to_string());
+                    
+                    let file_size = file_info.map(|f| format_size(f.size, DECIMAL)).unwrap_or_default();
                     let selected = file_path.map(|p| app.state.selected_left_panel.contains(&p)).unwrap_or(false);
                     let sel_box = if selected { "[x]" } else { "[ ]" };
-                    ListItem::new(Line::from(Span::styled(
-                        format!("{}{} {}", indent_str, sel_box, file_name),
+                    
+                    // Create line with different spans for name and size
+                    let mut line = Line::default();
+                    line.spans.push(Span::styled(
+                        format!("{}{} {} ", indent_str, sel_box, file_name),
                         Style::default(),
-                    )))
+                    ));
+                    line.spans.push(Span::styled(
+                        format!("({})", file_size),
+                        Style::default().fg(Color::Gray),
+                    ));
+                    
+                    ListItem::new(line)
                 } else {
                     // For sets, show as selected if all files in set are selected
                     let file_paths: Vec<PathBuf> = app.state.grouped_data
@@ -783,17 +920,19 @@ pub fn ui_copy_missing(frame: &mut Frame, app: &mut App) {
                         .unwrap_or_default();
                     let all_selected = !file_paths.is_empty() && file_paths.iter().all(|p| app.state.selected_left_panel.contains(p));
                     let sel_box = if all_selected { "[x]" } else { "[ ]" };
-                    ListItem::new(Line::from(Span::styled(
-                        format!(
-                            "{}{} Set {} ({} files, {})",
-                            indent_str,
-                            sel_box,
-                            set_hash_preview,
-                            file_count_in_set,
-                            format_size(*set_total_size, DECIMAL)
-                        ),
+                    
+                    // Create line with different spans for different parts
+                    let mut line = Line::default();
+                    line.spans.push(Span::styled(
+                        format!("{}{} Set {} ", indent_str, sel_box, set_hash_preview),
                         Style::default(),
-                    )))
+                    ));
+                    line.spans.push(Span::styled(
+                        format!("({} files, {})", file_count_in_set, format_size(*set_total_size, DECIMAL)),
+                        Style::default().fg(Color::Gray),
+                    ));
+                    
+                    ListItem::new(line)
                 }
             }
         })
@@ -815,7 +954,18 @@ pub fn ui_copy_missing(frame: &mut Frame, app: &mut App) {
     frame.render_stateful_widget(missing_files_list, main_chunks[0], &mut sets_list_state);
 
     // Middle Panel - Destination Browser using FileBrowser
-    if let Some(file_browser) = &app.state.file_browser {
+    if let Some(explorer) = &mut app.state.enhanced_explorer {
+        // Use our enhanced explorer when available
+        explorer.update_theme(app.state.active_panel == ActivePanel::Files)
+            .unwrap_or_else(|e| {
+                app.state.log_messages.push(format!("Explorer error: {}", e));
+            });
+        
+        // Render the explorer in the middle panel
+        explorer.render(frame, main_chunks[1]);
+    } else if let Some(file_browser) = &app.state.file_browser {
+        // Fallback to old browser if enhanced is not available
+        
         // Create browser widget
         let mut browser_widget = file_browser.widget();
 
@@ -952,23 +1102,53 @@ pub fn ui_copy_missing(frame: &mut Frame, app: &mut App) {
             );
         }
         InputMode::Help => {
-            // Render a help screen at the bottom
-            let help_text = "Help - Key Bindings\n\n\
-Tab: Switch Panel\n\
-Space/Enter: Select/Unselect file or set\n\
-a: Select/Unselect all\n\
-n: Sort by name\n\
-z: Sort by size\n\
-m: Sort by modified\n\
-c: Sort by created\n\
-d: Sort by duplicates\n\
-H: Toggle help\n\
-q/Esc/Ctrl+C: Quit\n";
+            // When in Help mode, we'll show a full-screen help overlay
+            let help_area = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(2), // Title
+                    Constraint::Min(3),    // Content
+                    Constraint::Length(1), // Footer
+                ])
+                .split(frame.size());
+
+            let help_title = ratatui::widgets::Paragraph::new("Help - Key Bindings")
+                .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+                .alignment(Alignment::Center);
+            
+            let help_text = "
+Tab / Left/Right:    Switch Panel
+Up/Down / j/k:       Navigate items
+Space:               Toggle selection for file or set
+Enter:               Open directory (in destination panel)
+a:                   Select/Unselect all files
+n:                   Sort by name
+z:                   Sort by size
+m:                   Sort by modified time
+d:                   Sort by duplicates (path length)
+f:                   Toggle folders first
+c:                   Copy selected file
+Ctrl+E:              Execute copy jobs
+Ctrl+D:              Toggle dry run mode
+u:                   Toggle update mode
+i:                   Toggle file details panel
+h:                   Toggle this help screen
+q/Esc/Ctrl+C:        Quit
+            ";
+            
             let help_widget = ratatui::widgets::Paragraph::new(help_text)
-                .style(Style::default().fg(Color::Yellow))
+                .style(Style::default().fg(Color::White))
                 .alignment(Alignment::Left)
-                .block(Block::default().borders(Borders::ALL).title("Help"));
-            frame.render_widget(help_widget, chunks[3]);
+                .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Yellow)));
+            
+            let footer = ratatui::widgets::Paragraph::new("Press 'h' or 'Esc' to close help")
+                .style(Style::default().fg(Color::Gray))
+                .alignment(Alignment::Center);
+            
+            frame.render_widget(Clear, frame.size()); // Clear the screen first
+            frame.render_widget(help_title, help_area[0]);
+            frame.render_widget(help_widget, help_area[1]);
+            frame.render_widget(footer, help_area[2]);
         }
         _ => {
             // Handle other input modes (Settings, Help, etc.) if necessary
@@ -985,7 +1165,7 @@ q/Esc/Ctrl+C: Quit\n";
     }
 
     // Draw help bar at the very bottom
-    let help = "Tab: Switch Panel | Space: Toggle Expand | C: Copy Selected File | Ctrl+E: Execute Copy | Ctrl+D: Dry Run | u: Update Mode";
+    let help = "Tab: Switch Panel | Space: Toggle Expand | Enter: Open Dir | e: Expand All | c: Collapse All | h: Help | Ctrl+E: Execute";
     let help_bar = ratatui::widgets::Paragraph::new(help)
         .style(Style::default().fg(Color::DarkGray))
         .alignment(Alignment::Center);
@@ -1104,6 +1284,51 @@ fn draw_log_area(frame: &mut Frame, app: &mut App, area: Rect) {
         .scroll((0, 0));
 
     frame.render_widget(log_paragraph, area);
+}
+
+// In the handle_copy_dest_input_key function, change the line that handles the event to use the type alias
+fn handle_copy_dest_input_key(app: &mut App, key_event: KeyEvent) {
+    match key_event.code {
+        KeyCode::Enter => {
+            let dest_path_str = app.state.current_input.value().to_string();
+            app.state.current_input.reset();
+            app.state.input_mode = InputMode::Normal;
+            if let Some(file_to_copy) = app.state.file_for_copy_move.take() {
+                if !dest_path_str.trim().is_empty() {
+                    let dest_path = PathBuf::from(dest_path_str.trim());
+                    app.set_action_for_selected_file(ActionType::Copy(dest_path.clone()));
+                    app.state.status_message = Some(format!(
+                        "Marked {} for copy to {}",
+                        file_to_copy.path.display(),
+                        dest_path.display()
+                    ));
+                } else {
+                    app.state.status_message =
+                        Some("Copy cancelled: empty destination path.".to_string());
+                }
+            } else {
+                app.state.status_message =
+                    Some("Copy cancelled: no file selected.".to_string());
+            }
+        }
+        KeyCode::Esc => {
+            app.state.current_input.reset();
+            app.state.input_mode = InputMode::Normal;
+            app.state.file_for_copy_move = None;
+            app.state.status_message = Some("Copy action cancelled.".to_string());
+        }
+        // Handle simple cases directly, as tui-input's API for cursor manipulation is limited
+        KeyCode::Char(c) => {
+            app.state.current_input = tui_input::Input::from(app.state.current_input.value().to_string() + &c.to_string());
+        }
+        KeyCode::Backspace => {
+            let value = app.state.current_input.value().to_string();
+            if !value.is_empty() {
+                app.state.current_input = tui_input::Input::from(&value[..value.len()-1]);
+            }
+        }
+        _ => {} // Ignore other keys for simplicity
+    }
 }
 
 #[cfg(test)]
