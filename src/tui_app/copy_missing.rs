@@ -118,7 +118,7 @@ fn handle_key_event(app: &mut App, key: KeyEvent, options: &Options) {
                         ActivePanel::Jobs => app.select_next_job(),
                     }
                 }
-                (KeyCode::Left, _) | (KeyCode::Char('h'), KeyModifiers::NONE) => {
+                (KeyCode::Left, _) => {
                     // Cycle panel focus to the left
                     app.state.active_panel = match app.state.active_panel {
                         ActivePanel::Sets => ActivePanel::Jobs,
@@ -261,13 +261,6 @@ fn handle_key_event(app: &mut App, key: KeyEvent, options: &Options) {
                         app.state.status_message = Some("Sorted by modified time".into());
                     }
                 }
-                (KeyCode::Char('c'), KeyModifiers::NONE) => {
-                    if app.state.active_panel == crate::tui_app::ActivePanel::Sets {
-                        app.state.current_sort_criterion = crate::file_utils::SortCriterion::CreatedAt;
-                        app.state.display_list = crate::tui_app::App::build_display_list_from_grouped_data(&app.state.grouped_data);
-                        app.state.status_message = Some("Sorted by created time".into());
-                    }
-                }
                 (KeyCode::Char('d'), KeyModifiers::NONE) => {
                     if app.state.active_panel == crate::tui_app::ActivePanel::Sets {
                         app.state.current_sort_criterion = crate::file_utils::SortCriterion::PathLength;
@@ -298,51 +291,46 @@ fn handle_key_event(app: &mut App, key: KeyEvent, options: &Options) {
                     app.state.status_message = Some(msg.into());
                 }
                 // Toggle selection for the highlighted file/set
-                (KeyCode::Char(' '), KeyModifiers::NONE) | (KeyCode::Enter, KeyModifiers::NONE) => {
+                (KeyCode::Char(' '), KeyModifiers::NONE) => {
                     if app.state.active_panel == crate::tui_app::ActivePanel::Sets {
-                        if let Some(selected_item) = app.state.display_list.get(app.state.selected_display_list_index) {
-                            match selected_item {
-                                crate::tui_app::DisplayListItem::SetEntry { original_group_index, original_set_index_in_group, file_count_in_set, .. } => {
-                                    let paths: Vec<PathBuf> = if *file_count_in_set == 1 {
-                                        app.state.grouped_data
-                                            .get(*original_group_index)
-                                            .and_then(|group| group.sets.get(*original_set_index_in_group))
-                                            .and_then(|set| set.files.first())
-                                            .map(|f| vec![f.path.clone()])
-                                            .unwrap_or_default()
-                                    } else {
-                                        app.state.grouped_data
-                                            .get(*original_group_index)
-                                            .and_then(|group| group.sets.get(*original_set_index_in_group))
-                                            .map(|set| set.files.iter().map(|f| f.path.clone()).collect())
-                                            .unwrap_or_default()
-                                    };
-                                    let dest_path = app.state.destination_path.clone();
-                                    for path in paths {
-                                        if !app.state.selected_left_panel.remove(&path) {
-                                            app.state.selected_left_panel.insert(path.clone());
-                                            // Add job for this file
-                                            if let Some(dest_path) = &dest_path {
-                                                for group in &app.state.grouped_data {
-                                                    for set in &group.sets {
-                                                        if let Some(file_info) = set.files.iter().find(|f| f.path == path) {
-                                                            if !app.state.jobs.iter().any(|j| j.file_info.path == file_info.path && matches!(j.action, crate::tui_app::ActionType::Copy(_))) {
-                                                                app.state.jobs.push(crate::tui_app::Job {
-                                                                    action: crate::tui_app::ActionType::Copy(dest_path.clone()),
-                                                                    file_info: file_info.clone(),
-                                                                });
-                                                            }
-                                                        }
+                        if let Some(crate::tui_app::DisplayListItem::SetEntry { original_group_index, original_set_index_in_group, file_count_in_set, .. }) = app.state.display_list.get(app.state.selected_display_list_index) {
+                            let paths: Vec<PathBuf> = if *file_count_in_set == 1 {
+                                app.state.grouped_data
+                                    .get(*original_group_index)
+                                    .and_then(|group| group.sets.get(*original_set_index_in_group))
+                                    .and_then(|set| set.files.first())
+                                    .map(|f| vec![f.path.clone()])
+                                    .unwrap_or_default()
+                            } else {
+                                app.state.grouped_data
+                                    .get(*original_group_index)
+                                    .and_then(|group| group.sets.get(*original_set_index_in_group))
+                                    .map(|set| set.files.iter().map(|f| f.path.clone()).collect())
+                                    .unwrap_or_default()
+                            };
+                            let dest_path = app.state.destination_path.clone();
+                            for path in paths {
+                                if !app.state.selected_left_panel.remove(&path) {
+                                    app.state.selected_left_panel.insert(path.clone());
+                                    // Add job for this file
+                                    if let Some(dest_path) = &dest_path {
+                                        for group in &app.state.grouped_data {
+                                            for set in &group.sets {
+                                                if let Some(file_info) = set.files.iter().find(|f| f.path == path) {
+                                                    if !app.state.jobs.iter().any(|j| j.file_info.path == file_info.path && matches!(j.action, crate::tui_app::ActionType::Copy(_))) {
+                                                        app.state.jobs.push(crate::tui_app::Job {
+                                                            action: crate::tui_app::ActionType::Copy(dest_path.clone()),
+                                                            file_info: file_info.clone(),
+                                                        });
                                                     }
                                                 }
                                             }
-                                        } else {
-                                            // Remove job for this file
-                                            app.state.jobs.retain(|j| j.file_info.path != path);
                                         }
                                     }
+                                } else {
+                                    // Remove job for this file
+                                    app.state.jobs.retain(|j| j.file_info.path != path);
                                 }
-                                _ => {}
                             }
                         }
                     }
@@ -402,7 +390,7 @@ fn handle_key_event(app: &mut App, key: KeyEvent, options: &Options) {
                     }
                 }
                 // Show help screen
-                (KeyCode::Char('h'), KeyModifiers::NONE) | (KeyCode::Char('H'), KeyModifiers::NONE) => {
+                (KeyCode::Char('h'), KeyModifiers::NONE) => {
                     if app.state.input_mode == crate::tui_app::InputMode::Help {
                         app.state.input_mode = crate::tui_app::InputMode::Normal;
                     } else {
@@ -437,11 +425,8 @@ fn handle_key_event(app: &mut App, key: KeyEvent, options: &Options) {
             }
         }
         InputMode::Help => {
-            match key.code {
-                KeyCode::Esc | KeyCode::Char('h') | KeyCode::Char('H') => {
-                    app.state.input_mode = crate::tui_app::InputMode::Normal;
-                }
-                _ => {}
+            if key.code == KeyCode::Esc {
+                app.state.input_mode = crate::tui_app::InputMode::Normal;
             }
         }
         _ => {
