@@ -2176,6 +2176,61 @@ impl App {
         // Update progress
         self.state.job_progress.0 = total_jobs;
         self.state.is_processing_jobs = false;
+        
+        // Use this flag to trigger the enhanced post-job refresh in the next UI update
+        self.state.last_job_completion_check = Some(true);
+        
+        // Force a refresh of the destination panel if we're in copy missing mode
+        if self.state.is_copy_missing_mode {
+            // Try to refresh enhanced explorer first
+            if let Some(explorer) = &mut self.state.enhanced_explorer {
+                let current_dir = explorer.current_dir();
+                log::info!("Forced job completion refresh of destination (in start_job_execution): {}", 
+                          current_dir.display());
+                
+                // Force a complete refresh by recreating the explorer
+                if let Ok(new_explorer) = crate::tui_app::explorer_browser::EnhancedExplorer::new(
+                    Some(current_dir),
+                    "Destination Browser"
+                ) {
+                    *explorer = new_explorer;
+                }
+            } 
+            // Then try to refresh the file browser if enhanced explorer isn't present
+            else if let Some(browser) = &mut self.state.file_browser {
+                log::info!("Forced job completion refresh of file browser (in start_job_execution)");
+                browser.refresh();
+            }
+        }
+
+        // CRITICAL: Force immediate refresh of destination browser and panels
+        // This is the key to ensuring the UI updates after job execution
+        if self.state.is_copy_missing_mode {
+            // Step 1: Force refresh of enhanced explorer
+            if let Some(explorer) = &mut self.state.enhanced_explorer {
+                // Capture current dir
+                let current_dir = explorer.current_dir();
+                // Force complete refresh by recreating the explorer with the same directory
+                log::info!("Forcing destination panel refresh after job execution at path: {}", current_dir.display());
+                
+                if let Ok(new_explorer) = crate::tui_app::explorer_browser::EnhancedExplorer::new(
+                    Some(current_dir),
+                    "Destination Browser"
+                ) {
+                    // Replace the existing explorer with a new one
+                    *explorer = new_explorer;
+                }
+            } 
+            // Step 2: Alternative refresh for file_browser if enhanced explorer isn't available
+            else if let Some(browser) = &mut self.state.file_browser {
+                log::info!("Forcing file browser refresh after job execution");
+                browser.refresh();
+            }
+            
+            // Step 3: Set the flag to ensure the UI continues to refresh on next frames
+            self.state.last_job_completion_check = Some(true);
+            log::info!("Set last_job_completion_check = true to trigger continuous UI refresh");
+        }
 
         // Create summary message
         let mut summary = String::new();

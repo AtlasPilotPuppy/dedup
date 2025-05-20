@@ -10,6 +10,7 @@ use crossterm::{
 use humansize::{format_size, DECIMAL};
 use ratatui::prelude::*;
 use ratatui::widgets::*;
+use ratatui::layout::Position;
 use std::io::stdout;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -204,6 +205,51 @@ fn handle_key_event(app: &mut App, key: KeyEvent, options: &Options) {
                                     current_item.path.display(),
                                     dest_path.display()
                                 ));
+                                
+                                // Auto-execute the job if we're adding a single file
+                                if app.state.jobs.len() == 1 {
+                                    log::info!("Auto-executing single copy job");
+                                    
+                                    // Execute the job
+                                    app.start_job_execution(options);
+                                    
+                                    // Perform a full refresh of both panels
+                                    
+                                    // 1. Force destination panel refresh using direct file system access
+                                    if let Some(dest_path) = &app.state.destination_path {
+                                        log::info!("Directly refreshing destination at {}", dest_path.display());
+                                        
+                                        // Force recreate the explorer with the original destination path
+                                        if let Some(explorer) = &mut app.state.enhanced_explorer {
+                                            // Try to create new instance with the saved destination path
+                                            if let Ok(new_explorer) = EnhancedExplorer::new(
+                                                Some(dest_path.clone()),
+                                                &format!("Destination: {}", dest_path.display())
+                                            ) {
+                                                // Replace with new instance
+                                                *explorer = new_explorer;
+                                                log::info!("Successfully replaced explorer instance for destination");
+                                            } else {
+                                                // Fall back to refresh method which now tries to use original path
+                                                if explorer.refresh().is_err() {
+                                                    log::error!("Failed to refresh destination directory");
+                                                    app.state.status_message = Some("Error refreshing destination - try manual navigation".to_string());
+                                                }
+                                            }
+                                        } else if let Some(browser) = &mut app.state.file_browser {
+                                            // Force file browser refresh 
+                                            browser.refresh();
+                                        }
+                                    }
+                                    
+                                    // 2. Force source panel refresh by re-running the scan
+                                    log::info!("Forcing source panel refresh by re-scanning for missing files");
+                                    start_copy_missing_scan(app, options);
+                                    
+                                    // 3. Set the UI update flag 
+                                    app.state.last_job_completion_check = Some(true);
+                                    app.state.status_message = Some("Job executed - refreshed both panels".to_string());
+                                }
                             } else {
                                 app.state.status_message = Some("No destination selected. Please select a destination directory first.".into());
                             }
@@ -239,7 +285,7 @@ fn handle_key_event(app: &mut App, key: KeyEvent, options: &Options) {
                         }
                     }
                 }
-                // Execute queued jobs (Ctrl+E)
+                                    // Execute queued jobs (Ctrl+E)
                 (KeyCode::Char('e'), KeyModifiers::CONTROL) => {
                     // Add jobs for all selected files in the left panel
                     if app.state.active_panel == crate::tui_app::ActivePanel::Sets {
@@ -269,7 +315,47 @@ fn handle_key_event(app: &mut App, key: KeyEvent, options: &Options) {
                         }
                     }
                     if !app.state.jobs.is_empty() {
+                        log::info!("Starting job execution for {} files", app.state.jobs.len());
+                        
+                        // Execute the jobs
                         app.start_job_execution(options);
+                        
+                        // Perform a full refresh of both panels after Ctrl+E execution
+                        
+                        // 1. Force destination panel refresh using direct file system access
+                        if let Some(dest_path) = &app.state.destination_path {
+                            log::info!("Directly refreshing destination after Ctrl+E at {}", dest_path.display());
+                            
+                            // Force recreate the explorer
+                            if let Some(explorer) = &mut app.state.enhanced_explorer {
+                                // Try to create new instance explicitly with the original destination path
+                                if let Ok(new_explorer) = EnhancedExplorer::new(
+                                    Some(dest_path.clone()),
+                                    &format!("Destination: {}", dest_path.display())
+                                ) {
+                                    // Replace with new instance
+                                    *explorer = new_explorer;
+                                    log::info!("Successfully replaced explorer instance for destination after Ctrl+E");
+                                } else {
+                                    // Fall back to refresh method which now tries to use original path
+                                    if explorer.refresh().is_err() {
+                                        log::error!("Failed to refresh destination directory after Ctrl+E");
+                                        app.state.status_message = Some("Error refreshing destination - try manual navigation".to_string());
+                                    }
+                                }
+                            } else if let Some(browser) = &mut app.state.file_browser {
+                                // Force file browser refresh 
+                                browser.refresh();
+                            }
+                        }
+                        
+                        // 2. Force source panel refresh by re-running the scan
+                        log::info!("Forcing source panel refresh by re-scanning for missing files after Ctrl+E");
+                        start_copy_missing_scan(app, options);
+                        
+                        // 3. Set the UI update flag for continuous refresh if needed
+                        app.state.last_job_completion_check = Some(true);
+                        app.state.status_message = Some("Jobs executed - refreshed both panels".to_string());
                     } else {
                         app.state.status_message = Some("No jobs to process. Select files and try again.".into());
                     }
@@ -332,12 +418,9 @@ fn handle_key_event(app: &mut App, key: KeyEvent, options: &Options) {
                         app.state.status_message = Some(msg.into());
                     }
                 }
-                // Toggle file details panel
+                // The 'i' key is now unused (previously toggled file details panel)
                 (KeyCode::Char('i'), KeyModifiers::NONE) => {
-                    if let Some(explorer) = &mut app.state.enhanced_explorer {
-                        explorer.toggle_details();
-                        app.state.status_message = Some("Toggled file details panel".into());
-                    }
+                    app.state.status_message = Some("File details panel has been removed".into());
                 }
                 // Switch between update mode and regular copy
                 (KeyCode::Char('u'), KeyModifiers::NONE) => {
@@ -420,8 +503,8 @@ fn handle_key_event(app: &mut App, key: KeyEvent, options: &Options) {
                     }
                 }
                 
-                // Collapse all folders 
-                (KeyCode::Char('c'), KeyModifiers::NONE) => {
+                // Collapse all folders with 'x' key instead of 'c' to avoid conflict
+                (KeyCode::Char('x'), KeyModifiers::NONE) => {
                     if app.state.active_panel == crate::tui_app::ActivePanel::Sets {
                         // Collapse all folders
                         for item in &mut app.state.display_list {
@@ -525,32 +608,37 @@ pub fn create_copy_missing_app(options: &Options) -> App {
 
     // Initialize enhanced explorer if there's a target directory
     if let Some(target_dir) = &options.target {
-        app.state.destination_path = Some(target_dir.clone());
+        // Convert to absolute path and canonicalize
+        let target = ensure_absolute_path(target_dir);
+        log::info!("Using target directory: {}", target.display());
+        app.state.destination_path = Some(target.clone());
         
         // Create enhanced explorer for better file browsing
         if let Ok(explorer) = EnhancedExplorer::new(
-            Some(target_dir.clone()),
-            &format!("Destination: {}", target_dir.display())
+            Some(target.clone()),
+            &format!("Destination: {}", target.display())
         ) {
             app.state.enhanced_explorer = Some(explorer);
         } else {
             // Fallback to old file browser if enhanced explorer fails
-            app.state.file_browser = Some(FileBrowser::new(Some(target_dir.clone())));
+            app.state.file_browser = Some(FileBrowser::new(Some(target.clone())));
         }
     } else if !options.directories.is_empty() {
         // Use the last directory as the destination if no specific target was provided
-        let target_dir = options.directories.last().unwrap().clone();
-        app.state.destination_path = Some(target_dir.clone());
+        let last_dir = options.directories.last().unwrap().clone();
+        let target = ensure_absolute_path(&last_dir);
+        log::info!("Using last directory as target: {}", target.display());
+        app.state.destination_path = Some(target.clone());
         
         // Create enhanced explorer for better file browsing
         if let Ok(explorer) = EnhancedExplorer::new(
-            Some(target_dir.clone()),
-            &format!("Destination: {}", target_dir.display())
+            Some(target.clone()),
+            &format!("Destination: {}", target.display())
         ) {
             app.state.enhanced_explorer = Some(explorer);
         } else {
             // Fallback to old file browser if enhanced explorer fails
-            app.state.file_browser = Some(FileBrowser::new(Some(target_dir)));
+            app.state.file_browser = Some(FileBrowser::new(Some(target)));
         }
     }
 
@@ -718,29 +806,98 @@ pub fn handle_copy_missing_scan_messages(app: &mut App) {
     // If the app has scan results for missing files, process them here
     app.handle_scan_messages();
     
-    // Check if job processing has just completed, and refresh the destination explorer if needed
-    if app.state.last_job_completion_check.is_none() {
-        // Initialize the flag if it doesn't exist yet
-        app.state.last_job_completion_check = Some(app.state.is_processing_jobs);
-    }
-    
-    // If the processing state has changed from true to false, refresh the explorer
-    if let Some(was_processing) = app.state.last_job_completion_check {
-        if was_processing && !app.state.is_processing_jobs {
-            // Jobs have just finished, refresh the destination panel
-            if let Some(explorer) = &mut app.state.enhanced_explorer {
-                if explorer.refresh().is_err() {
-                    app.state.status_message = Some("Error refreshing destination directory after job completion".to_string());
-                } else {
-                    app.state.status_message = Some("Job(s) completed and destination refreshed".to_string());
+    // Always check destination panel after every frame while jobs are being processed or right after completion
+    if app.state.is_processing_jobs || app.state.last_job_completion_check == Some(true) {
+        // Force refresh of destination panel on every frame while processing jobs
+        if let Some(explorer) = &mut app.state.enhanced_explorer {
+            // Always use the original destination path for consistency
+            let dest_path = app.state.destination_path.clone();
+            
+            // Only log at info level when job status changes, otherwise use debug
+            if app.state.is_processing_jobs != app.state.last_job_completion_check.unwrap_or(false) {
+                if let Some(dest_path) = &dest_path {
+                    log::info!("Refreshing destination during/after job execution, original path: {}", dest_path.display());
                 }
-            } else if let Some(file_browser) = &mut app.state.file_browser {
-                file_browser.refresh();
-                app.state.status_message = Some("Job(s) completed and destination refreshed".to_string());
+            }
+            
+            // If we have a problematic path (contains /.nofollow) or first refresh after job completion,
+            // completely recreate the explorer to ensure a clean state
+            let current_path = explorer.current_dir();
+            let has_problematic_path = current_path.to_string_lossy().contains("/.nofollow");
+            let is_first_refresh_after_jobs = !app.state.is_processing_jobs && app.state.last_job_completion_check == Some(true);
+            
+            if has_problematic_path || is_first_refresh_after_jobs {
+                // Log the issue
+                if has_problematic_path {
+                    log::warn!("Detected problematic path /.nofollow during auto refresh, recreating explorer");
+                } else if is_first_refresh_after_jobs {
+                    log::info!("First refresh after job completion, recreating explorer");
+                }
+                
+                // Always recreate with the original destination path
+                if let Some(dest_path) = &dest_path {
+                    log::info!("Recreating explorer with original destination path: {}", dest_path.display());
+                    
+                    // Create new explorer with original destination path
+                    if let Ok(new_explorer) = EnhancedExplorer::new(
+                        Some(dest_path.clone()),
+                        &format!("Destination: {}", dest_path.display())
+                    ) {
+                        // Replace the existing explorer
+                        *explorer = new_explorer;
+                        log::info!("Successfully recreated explorer with original path");
+                        
+                        if !app.state.is_processing_jobs && app.state.last_job_completion_check == Some(true) {
+                            app.state.status_message = Some("Job(s) completed and panels refreshed".to_string());
+                        }
+                    } else {
+                        // Log error but continue
+                        log::error!("Failed to recreate explorer with original path");
+                        app.state.status_message = Some("Error refreshing destination - try manual navigation".to_string());
+                    }
+                }
+            } else {
+                // Normal refresh for non-problematic paths
+                if explorer.refresh().is_err() {
+                    // Only show error if we're newly completed
+                    if !app.state.is_processing_jobs && app.state.last_job_completion_check == Some(true) {
+                        app.state.status_message = Some("Error refreshing destination - try manual navigation".to_string());
+                    }
+                } else if !app.state.is_processing_jobs && app.state.last_job_completion_check == Some(true) {
+                    app.state.status_message = Some("Job(s) completed and panels refreshed".to_string());
+                }
+            }
+        } else if let Some(file_browser) = &mut app.state.file_browser {
+            // Force a complete refresh
+            file_browser.refresh();
+            if !app.state.is_processing_jobs && app.state.last_job_completion_check == Some(true) {
+                app.state.status_message = Some("Job(s) completed and panels refreshed".to_string());
             }
         }
         
-        // Update the flag for next check
+        // Log the refresh event
+        log::debug!("Destination browser refreshed (is_processing={}, last_check={:?})", 
+                   app.state.is_processing_jobs, app.state.last_job_completion_check);
+        
+        // If jobs have completed, but we're not in the first frame after completion, reset the flag
+        static mut FRAMES_AFTER_COMPLETION: u8 = 0;
+        
+        if !app.state.is_processing_jobs && app.state.last_job_completion_check == Some(true) {
+            unsafe {
+                FRAMES_AFTER_COMPLETION += 1;
+                // Keep refreshing for 10 frames after job completion to ensure UI updates
+                if FRAMES_AFTER_COMPLETION >= 10 {
+                    log::info!("All jobs completed and 10 refresh frames passed, resetting job completion check");
+                    app.state.last_job_completion_check = Some(false);
+                    FRAMES_AFTER_COMPLETION = 0;
+                }
+            }
+        }
+    }
+    
+    // Track job processing state for next check
+    if app.state.last_job_completion_check.is_none() || 
+       (app.state.last_job_completion_check != Some(true) && app.state.is_processing_jobs) {
         app.state.last_job_completion_check = Some(app.state.is_processing_jobs);
     }
 }
@@ -758,7 +915,7 @@ pub fn ui_copy_missing(frame: &mut Frame, app: &mut App) {
             Constraint::Length(1), // Progress bar (if any)
             Constraint::Length(1), // Help bar
         ])
-        .split(frame.size());
+        .split(frame.area());
 
     // Title bar
     let title = ratatui::widgets::Paragraph::new("Dedups - Copy Missing Mode")
@@ -836,6 +993,8 @@ pub fn ui_copy_missing(frame: &mut Frame, app: &mut App) {
                 Color::White
             }),
         );
+        
+    // There's no separate file details panel anymore, we show file sizes directly in listings
 
     // If loading, show the loading screen
     if app.state.is_loading {
@@ -882,35 +1041,35 @@ pub fn ui_copy_missing(frame: &mut Frame, app: &mut App) {
             } => {
                 let indent_str = if *indent { "  " } else { "" };
                 let is_single_file = *file_count_in_set == 1;
-                if is_single_file {
-                    let file_info = app.state.grouped_data
-                        .get(*original_group_index)
-                        .and_then(|group| group.sets.get(*original_set_index_in_group))
-                        .and_then(|set| set.files.first());
-                    
-                    let file_path = file_info.map(|f| f.path.clone());
-                    let file_name = file_path
-                        .as_ref()
-                        .and_then(|p| p.file_name())
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_else(|| "(unknown)".to_string());
-                    
-                    let file_size = file_info.map(|f| format_size(f.size, DECIMAL)).unwrap_or_default();
-                    let selected = file_path.map(|p| app.state.selected_left_panel.contains(&p)).unwrap_or(false);
-                    let sel_box = if selected { "[x]" } else { "[ ]" };
-                    
-                    // Create line with different spans for name and size
-                    let mut line = Line::default();
-                    line.spans.push(Span::styled(
-                        format!("{}{} {} ", indent_str, sel_box, file_name),
-                        Style::default(),
-                    ));
-                    line.spans.push(Span::styled(
-                        format!("({})", file_size),
-                        Style::default().fg(Color::Gray),
-                    ));
-                    
-                    ListItem::new(line)
+                                            if is_single_file {
+                                let file_info = app.state.grouped_data
+                                    .get(*original_group_index)
+                                    .and_then(|group| group.sets.get(*original_set_index_in_group))
+                                    .and_then(|set| set.files.first());
+                                
+                                let file_path = file_info.map(|f| f.path.clone());
+                                let file_name = file_path
+                                    .as_ref()
+                                    .and_then(|p| p.file_name())
+                                    .map(|n| n.to_string_lossy().to_string())
+                                    .unwrap_or_else(|| "(unknown)".to_string());
+                                
+                                let file_size = file_info.map(|f| format_size(f.size, DECIMAL)).unwrap_or_default();
+                                let selected = file_path.map(|p| app.state.selected_left_panel.contains(&p)).unwrap_or(false);
+                                let sel_box = if selected { "[x]" } else { "[ ]" };
+                                
+                                // Create line with different spans for name and size
+                                let mut line = Line::default();
+                                line.spans.push(Span::styled(
+                                    format!("{}{} {}", indent_str, sel_box, file_name),
+                                    Style::default(),
+                                ));
+                                line.spans.push(Span::styled(
+                                    format!(" ({})", file_size),
+                                    Style::default().fg(Color::Gray),
+                                ));
+                                
+                                ListItem::new(line)
                 } else {
                     // For sets, show as selected if all files in set are selected
                     let file_paths: Vec<PathBuf> = app.state.grouped_data
@@ -1096,21 +1255,21 @@ pub fn ui_copy_missing(frame: &mut Frame, app: &mut App) {
                 )
                 .fg(Color::White);
             frame.render_widget(input_field, input_chunks[1]);
-            frame.set_cursor(
-                input_chunks[1].x + app.state.current_input.visual_cursor() as u16 + 1,
-                input_chunks[1].y + 1,
-            );
+            frame.set_cursor_position(Position {
+                x: input_chunks[1].x + app.state.current_input.visual_cursor() as u16 + 1,
+                y: input_chunks[1].y + 1,
+            });
         }
         InputMode::Help => {
             // When in Help mode, we'll show a full-screen help overlay
-            let help_area = Layout::default()
+                            let help_area = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
                     Constraint::Length(2), // Title
                     Constraint::Min(3),    // Content
                     Constraint::Length(1), // Footer
                 ])
-                .split(frame.size());
+                .split(frame.area());
 
             let help_title = ratatui::widgets::Paragraph::new("Help - Key Bindings")
                 .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
@@ -1128,10 +1287,11 @@ m:                   Sort by modified time
 d:                   Sort by duplicates (path length)
 f:                   Toggle folders first
 c:                   Copy selected file
+e:                   Expand all folders
+x:                   Collapse all folders
 Ctrl+E:              Execute copy jobs
 Ctrl+D:              Toggle dry run mode
 u:                   Toggle update mode
-i:                   Toggle file details panel
 h:                   Toggle this help screen
 q/Esc/Ctrl+C:        Quit
             ";
@@ -1145,7 +1305,7 @@ q/Esc/Ctrl+C:        Quit
                 .style(Style::default().fg(Color::Gray))
                 .alignment(Alignment::Center);
             
-            frame.render_widget(Clear, frame.size()); // Clear the screen first
+            frame.render_widget(Clear, frame.area()); // Clear the screen first
             frame.render_widget(help_title, help_area[0]);
             frame.render_widget(help_widget, help_area[1]);
             frame.render_widget(footer, help_area[2]);
@@ -1165,7 +1325,7 @@ q/Esc/Ctrl+C:        Quit
     }
 
     // Draw help bar at the very bottom
-    let help = "Tab: Switch Panel | Space: Toggle Expand | Enter: Open Dir | e: Expand All | c: Collapse All | h: Help | Ctrl+E: Execute";
+    let help = "Tab: Switch Panel | Space: Toggle Expand | Enter: Open Dir | e: Expand All | x: Collapse All | h: Help | c: Copy | Ctrl+E: Execute";
     let help_bar = ratatui::widgets::Paragraph::new(help)
         .style(Style::default().fg(Color::DarkGray))
         .alignment(Alignment::Center);
@@ -1328,6 +1488,38 @@ fn handle_copy_dest_input_key(app: &mut App, key_event: KeyEvent) {
             }
         }
         _ => {} // Ignore other keys for simplicity
+    }
+}
+
+// Helper function to ensure a path is absolute and exists
+pub fn ensure_absolute_path(path: &PathBuf) -> PathBuf {
+    // If path is already absolute, use it
+    let abs_path = if path.is_absolute() {
+        path.clone()
+    } else {
+        // Otherwise, make it absolute
+        match std::env::current_dir() {
+            Ok(current_dir) => current_dir.join(path),
+            Err(_) => path.clone() // Fallback to original path on error
+        }
+    };
+    
+    // Create directory if it doesn't exist
+    if !abs_path.exists() {
+        if let Err(e) = std::fs::create_dir_all(&abs_path) {
+            log::warn!("Failed to create destination directory {}: {}", abs_path.display(), e);
+        } else {
+            log::info!("Created destination directory: {}", abs_path.display());
+        }
+    }
+    
+    // Try to canonicalize the path, falling back to the absolute path if that fails
+    match abs_path.canonicalize() {
+        Ok(canon_path) => canon_path,
+        Err(e) => {
+            log::warn!("Failed to canonicalize path {}: {}", abs_path.display(), e);
+            abs_path
+        }
     }
 }
 
