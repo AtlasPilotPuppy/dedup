@@ -1436,7 +1436,7 @@ pub fn compare_directories(
         pb.set_position(0);
         pb.set_message("Starting directory comparison...");
     }
-
+    
     // Scan target directory for files
     if let Some(pb) = current_op_pb.as_ref() {
         pb.reset();
@@ -1473,9 +1473,9 @@ pub fn compare_directories(
         if let Some(pb) = current_op_pb.as_ref() {
             pb.reset();
             pb.set_message(format!(
-                "Scanning source dir {}/{}: {}",
-                idx + 1,
-                source_dirs.len(),
+                "Scanning source dir {}/{}: {}", 
+                idx + 1, 
+                source_dirs.len(), 
                 source_dir.display()
             ));
         }
@@ -1490,8 +1490,8 @@ pub fn compare_directories(
         }
         if let Some(pb) = current_op_pb.as_ref() {
             pb.finish_with_message(format!(
-                "Scanned source {}: {} files",
-                source_dir.display(),
+                "Scanned source {}: {} files", 
+                source_dir.display(), 
                 source_files.len()
             ));
         }
@@ -1578,7 +1578,7 @@ fn scan_directory(
 ) -> Result<Vec<FileInfo>> {
     let filter_rules = FilterRules::new(options)?;
     let mut files = Vec::new();
-
+    
     let total_files = if progress_bar.is_some() {
         // Use a sensible default if count_files_in_directory fails, though it should generally succeed.
         count_files_in_directory(directory, &filter_rules).unwrap_or_else(|e| {
@@ -1597,7 +1597,7 @@ fn scan_directory(
         pb.set_length(total_files as u64);
         pb.set_position(0);
         // Initial message before scanning starts for this directory
-        pb.set_message(format!("Preparing to scan {}", directory.display()));
+        pb.set_message(format!("Preparing to scan {}", directory.display())); 
     }
 
     let walker = WalkDir::new(directory).into_iter();
@@ -1624,10 +1624,10 @@ fn scan_directory(
                 // Update message less frequently to avoid excessive redraws
                 if scanned_count % 20 == 0 || scanned_count == total_files {
                     pb.set_message(format!(
-                        "Scanning {} ({}/{}): {}",
+                        "Scanning {} ({}/{}): {}", 
                         directory.display(),
-                        scanned_count,
-                        total_files,
+                        scanned_count, 
+                        total_files, 
                         path.file_name().unwrap_or_default().to_string_lossy()
                     ));
                 }
@@ -1681,18 +1681,18 @@ pub fn copy_missing_files_with_progress(
     missing_files: &[FileInfo],
     target_dir: &Path,
     dry_run: bool,
-    progress_bars: Option<(indicatif::ProgressBar, indicatif::ProgressBar)>,
+    progress_bars: Option<(indicatif::ProgressBar, indicatif::ProgressBar)>, 
 ) -> Result<(usize, Vec<String>)> {
     let mut count = 0;
     let mut logs = Vec::new();
     let total_files = missing_files.len();
-
+    
     // Overall progress bar length is set by the caller in commands.rs
     if let Some((overall_pb, current_pb)) = &progress_bars {
         overall_pb.set_position(0); // Ensure position starts at 0 for this phase
-                                    // overall_pb.set_length(total_files as u64); // Caller now does this
+        // overall_pb.set_length(total_files as u64); // Caller now does this
         overall_pb.set_message(format!("Copying {} files", total_files));
-
+        
         current_pb.reset(); // Reset current op bar
         current_pb.set_length(1); // Typically for spinner/current file indication
         current_pb.set_position(0);
@@ -1748,7 +1748,7 @@ pub fn copy_missing_files_with_progress(
 
             // Update progress
             if let Some((overall_pb, current_pb)) = &progress_bars {
-                overall_pb.set_position(i as u64 + 1);
+                overall_pb.set_position(i as u64 + 1); 
                 current_pb.set_message(format!(
                     "Would copy: {} to {}",
                     file.path.file_name().unwrap_or_default().to_string_lossy(),
@@ -1769,7 +1769,7 @@ pub fn copy_missing_files_with_progress(
         if let Some((overall_pb, current_pb)) = &progress_bars {
             overall_pb.set_position(total_files as u64);
             // Message is set by caller in commands.rs upon completion
-            // overall_pb.finish_with_message("[DRY RUN] Copy operations complete");
+            // overall_pb.finish_with_message("[DRY RUN] Copy operations complete"); 
             current_pb.finish_with_message("");
         }
     } else {
@@ -1795,7 +1795,7 @@ pub fn copy_missing_files_with_progress(
 
             // Update progress
             if let Some((overall_pb, current_pb)) = &progress_bars {
-                overall_pb.set_position(i as u64 + 1);
+                overall_pb.set_position(i as u64 + 1); 
                 current_pb.set_message(format!(
                     "Copying: {} to {}",
                     file.path.file_name().unwrap_or_default().to_string_lossy(),
@@ -1847,7 +1847,7 @@ pub fn copy_missing_files_with_progress(
         if let Some((overall_pb, current_pb)) = &progress_bars {
             overall_pb.set_position(total_files as u64);
             // Message is set by caller in commands.rs upon completion
-            // overall_pb.finish_with_message(format!("Copied {} of {} files", count, total_files));
+            // overall_pb.finish_with_message(format!("Copied {} of {} files", count, total_files)); 
             current_pb.finish_with_message("");
         }
     }

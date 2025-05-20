@@ -194,10 +194,39 @@ fn handle_key_event(app: &mut App, key: KeyEvent, options: &Options) {
                         app.state.status_message = Some("File(s) queued for copy".into());
                     }
                 }
-                // Execute queued jobs
+                // Execute queued jobs (Ctrl+E)
                 (KeyCode::Char('e'), KeyModifiers::CONTROL) => {
+                    // Add jobs for all selected files in the left panel
+                    if app.state.active_panel == crate::tui_app::ActivePanel::Sets {
+                        let dest_path = app.state.destination_path.clone();
+                        if let Some(dest_path) = dest_path {
+                            let mut new_jobs = Vec::new();
+                            for path in app.state.selected_left_panel.iter() {
+                                // Find the FileInfo for this path
+                                for group in &app.state.grouped_data {
+                                    for set in &group.sets {
+                                        if let Some(file_info) = set.files.iter().find(|f| &f.path == path) {
+                                            // Only add if not already in jobs
+                                            if !app.state.jobs.iter().any(|j| j.file_info.path == file_info.path && matches!(j.action, crate::tui_app::ActionType::Copy(_))) {
+                                                new_jobs.push(crate::tui_app::Job {
+                                                    action: crate::tui_app::ActionType::Copy(dest_path.clone()),
+                                                    file_info: file_info.clone(),
+                                                });
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            app.state.jobs.extend(new_jobs);
+                        } else {
+                            app.state.status_message = Some("No destination selected. Please select a destination directory first.".into());
+                            return;
+                        }
+                    }
                     if !app.state.jobs.is_empty() {
                         app.start_job_execution(options);
+                    } else {
+                        app.state.status_message = Some("No jobs to process. Select files and try again.".into());
                     }
                 }
                 // Toggle dry run mode
@@ -272,11 +301,9 @@ fn handle_key_event(app: &mut App, key: KeyEvent, options: &Options) {
                 (KeyCode::Char(' '), KeyModifiers::NONE) | (KeyCode::Enter, KeyModifiers::NONE) => {
                     if app.state.active_panel == crate::tui_app::ActivePanel::Sets {
                         if let Some(selected_item) = app.state.display_list.get(app.state.selected_display_list_index) {
-                            // Get the file path for single files, or all file paths for a set
                             match selected_item {
                                 crate::tui_app::DisplayListItem::SetEntry { original_group_index, original_set_index_in_group, file_count_in_set, .. } => {
                                     let paths: Vec<PathBuf> = if *file_count_in_set == 1 {
-                                        // Single file
                                         app.state.grouped_data
                                             .get(*original_group_index)
                                             .and_then(|group| group.sets.get(*original_set_index_in_group))
@@ -284,16 +311,34 @@ fn handle_key_event(app: &mut App, key: KeyEvent, options: &Options) {
                                             .map(|f| vec![f.path.clone()])
                                             .unwrap_or_default()
                                     } else {
-                                        // All files in set
                                         app.state.grouped_data
                                             .get(*original_group_index)
                                             .and_then(|group| group.sets.get(*original_set_index_in_group))
                                             .map(|set| set.files.iter().map(|f| f.path.clone()).collect())
                                             .unwrap_or_default()
                                     };
+                                    let dest_path = app.state.destination_path.clone();
                                     for path in paths {
                                         if !app.state.selected_left_panel.remove(&path) {
-                                            app.state.selected_left_panel.insert(path);
+                                            app.state.selected_left_panel.insert(path.clone());
+                                            // Add job for this file
+                                            if let Some(dest_path) = &dest_path {
+                                                for group in &app.state.grouped_data {
+                                                    for set in &group.sets {
+                                                        if let Some(file_info) = set.files.iter().find(|f| f.path == path) {
+                                                            if !app.state.jobs.iter().any(|j| j.file_info.path == file_info.path && matches!(j.action, crate::tui_app::ActionType::Copy(_))) {
+                                                                app.state.jobs.push(crate::tui_app::Job {
+                                                                    action: crate::tui_app::ActionType::Copy(dest_path.clone()),
+                                                                    file_info: file_info.clone(),
+                                                                });
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        } else {
+                                            // Remove job for this file
+                                            app.state.jobs.retain(|j| j.file_info.path != path);
                                         }
                                     }
                                 }
@@ -326,10 +371,33 @@ fn handle_key_event(app: &mut App, key: KeyEvent, options: &Options) {
                             }
                         }
                         let all_selected = all_paths.iter().all(|p| app.state.selected_left_panel.contains(p));
+                        let dest_path = app.state.destination_path.clone();
                         if all_selected {
-                            for p in all_paths { app.state.selected_left_panel.remove(&p); }
+                            for p in all_paths {
+                                app.state.selected_left_panel.remove(&p);
+                                app.state.jobs.retain(|j| j.file_info.path != p);
+                            }
                         } else {
-                            for p in all_paths { app.state.selected_left_panel.insert(p); }
+                            for p in all_paths {
+                                if !app.state.selected_left_panel.contains(&p) {
+                                    app.state.selected_left_panel.insert(p.clone());
+                                    // Add job for this file
+                                    if let Some(dest_path) = &dest_path {
+                                        for group in &app.state.grouped_data {
+                                            for set in &group.sets {
+                                                if let Some(file_info) = set.files.iter().find(|f| f.path == p) {
+                                                    if !app.state.jobs.iter().any(|j| j.file_info.path == file_info.path && matches!(j.action, crate::tui_app::ActionType::Copy(_))) {
+                                                        app.state.jobs.push(crate::tui_app::Job {
+                                                            action: crate::tui_app::ActionType::Copy(dest_path.clone()),
+                                                            file_info: file_info.clone(),
+                                                        });
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }

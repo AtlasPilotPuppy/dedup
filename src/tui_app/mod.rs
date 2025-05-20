@@ -314,7 +314,7 @@ impl App {
         app.state.is_copy_missing_mode = true;
         app.state.status_message =
             Some("Copy Missing Mode - Preparing to scan for files to copy...".to_string());
-
+            
         // Initialize destination to the target directory if specified
         if let Some(target) = &options.target {
             app.state.destination_path = Some(target.clone());
@@ -1942,10 +1942,10 @@ impl App {
                 .get(self.state.selected_display_list_index)
             {
                 match item {
-                    DisplayListItem::SetEntry {
-                        original_group_index,
+                    DisplayListItem::SetEntry { 
+                        original_group_index, 
                         original_set_index_in_group,
-                        ..
+                        .. 
                     } => {
                         // Get the actual file from the grouped data
                         if let Some(group) = self.state.grouped_data.get(*original_group_index) {
@@ -1958,13 +1958,13 @@ impl App {
                                             action: ActionType::Copy(dest_path.clone()),
                                             file_info: file.clone(),
                                         });
-
+                                        
                                         self.state.status_message = Some(format!(
                                             "Added job: Copy {} to {}",
                                             file.path.display(),
                                             dest_path.display()
                                         ));
-
+                                        
                                         // Switch to jobs panel to show the new job
                                         self.state.active_panel = ActivePanel::Jobs;
                                         self.state.selected_job_index = self.state.jobs.len() - 1;
@@ -1983,11 +1983,11 @@ impl App {
                         // Folders cannot be copied directly, must select a file
                         self.state.status_message =
                             Some("Please select a specific file to copy".to_string());
-                    }
                 }
             }
         }
     }
+}
 
     // Add this new method
     pub fn start_job_execution(&mut self, _options: &Options) {
@@ -1996,8 +1996,8 @@ impl App {
             self.state
                 .log_messages
                 .push("No jobs to process.".to_string());
-            return;
-        }
+        return;
+    }
 
         // Set the dry_run flag based on app state
         let dry_run_mode = self.state.dry_run;
@@ -2089,7 +2089,7 @@ impl App {
                                 .push(format!("ERROR during update: {}", e));
                         }
                     }
-                } else {
+        } else {
                     // Use regular copy for all files
                     match crate::file_utils::copy_missing_files(&owned_files, dest, dry_run_mode) {
                         Ok((count, logs)) => {
@@ -2131,7 +2131,7 @@ impl App {
                     Err(e) => {
                         fail_count += files.len();
                         self.state
-                            .log_messages
+            .log_messages
                             .push(format!("ERROR during move: {}", e));
                     }
                 }
